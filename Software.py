@@ -169,10 +169,19 @@ class SheinApp(tk.Tk):
         self._stop_publish=False      # 停止上品标志
         self._driver_ready=False      # 驱动预热完成标志
         self._build_ui(); self._apply_styles()
-        # 程序启动后立即在后台预热 ChromeDriver（下载/缓存驱动）
-        # 这样用户点击「登录 SHEIN」时无需等待
-        if SELENIUM_OK:
-            pass  # 可选：在此启动后台线程预热 driver
+
+    def _warmup_chrome(self):
+        """后台预热 Chrome，程序启动时自动运行。"""
+        try:
+            self._pub_log("后台预热 Chrome 中...")
+            pub = SheinPublisher(log_cb=self._pub_log)
+            pub.start_browser()
+            self._shein_publisher = pub
+            self._driver_ready = True
+            self._pub_log("Chrome 已预热完成，可直接使用")
+        except Exception as e:
+            self._pub_log("预热失败: {}".format(str(e)[:50]))
+            self._driver_ready = False
 
     def _build_ui(self):
         self._build_topbar()
@@ -192,7 +201,7 @@ class SheinApp(tk.Tk):
         bf=tk.Frame(bar,bg=BG_PANEL); bf.pack(side="right",padx=20,pady=10)
         self._btn(bf,"导入 ASIN 文本",ACCENT,self._import_txt).pack(side="left",padx=5)
         self._btn(bf,"抓取选中商品","#2563eb",self._fetch_sel).pack(side="left",padx=5)
-        # self._btn(bf,"开始上品","#7c3aed",self._start_publish).pack(side="left",padx=5)
+        self._btn(bf,"开始上品","#7c3aed",self._open_publish_page).pack(side="left",padx=5)
         self._btn(bf,"停止","#dc2626",self._stop_publish_action).pack(side="left",padx=5)
         self._btn(bf,"登录 SHEIN","#059669",self._open_shein).pack(side="left",padx=5)
 
@@ -333,10 +342,16 @@ class SheinApp(tk.Tk):
             self.select_all_var.set(cnt==len(self.asin_vars))
 
     def _open_shein(self):
-        """打开 SHEIN 登录页面。"""
+        """打开 SHEIN 登录页面（用系统默认浏览器，无需驱动）。"""
         webbrowser.open(SHEIN_LOGIN_URL)
-        if hasattr(self, "status_lbl"):
-            self.status_lbl.config(text="已在浏览器中打开 SHEIN 登录页")
+        self.status_lbl.config(text='已在浏览器中打开 SHEIN 登录页，请手动登录')
+        messagebox.showinfo('提示', '已在浏览器中打开 SHEIN 登录页\n\n请手动登录，登录完成后点击【开始上品】')
+
+    def _open_publish_page(self):
+        """打开 SHEIN 商品发布页面（用系统默认浏览器，无需驱动）。"""
+        webbrowser.open(SHEIN_PUBLISH_URL)
+        self.status_lbl.config(text='已在浏览器中打开商品发布页')
+        messagebox.showinfo('提示', '已在浏览器中打开商品发布页\n\n请确保已登录 SHEIN 后台')
 
     def _fetch_sel(self):
         sel=[a for a,v in self.asin_vars.items() if v.get()]
@@ -588,18 +603,36 @@ class SheinPublisher:
 
     # ── 查找本地已缓存的 chromedriver（跳过联网检查）
     def start_browser(self):
-        """启动 Chrome 浏览器。先尝试连接已有实例，否则新建。"""
-        # 先尝试连接已有的 Chrome 调试端口
-        try:
-            _o = Options()
-            _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(self.DEBUG_PORT))
-            _d = webdriver.Chrome(options=_o)
-            _d.current_url
-            self.driver = _d
+        """启动 Chrome。优先连接已有实例，其次用本地缓存驱动，最后才联网下载。"""
+        import glob as _glob
+        import shutil as _shutil
+        _t0 = time.time()
+
+        # 策略0：连接已有 Chrome 调试端口（秒级，超时0.5秒跳过）
+        self.log("[DEBUG] 尝试连接已有 Chrome (0.5s超时)...")
+        import threading as _th
+        _conn_result = [None]
+        def _try_connect():
+            try:
+                _o = Options()
+                _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(self.DEBUG_PORT))
+                _d = webdriver.Chrome(options=_o)
+                _d.current_url
+                _conn_result[0] = _d
+            except Exception as _e:
+                self.log("[DEBUG] 连接失败: {}".format(str(_e)[:40]))
+        _conn_thread = _th.Thread(target=_try_connect, daemon=True)
+        _conn_thread.start()
+        _conn_thread.join(timeout=0.5)  # 最多等0.5秒
+        if _conn_result[0] is not None:
+            self.driver = _conn_result[0]
             self.wait = WebDriverWait(self.driver, 20)
+            _t1 = time.time()
+            self.log("[OK] 已连接到现有 Chrome ({:.1f}s)".format(_t1 - _t0))
             return
-        except Exception:
-            pass
+        else:
+            self.log("[DEBUG] 连接超时或失败，启动新 Chrome...")
+
         opts = Options()
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_argument("--no-sandbox")
@@ -611,21 +644,204 @@ class SheinPublisher:
         opts.add_argument("--mute-audio")
         opts.add_argument("--password-store=basic")
         opts.add_argument("--disable-background-networking")
-        opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+        opts.add_argument("--disk-cache-size=0")
+        opts.add_argument("--media-cache-size=0")
+        opts.add_argument("--disable-application-cache")
+        opts.add_argument("--disable-infobars")
+        opts.add_argument("--disable-notifications")
+        opts.add_argument("--disable-component-extensions-with-background-pages")
+        opts.add_argument("--disable-default-apps")
+        opts.add_argument("--disable-preconnect")
+        opts.add_argument("--disable-sync")
+        opts.add_argument("--metrics-recording-only")
+        opts.add_argument("--mute-audio")
+        opts.add_argument("--no-default-browser-check")
+        opts.add_argument("--no-pings")
+        opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging", "enable-features"])
         opts.add_experimental_option("useAutomationExtension", False)
+        opts.add_experimental_option("w3c", False)
         opts.add_argument("--remote-debugging-port={}".format(self.DEBUG_PORT))
-        _profile = os.path.join(os.path.expanduser("~"), ".shein_tool", "chrome_profile")
+
+        import tempfile as _tmp
+        _profile = os.path.join(_tmp.gettempdir(), ".shein_chrome")
         os.makedirs(_profile, exist_ok=True)
         opts.add_argument("--user-data-dir={}".format(_profile))
-        self.driver = webdriver.Chrome(options=opts)
-        try:
-            self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
-                {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"})
-        except Exception:
-            pass
-        self.wait = WebDriverWait(self.driver, 20)
+
+        def _cdp_hide_webdriver(drv):
+            try:
+                # 隐藏 navigator.webdriver
+                drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                    "source": """
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: () => undefined
+                        });
+                        Object.defineProperty(navigator, 'plugins', {
+                            get: () => [1, 2, 3, 4, 5]
+                        });
+                        Object.defineProperty(navigator, 'languages', {
+                            get: () => ['zh-CN', 'zh', 'en-US', 'en']
+                        });
+                        window.chrome = {
+                            runtime: {}
+                        };
+                    """
+                })
+            except Exception:
+                pass
+
+        # 策略1：查找本地已缓存的 chromedriver（无需联网）
+        _candidates = []
+        self.log("[DEBUG] 查找本地 chromedriver...")
+        _t_search = time.time()
+        # 先尝试 PATH 里的 chromedriver（最快）
+        _path_driver = _shutil.which("chromedriver")
+        if _path_driver:
+            self.log("[DEBUG] 找到 PATH chromedriver: {}".format(_path_driver))
+            _candidates.append(_path_driver)
+        # 再查找常见缓存目录
+        for _base in [
+            os.path.join(os.path.expanduser("~"), ".cache", "selenium"),
+            os.path.join(os.path.expanduser("~"), ".wdm", "drivers", "chromedriver"),
+        ]:
+            if os.path.isdir(_base):
+                _found = _glob.glob(os.path.join(_base, "**", "chromedriver.exe"), recursive=True)
+                if _found:
+                    self.log("[DEBUG] 找到 {} 个缓存 chromedriver".format(len(_found)))
+                _candidates += _found
+        _candidates += [
+            r"C:\chromedriver\chromedriver.exe",
+            r"C:\chromedriver-win64\chromedriver.exe",
+        ]
+        _t_search_end = time.time()
+        self.log("[DEBUG] 查找耗时 {:.1f}s, 找到 {} 个候选".format(_t_search_end - _t_search, len(_candidates)))
+
+        for _i, _cp in enumerate(sorted(set([p for p in _candidates if os.path.isfile(p)]), key=os.path.getmtime, reverse=True)):
+            try:
+                self.log("[DEBUG] 尝试第 {} 个驱动: {}".format(_i+1, os.path.basename(_cp)))
+                _t_start = time.time()
+                self.driver = webdriver.Chrome(service=Service(_cp), options=opts)
+                _t_end = time.time()
+                self.log("[OK] 使用本地驱动 ({:.1f}s)".format(_t_end - _t_start))
+                self.wait = WebDriverWait(self.driver, 20)
+                _cdp_hide_webdriver(self.driver)
+                _t_total = time.time()
+                self.log("[TOTAL] Chrome 启动完成 ({:.1f}s)".format(_t_total - _t0))
+                return
+            except Exception as _e:
+                self.log("[DEBUG] 驱动失败: {}".format(str(_e)[:60]))
+                self.driver = None
+
+        # 策略2：如果本地驱动都失败，提示用户手动下载驱动
+        self.log("[ERROR] 未找到匹配的本地 chromedriver")
+        raise RuntimeError(
+            "无法启动 Chrome！\n\n"
+            "原因：找不到与当前 Chrome 版本匹配的 chromedriver\n\n"
+            "解决方案：\n"
+            "1. 下载与你的 Chrome 版本匹配的 chromedriver\n"
+            "   访问: https://googlechromelabs.github.io/chrome-for-testing/\n"
+            "2. 将 chromedriver.exe 放在以下任一位置：\n"
+            "   - C:\\chromedriver\\\n"
+            "   - 项目目录\n"
+            "   - 系统 PATH 环境变量中\n"
+            "3. 重新运行程序"
+        )
+
     def open_login(self):
         self.driver.get(self.LOGIN_URL)
+
+    def goto_publish_page(self):
+        """
+        从 SHEIN 首页导航到「商品」->「商品发布」页面。
+        返回 True 表示成功，False 表示失败。
+        """
+        driver = self.driver
+        HOME_URL = "https://www.geiwohuo.com/#/oversea-home"
+        PUBLISH_URL = "https://sso.geiwohuo.com/#/spmc/commodities-category/followsales-pro/list?externalSystem=spmp"
+
+        self.log("导航到首页...")
+        driver.get(HOME_URL)
+        time.sleep(5)
+
+        def _click_text(text, timeout=10):
+            """在页面中查找包含指定文字的元素并点击。"""
+            tags = ["span", "a", "li", "div", "button", "p"]
+            end = time.time() + timeout
+            while time.time() < end:
+                for tag in tags:
+                    for el in driver.find_elements(By.TAG_NAME, tag):
+                        try:
+                            t = el.text.strip()
+                            if t == text and el.is_displayed():
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                                time.sleep(0.3)
+                                driver.execute_script("arguments[0].click();", el)
+                                self.log(f"已点击「{text}」")
+                                return True
+                        except Exception:
+                            continue
+                # 也尝试 XPath 含包匹配
+                for xp in [
+                    f"//*[normalize-space(text())='{text}']",
+                    f"//*[contains(text(),'{text}')]",
+                ]:
+                    try:
+                        els = driver.find_elements(By.XPATH, xp)
+                        for el in els:
+                            if el.is_displayed():
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                                time.sleep(0.3)
+                                driver.execute_script("arguments[0].click();", el)
+                                self.log(f"已点击「{text}」 (xpath)")
+                                return True
+                    except Exception:
+                        continue
+                time.sleep(1)
+            return False
+
+        original_handles = set(driver.window_handles)
+
+        # 策略1：直接导航到商品发布 URL
+        self.log("尝试直接导航到商品发布页...")
+        try:
+            driver.get(PUBLISH_URL)
+            time.sleep(3)
+            cur = driver.current_url
+            if "spmc" in cur or "followsales" in cur or "commodities" in cur:
+                self.log("已直接打开商品发布页")
+                return True
+        except Exception as e:
+            self.log(f"直接导航失败: {e}")
+
+        # 策略2：回到首页，点击菜单
+        self.log("导航到首页并点击菜单...")
+        driver.get(HOME_URL)
+        time.sleep(4)
+
+        if not _click_text("商品", timeout=10):
+            self.log("未找到「商品」菜单")
+            # 最后参考：直接打开 URL
+            driver.get(PUBLISH_URL)
+            time.sleep(2)
+            return True
+        time.sleep(2)
+
+        if not _click_text("商品发布", timeout=8):
+            self.log("未找到「商品发布」子菜单")
+            driver.get(PUBLISH_URL)
+            time.sleep(2)
+            return True
+
+        # 等待新窗口或页面跳转
+        for _ in range(20):
+            time.sleep(0.5)
+            new_handles = set(driver.window_handles)
+            if new_handles - original_handles:
+                driver.switch_to.window((new_handles - original_handles).pop())
+                self.log("已切换到商品发布页面")
+                time.sleep(2)
+                return True
+        return True
 
     def is_alive(self):
         """检测浏览器是否还在运行。"""
@@ -634,6 +850,14 @@ class SheinPublisher:
             return True
         except Exception:
             return False
+
+    def ensure_alive(self):
+        """如果浏览器已关闭，自动重新启动。"""
+        if self.driver is None or not self.is_alive():
+            self.log("浏览器已关闭，正在重新启动...")
+            self.start_browser()
+            return False  # 表示重新启动了
+        return True  # 表示已经在运行
 
     def is_logged_in(self):
         """检测当前是否已登录。"""
