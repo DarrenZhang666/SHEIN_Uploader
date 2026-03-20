@@ -168,7 +168,31 @@ class SheinApp(tk.Tk):
         self._shein_publisher=None   # 持久化浏览器实例
         self._stop_publish=False      # 停止上品标志
         self._driver_ready=False      # 驱动预热完成标志
+        
+        # 初始化日志文件
+        self._init_log_file()
+        
         self._build_ui(); self._apply_styles()
+
+    def _init_log_file(self):
+        """初始化日志文件（保存到桌面）。"""
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        os.makedirs(desktop, exist_ok=True)
+        log_dir = os.path.join(desktop, "SHEIN_Logs")
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self.log_file = os.path.join(log_dir, "log_{}.txt".format(timestamp))
+        self._write_log("=== SHEIN 商品采集工具日志 ===")
+        self._write_log("启动时间: {}".format(time.strftime("%Y-%m-%d %H:%M:%S")))
+        self._write_log("")
+
+    def _write_log(self, msg):
+        """写入日志文件。"""
+        try:
+            with open(self.log_file, 'a', encoding='utf-8') as f:
+                f.write("[{}] {}\n".format(time.strftime("%H:%M:%S"), msg))
+        except Exception:
+            pass
 
     def _warmup_chrome(self):
         """后台预热 Chrome，程序启动时自动运行。"""
@@ -202,6 +226,7 @@ class SheinApp(tk.Tk):
         self._btn(bf,"导入 ASIN 文本",ACCENT,self._import_txt).pack(side="left",padx=5)
         self._btn(bf,"抓取选中商品","#2563eb",self._fetch_sel).pack(side="left",padx=5)
         self._btn(bf,"开始上品","#7c3aed",self._open_publish_page).pack(side="left",padx=5)
+        self._btn(bf,"抓取页面信息","#8b5cf6",self._dump_page_info_btn).pack(side="left",padx=5)
         self._btn(bf,"停止","#dc2626",self._stop_publish_action).pack(side="left",padx=5)
         self._btn(bf,"登录 SHEIN","#059669",self._open_shein).pack(side="left",padx=5)
 
@@ -342,16 +367,109 @@ class SheinApp(tk.Tk):
             self.select_all_var.set(cnt==len(self.asin_vars))
 
     def _open_shein(self):
-        """打开 SHEIN 登录页面（用系统默认浏览器，无需驱动）。"""
-        webbrowser.open(SHEIN_LOGIN_URL)
-        self.status_lbl.config(text='已在浏览器中打开 SHEIN 登录页，请手动登录')
-        messagebox.showinfo('提示', '已在浏览器中打开 SHEIN 登录页\n\n请手动登录，登录完成后点击【开始上品】')
+        """打开 SHEIN 登录页面（用 Chrome 浏览器）。"""
+        self.status_lbl.config(text='正在启动 Chrome...')
+        
+        def _launch_chrome():
+            try:
+                pub = SheinPublisher(log_cb=self._pub_log)
+                
+                # 先尝试连接已打开的 Chrome
+                try:
+                    self.status_lbl.config(text='尝试连接已打开的 Chrome...')
+                    pub._connect_chrome_only()
+                    self._shein_publisher = pub
+                    self.status_lbl.config(text='已连接到 Chrome，打开登录页...')
+                    pub.driver.get(SHEIN_LOGIN_URL)
+                    time.sleep(1)
+                    self.status_lbl.config(text='已打开 SHEIN 登录页，请手动登录')
+                    return
+                except Exception as e:
+                    self._pub_log("[DEBUG] 连接已打开的 Chrome 失败，启动新 Chrome...")
+                
+                # 如果连接失败，启动新 Chrome
+                self.status_lbl.config(text='启动新 Chrome 浏览器...')
+                pub.start_chrome_browser()
+                self._shein_publisher = pub
+                self.status_lbl.config(text='Chrome 已启动，打开登录页...')
+                pub.driver.get(SHEIN_LOGIN_URL)
+                time.sleep(1)
+                self.status_lbl.config(text='已打开 SHEIN 登录页，请手动登录')
+            except Exception as e:
+                self.status_lbl.config(text='启动失败: ' + str(e)[:40])
+                self.after(0, lambda err=str(e): messagebox.showerror('失败', err[:100]))
+        
+        threading.Thread(target=_launch_chrome, daemon=True).start()
 
     def _open_publish_page(self):
-        """打开 SHEIN 商品发布页面（用系统默认浏览器，无需驱动）。"""
-        webbrowser.open(SHEIN_PUBLISH_URL)
-        self.status_lbl.config(text='已在浏览器中打开商品发布页')
-        messagebox.showinfo('提示', '已在浏览器中打开商品发布页\n\n请确保已登录 SHEIN 后台')
+        """打开 SHEIN 商品发布页面，复用已打开的 Chrome 浏览器。"""
+        # 如果已经有 Chrome 实例，直接用
+        if self._shein_publisher is not None and self._shein_publisher.is_alive():
+            self.status_lbl.config(text='已有 Chrome 实例，打开商品发布页...')
+            try:
+                self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
+                time.sleep(2)
+                self.status_lbl.config(text='已打开商品发布页，可以进行后续操作')
+                return
+            except Exception as e:
+                self._pub_log('打开页面失败: ' + str(e)[:40])
+                self._shein_publisher = None
+        
+        # 否则尝试连接已打开的 Chrome
+        self.status_lbl.config(text='正在连接到 Chrome 浏览器...')
+        
+        # 创建 Selenium 实例以便后续操作
+        def _init_selenium():
+            try:
+                pub = SheinPublisher(log_cb=self._pub_log)
+                
+                # 先尝试连接已打开的 Chrome
+                try:
+                    self.status_lbl.config(text='尝试连接已打开的 Chrome...')
+                    pub._connect_chrome_only()
+                    self._shein_publisher = pub
+                    self.status_lbl.config(text='已连接到已打开的 Chrome')
+                    # 导航到商品发布页
+                    pub.driver.get(SHEIN_PUBLISH_URL)
+                    time.sleep(2)
+                    self.status_lbl.config(text='已打开商品发布页，可以进行后续操作')
+                    return
+                except Exception as e:
+                    self._pub_log("[DEBUG] 连接已打开的 Chrome 失败: {}".format(str(e)[:40]))
+                
+                # 如果连接失败，启动新 Chrome
+                self.status_lbl.config(text='启动新 Chrome 浏览器...')
+                pub.start_chrome_browser()
+                self._shein_publisher = pub
+                self.status_lbl.config(text='Chrome 已启动，正在打开商品发布页...')
+                pub.driver.get(SHEIN_PUBLISH_URL)
+                time.sleep(2)
+                self.status_lbl.config(text='已打开商品发布页，可以进行后续操作')
+            except Exception as e:
+                self.status_lbl.config(text='操作失败: ' + str(e)[:40])
+                self._pub_log('操作失败: ' + str(e))
+                messagebox.showerror('失败', str(e)[:100])
+        
+        threading.Thread(target=_init_selenium, daemon=True).start()
+
+    def _dump_page_info_btn(self):
+        """抓取当前浏览器页面的元素信息，帮助定位'识图发品'按钮。"""
+        if self._shein_publisher is None or not self._shein_publisher.is_alive():
+            messagebox.showwarning('提示', '浏览器未打开，请先点击【开始上品】')
+            return
+        
+        self.status_lbl.config(text='正在抓取页面信息...')
+        
+        def _do_dump():
+            try:
+                info = self._shein_publisher.dump_page_elements()
+                self.after(0, lambda: self.status_lbl.config(text='页面信息已抓取，查看日志'))
+                # 显示信息窗口
+                self.after(0, lambda i=info: messagebox.showinfo('页面元素信息', i[:500] + '\n...(更多信息见日志)'))
+            except Exception as e:
+                self.after(0, lambda err=str(e): self.status_lbl.config(text='抓取失败: ' + err[:40]))
+        
+        threading.Thread(target=_do_dump, daemon=True).start()
 
     def _fetch_sel(self):
         sel=[a for a,v in self.asin_vars.items() if v.get()]
@@ -438,8 +556,11 @@ class SheinApp(tk.Tk):
         if hasattr(self,"img_lbl"): self.img_lbl.config(image=photo,text="")
 
     def _pub_log(self, msg):
-        """发布日志回调，可在子线程中安全调用。"""
+        """发布日志回调，可在子线程中安全调用。同时保存到日志文件。"""
         m = str(msg)[:100] if msg else ""
+        # 写入日志文件
+        self._write_log(msg)
+        # 更新状态栏
         if hasattr(self, "status_lbl"):
             self.after(0, lambda m=m: self.status_lbl.config(text=m))
   
@@ -588,6 +709,110 @@ class SheinPublisher:
         self.wait   = None
         self.log    = log_cb or print
 
+    def _connect_chrome_only(self):
+        """只尝试连接已打开的 Chrome，不启动新浏览器。"""
+        self.log("[DEBUG] 尝试连接已打开的 Chrome (1s超时)...")
+        import threading as _th
+        _conn_result = [None]
+        _error = [None]
+        
+        def _try_connect():
+            try:
+                _o = Options()
+                _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(self.DEBUG_PORT))
+                _d = webdriver.Chrome(options=_o)
+                _d.current_url
+                _conn_result[0] = _d
+            except Exception as e:
+                _error[0] = str(e)[:60]
+        
+        _conn_thread = _th.Thread(target=_try_connect, daemon=True)
+        _conn_thread.start()
+        _conn_thread.join(timeout=1)  # 最多等1秒
+        
+        if _conn_result[0] is not None:
+            self.driver = _conn_result[0]
+            self.wait = WebDriverWait(self.driver, 20)
+            self.log("[OK] 已连接到 Chrome")
+            return True
+        else:
+            if _error[0]:
+                self.log("[DEBUG] 连接失败: {}".format(_error[0]))
+            else:
+                self.log("[DEBUG] 连接超时")
+            raise RuntimeError("无法连接到 Chrome 浏览器")
+
+    def start_chrome_browser(self):
+        """启动 Chrome 浏览器（用调试模式，保存用户数据）。"""
+        import shutil as _shutil
+        self.log("[DEBUG] 启动 Chrome 浏览器...")
+        
+        # 查找 chromedriver
+        _candidates = []
+        _path_driver = _shutil.which("chromedriver")
+        if _path_driver:
+            self.log("[DEBUG] 找到 PATH chromedriver")
+            _candidates.append(_path_driver)
+        
+        _candidates += [
+            r"C:\chromedriver\chromedriver.exe",
+            r"C:\chromedriver-win64\chromedriver.exe",
+        ]
+        
+        # 设置用户数据目录（保存登录信息、cookies 等）
+        user_data_dir = os.path.join(os.path.expanduser("~"), ".shein_chrome_profile")
+        os.makedirs(user_data_dir, exist_ok=True)
+        
+        opts = Options()
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--mute-audio")
+        opts.add_argument("--remote-debugging-port={}".format(self.DEBUG_PORT))
+        opts.add_argument("--user-data-dir={}".format(user_data_dir))
+        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        opts.add_experimental_option("useAutomationExtension", False)
+        
+        for _cp in [p for p in _candidates if os.path.isfile(p)]:
+            try:
+                self.log("[DEBUG] 使用 chromedriver: {}".format(os.path.basename(_cp)))
+                self.driver = webdriver.Chrome(service=Service(_cp), options=opts)
+                self.wait = WebDriverWait(self.driver, 20)
+                self.log("[OK] Chrome 启动成功")
+                return
+            except Exception as e:
+                self.log("[DEBUG] 启动失败: {}".format(str(e)[:60]))
+        
+        # 如果找不到驱动，尝试用默认方式启动
+        try:
+            self.log("[DEBUG] 尝试用默认方式启动 Chrome (30s超时)...")
+            import threading as _th
+            _result = [None]
+            _error = [None]
+            
+            def _start_default():
+                try:
+                    _result[0] = webdriver.Chrome(options=opts)
+                except Exception as e:
+                    _error[0] = str(e)
+            
+            _thread = _th.Thread(target=_start_default, daemon=True)
+            _thread.start()
+            _thread.join(timeout=30)
+            
+            if _result[0] is not None:
+                self.driver = _result[0]
+                self.wait = WebDriverWait(self.driver, 20)
+                self.log("[OK] Chrome 启动成功")
+                return
+            elif _error[0]:
+                raise RuntimeError("启动失败: {}".format(_error[0][:100]))
+            else:
+                raise RuntimeError("启动超时（30秒）。请确保已安装 Chrome 浏览器和 chromedriver")
+        except Exception as e:
+            raise RuntimeError("无法启动 Chrome: {}".format(str(e)[:100]))
+
     # ── 尝试连接已存在的 Chrome 实例
     def try_connect_existing(self):
         """尝试连接已在运行的 Chrome 实例（通过 debugging port）。"""
@@ -603,37 +828,38 @@ class SheinPublisher:
 
     # ── 查找本地已缓存的 chromedriver（跳过联网检查）
     def start_browser(self):
-        """启动 Chrome。优先连接已有实例，其次用本地缓存驱动，最后才联网下载。"""
+        """启动浏览器。优先用 Edge，其次用 Chrome。"""
         import glob as _glob
         import shutil as _shutil
         _t0 = time.time()
 
-        # 策略0：连接已有 Chrome 调试端口（秒级，超时0.5秒跳过）
-        self.log("[DEBUG] 尝试连接已有 Chrome (0.5s超时)...")
+        # 策略0：连接已有 Edge 调试端口（秒级，超时0.5秒跳过）
+        self.log("[DEBUG] 尝试连接已有 Edge (0.5s超时)...")
         import threading as _th
         _conn_result = [None]
         def _try_connect():
             try:
-                _o = Options()
+                _o = EdgeOptions()
                 _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(self.DEBUG_PORT))
-                _d = webdriver.Chrome(options=_o)
+                _d = webdriver.Edge(options=_o)
                 _d.current_url
                 _conn_result[0] = _d
             except Exception as _e:
-                self.log("[DEBUG] 连接失败: {}".format(str(_e)[:40]))
+                self.log("[DEBUG] Edge 连接失败: {}".format(str(_e)[:40]))
         _conn_thread = _th.Thread(target=_try_connect, daemon=True)
         _conn_thread.start()
-        _conn_thread.join(timeout=0.5)  # 最多等0.5秒
+        _conn_thread.join(timeout=0.5)
         if _conn_result[0] is not None:
             self.driver = _conn_result[0]
             self.wait = WebDriverWait(self.driver, 20)
             _t1 = time.time()
-            self.log("[OK] 已连接到现有 Chrome ({:.1f}s)".format(_t1 - _t0))
+            self.log("[OK] 已连接到现有 Edge ({:.1f}s)".format(_t1 - _t0))
             return
         else:
-            self.log("[DEBUG] 连接超时或失败，启动新 Chrome...")
+            self.log("[DEBUG] Edge 连接超时或失败，启动新 Edge...")
 
-        opts = Options()
+        # Edge 选项
+        opts = EdgeOptions()
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
@@ -649,103 +875,70 @@ class SheinPublisher:
         opts.add_argument("--disable-application-cache")
         opts.add_argument("--disable-infobars")
         opts.add_argument("--disable-notifications")
-        opts.add_argument("--disable-component-extensions-with-background-pages")
-        opts.add_argument("--disable-default-apps")
-        opts.add_argument("--disable-preconnect")
-        opts.add_argument("--disable-sync")
-        opts.add_argument("--metrics-recording-only")
-        opts.add_argument("--mute-audio")
-        opts.add_argument("--no-default-browser-check")
-        opts.add_argument("--no-pings")
-        opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging", "enable-features"])
-        opts.add_experimental_option("useAutomationExtension", False)
-        opts.add_experimental_option("w3c", False)
         opts.add_argument("--remote-debugging-port={}".format(self.DEBUG_PORT))
+        opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+        opts.add_experimental_option("useAutomationExtension", False)
 
         import tempfile as _tmp
-        _profile = os.path.join(_tmp.gettempdir(), ".shein_chrome")
+        _profile = os.path.join(_tmp.gettempdir(), ".shein_edge")
         os.makedirs(_profile, exist_ok=True)
         opts.add_argument("--user-data-dir={}".format(_profile))
 
         def _cdp_hide_webdriver(drv):
             try:
-                # 隐藏 navigator.webdriver
                 drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                     "source": """
                         Object.defineProperty(navigator, 'webdriver', {
                             get: () => undefined
                         });
-                        Object.defineProperty(navigator, 'plugins', {
-                            get: () => [1, 2, 3, 4, 5]
-                        });
-                        Object.defineProperty(navigator, 'languages', {
-                            get: () => ['zh-CN', 'zh', 'en-US', 'en']
-                        });
-                        window.chrome = {
-                            runtime: {}
-                        };
                     """
                 })
             except Exception:
                 pass
 
-        # 策略1：查找本地已缓存的 chromedriver（无需联网）
+        # 查找本地 Edge 驱动
         _candidates = []
-        self.log("[DEBUG] 查找本地 chromedriver...")
-        _t_search = time.time()
-        # 先尝试 PATH 里的 chromedriver（最快）
-        _path_driver = _shutil.which("chromedriver")
+        self.log("[DEBUG] 查找本地 Edge 驱动...")
+        _path_driver = _shutil.which("msedgedriver")
         if _path_driver:
-            self.log("[DEBUG] 找到 PATH chromedriver: {}".format(_path_driver))
+            self.log("[DEBUG] 找到 PATH msedgedriver: {}".format(_path_driver))
             _candidates.append(_path_driver)
-        # 再查找常见缓存目录
-        for _base in [
-            os.path.join(os.path.expanduser("~"), ".cache", "selenium"),
-            os.path.join(os.path.expanduser("~"), ".wdm", "drivers", "chromedriver"),
-        ]:
-            if os.path.isdir(_base):
-                _found = _glob.glob(os.path.join(_base, "**", "chromedriver.exe"), recursive=True)
-                if _found:
-                    self.log("[DEBUG] 找到 {} 个缓存 chromedriver".format(len(_found)))
-                _candidates += _found
+        
         _candidates += [
-            r"C:\chromedriver\chromedriver.exe",
-            r"C:\chromedriver-win64\chromedriver.exe",
+            r"C:\msedgedriver\msedgedriver.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedgedriver.exe",
         ]
-        _t_search_end = time.time()
-        self.log("[DEBUG] 查找耗时 {:.1f}s, 找到 {} 个候选".format(_t_search_end - _t_search, len(_candidates)))
 
-        for _i, _cp in enumerate(sorted(set([p for p in _candidates if os.path.isfile(p)]), key=os.path.getmtime, reverse=True)):
+        for _cp in [p for p in _candidates if os.path.isfile(p)]:
             try:
-                self.log("[DEBUG] 尝试第 {} 个驱动: {}".format(_i+1, os.path.basename(_cp)))
+                self.log("[DEBUG] 尝试 Edge 驱动: {}".format(os.path.basename(_cp)))
                 _t_start = time.time()
-                self.driver = webdriver.Chrome(service=Service(_cp), options=opts)
+                self.driver = webdriver.Edge(service=EdgeService(_cp), options=opts)
                 _t_end = time.time()
-                self.log("[OK] 使用本地驱动 ({:.1f}s)".format(_t_end - _t_start))
+                self.log("[OK] 使用 Edge 驱动 ({:.1f}s)".format(_t_end - _t_start))
                 self.wait = WebDriverWait(self.driver, 20)
                 _cdp_hide_webdriver(self.driver)
                 _t_total = time.time()
-                self.log("[TOTAL] Chrome 启动完成 ({:.1f}s)".format(_t_total - _t0))
+                self.log("[TOTAL] Edge 启动完成 ({:.1f}s)".format(_t_total - _t0))
                 return
             except Exception as _e:
-                self.log("[DEBUG] 驱动失败: {}".format(str(_e)[:60]))
+                self.log("[DEBUG] Edge 驱动失败: {}".format(str(_e)[:60]))
                 self.driver = None
 
-        # 策略2：如果本地驱动都失败，提示用户手动下载驱动
-        self.log("[ERROR] 未找到匹配的本地 chromedriver")
-        raise RuntimeError(
-            "无法启动 Chrome！\n\n"
-            "原因：找不到与当前 Chrome 版本匹配的 chromedriver\n\n"
-            "解决方案：\n"
-            "1. 下载与你的 Chrome 版本匹配的 chromedriver\n"
-            "   访问: https://googlechromelabs.github.io/chrome-for-testing/\n"
-            "2. 将 chromedriver.exe 放在以下任一位置：\n"
-            "   - C:\\chromedriver\\\n"
-            "   - 项目目录\n"
-            "   - 系统 PATH 环境变量中\n"
-            "3. 重新运行程序"
-        )
+        # 如果 Edge 都失败，尝试 Chrome
+        self.log("[DEBUG] Edge 失败，尝试 Chrome...")
+        try:
+            self.driver = webdriver.Chrome(options=Options())
+            self.wait = WebDriverWait(self.driver, 20)
+            _cdp_hide_webdriver(self.driver)
+            self.log("[OK] 使用 Chrome 启动")
+            return
+        except Exception as _e:
+            raise RuntimeError(
+                "无法启动浏览器！\n\n"
+                "请确保已安装 Microsoft Edge 或 Google Chrome\n\n"
+                "错误: {}".format(str(_e)[:100])
+            )
 
     def open_login(self):
         self.driver.get(self.LOGIN_URL)
@@ -851,6 +1044,49 @@ class SheinPublisher:
         except Exception:
             return False
 
+    def upload_image_by_path(self, image_path):
+        """
+        上传图片到商品发布页面。
+        需要用户已在浏览器中打开商品发布页面。
+        """
+        if not os.path.isfile(image_path):
+            self.log("图片文件不存在: {}".format(image_path))
+            return False
+        try:
+            # 查找"识图发品"按钮
+            self.log("查找'识图发品'按钮...")
+            for el in self.driver.find_elements(By.TAG_NAME, "button"):
+                if "识图" in el.text or "发品" in el.text:
+                    self.log("找到按钮: {}".format(el.text))
+                    el.click()
+                    time.sleep(2)
+                    break
+            # 查找文件上传输入框
+            self.log("查找文件上传框...")
+            file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            if file_inputs:
+                file_inputs[0].send_keys(os.path.abspath(image_path))
+                self.log("已上传图片: {}".format(image_path))
+                time.sleep(2)
+                return True
+            else:
+                self.log("未找到文件上传框")
+                return False
+        except Exception as e:
+            self.log("上传失败: {}".format(str(e)))
+            return False
+
+    def get_product_images(self, asin):
+        """获取指定 ASIN 商品的所有图片路径。"""
+        # 这里需要根据你的图片存储方式来实现
+        # 假设图片存储在 ./images/{asin}/ 目录下
+        image_dir = os.path.join(os.path.dirname(__file__), "images", asin)
+        if os.path.isdir(image_dir):
+            images = [os.path.join(image_dir, f) for f in os.listdir(image_dir) 
+                     if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))]
+            return sorted(images)
+        return []
+
     def ensure_alive(self):
         """如果浏览器已关闭，自动重新启动。"""
         if self.driver is None or not self.is_alive():
@@ -895,6 +1131,53 @@ class SheinPublisher:
         except Exception:
             pass
         return False
+
+    def dump_page_elements(self):
+        """
+        抓取当前页面的所有按钮和输入框信息，帮助定位"识图发品"按钮。
+        返回页面元素的详细信息。
+        """
+        try:
+            elements_info = []
+            
+            # 抓取所有按钮
+            buttons = self.driver.find_elements(By.TAG_NAME, "button")
+            elements_info.append("=== 页面按钮 ===")
+            for i, btn in enumerate(buttons):
+                try:
+                    text = btn.text.strip()
+                    if text:
+                        elements_info.append(f"按钮 {i}: {text}")
+                except Exception:
+                    pass
+            
+            # 抓取所有输入框
+            inputs = self.driver.find_elements(By.TAG_NAME, "input")
+            elements_info.append("\n=== 页面输入框 ===")
+            for i, inp in enumerate(inputs):
+                try:
+                    inp_type = inp.get_attribute("type")
+                    placeholder = inp.get_attribute("placeholder")
+                    elements_info.append(f"输入框 {i}: type={inp_type}, placeholder={placeholder}")
+                except Exception:
+                    pass
+            
+            # 抓取所有包含特定文字的元素
+            elements_info.append("\n=== 包含'识图'或'发品'的元素 ===")
+            for el in self.driver.find_elements(By.XPATH, "//*[contains(text(), '识图') or contains(text(), '发品')]"):
+                try:
+                    text = el.text.strip()
+                    tag = el.tag_name
+                    elements_info.append(f"{tag}: {text}")
+                except Exception:
+                    pass
+            
+            info_text = "\n".join(elements_info)
+            self.log(info_text)
+            return info_text
+        except Exception as e:
+            self.log("抓取页面信息失败: {}".format(str(e)))
+            return ""
 
     def quit(self):
         try:
@@ -2323,3 +2606,4 @@ class SheinPublisher:
 if __name__ == "__main__":
     app=SheinApp()
     app.mainloop()
+
