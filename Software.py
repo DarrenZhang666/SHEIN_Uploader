@@ -402,14 +402,26 @@ class SheinApp(tk.Tk):
         threading.Thread(target=_launch_chrome, daemon=True).start()
 
     def _open_publish_page(self):
-        """打开 SHEIN 商品发布页面，复用已打开的 Chrome 浏览器。"""
+        """打开 SHEIN 商品发布页面，自动上传选中商品的图片。"""
+        # 检查是否选中了商品
+        if self.current_asin is None:
+            messagebox.showwarning('提示', '请先在左侧选择一个商品')
+            return
+        
+        # 检查商品是否有图片
+        product_info = self.product_cache.get(self.current_asin)
+        if not product_info or not product_info.get('image_url'):
+            messagebox.showwarning('提示', '该商品没有图片信息，请先抓取商品')
+            return
+        
         # 如果已经有 Chrome 实例，直接用
         if self._shein_publisher is not None and self._shein_publisher.is_alive():
             self.status_lbl.config(text='已有 Chrome 实例，打开商品发布页...')
             try:
                 self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
                 time.sleep(2)
-                self.status_lbl.config(text='已打开商品发布页，可以进行后续操作')
+                self.status_lbl.config(text='正在上传商品图片...')
+                self._auto_upload_image()
                 return
             except Exception as e:
                 self._pub_log('打开页面失败: ' + str(e)[:40])
@@ -432,7 +444,8 @@ class SheinApp(tk.Tk):
                     # 导航到商品发布页
                     pub.driver.get(SHEIN_PUBLISH_URL)
                     time.sleep(2)
-                    self.status_lbl.config(text='已打开商品发布页，可以进行后续操作')
+                    self.status_lbl.config(text='正在上传商品图片...')
+                    self._auto_upload_image()
                     return
                 except Exception as e:
                     self._pub_log("[DEBUG] 连接已打开的 Chrome 失败: {}".format(str(e)[:40]))
@@ -444,13 +457,78 @@ class SheinApp(tk.Tk):
                 self.status_lbl.config(text='Chrome 已启动，正在打开商品发布页...')
                 pub.driver.get(SHEIN_PUBLISH_URL)
                 time.sleep(2)
-                self.status_lbl.config(text='已打开商品发布页，可以进行后续操作')
+                self.status_lbl.config(text='正在上传商品图片...')
+                self._auto_upload_image()
             except Exception as e:
                 self.status_lbl.config(text='操作失败: ' + str(e)[:40])
                 self._pub_log('操作失败: ' + str(e))
-                messagebox.showerror('失败', str(e)[:100])
+                self.after(0, lambda err=str(e): messagebox.showerror('失败', err[:100]))
         
         threading.Thread(target=_init_selenium, daemon=True).start()
+
+    def _auto_upload_image(self):
+        """自动上传商品图片并选择推荐类目（在后台线程中调用）。"""
+        try:
+            if self.current_asin is None or self._shein_publisher is None:
+                return
+            
+            product_info = self.product_cache.get(self.current_asin)
+            if not product_info or not product_info.get('image_url'):
+                return
+            
+            # 点击"识图发品"按钮
+            self.status_lbl.config(text='点击"识图发品"按钮...')
+            if not self._shein_publisher.click_identify_image_button():
+                self.status_lbl.config(text='未找到"识图发品"按钮')
+                return
+            
+            # 下载图片到临时目录
+            image_url = product_info.get('image_url')
+            temp_dir = os.path.join(tempfile.gettempdir(), 'shein_images')
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_image = os.path.join(temp_dir, '{}.jpg'.format(self.current_asin))
+            
+            self.status_lbl.config(text='下载商品图片...')
+            try:
+                response = requests.get(image_url, timeout=10)
+                with open(temp_image, 'wb') as f:
+                    f.write(response.content)
+            except Exception as e:
+                self.status_lbl.config(text='下载图片失败: ' + str(e)[:40])
+                return
+            
+            # 上传图片
+            self.status_lbl.config(text='上传图片到 SHEIN...')
+            if not self._shein_publisher.upload_product_image(temp_image):
+                self.status_lbl.config(text='✗ 图片上传失败')
+                return
+            
+            self.status_lbl.config(text='✓ 图片上传成功，等待识别中...')
+            self._pub_log('图片已上传，等待 SHEIN 识别（5秒）...')
+            
+            # 等待 5 秒让图片识别完成
+            for i in range(5, 0, -1):
+                self.status_lbl.config(text='✓ 图片上传成功，等待识别中... {}s'.format(i))
+                time.sleep(1)
+            
+            # 选择第一个推荐类目
+            self.status_lbl.config(text='选择第一个推荐类目...')
+            if not self._shein_publisher.select_first_category():
+                self.status_lbl.config(text='✗ 选择类目失败')
+                return
+            
+            self.status_lbl.config(text='✓ 已选择推荐类目，点击确认...')
+            time.sleep(1)
+            
+            # 点击"确认，下一步"按钮
+            if self._shein_publisher.click_confirm_button():
+                self.status_lbl.config(text='✓ 商品类目确认成功')
+                self._pub_log('商品 {} 类目确认成功'.format(self.current_asin))
+            else:
+                self.status_lbl.config(text='✗ 点击确认按钮失败')
+        except Exception as e:
+            self.status_lbl.config(text='上传出错: ' + str(e)[:40])
+            self._pub_log('上传出错: ' + str(e))
 
     def _dump_page_info_btn(self):
         """抓取当前浏览器页面的元素信息，帮助定位'识图发品'按钮。"""
@@ -470,6 +548,60 @@ class SheinApp(tk.Tk):
                 self.after(0, lambda err=str(e): self.status_lbl.config(text='抓取失败: ' + err[:40]))
         
         threading.Thread(target=_do_dump, daemon=True).start()
+
+    def _upload_product_image_btn(self):
+        """上传商品图片按钮回调。"""
+        if self._shein_publisher is None or not self._shein_publisher.is_alive():
+            messagebox.showwarning('提示', '浏览器未打开，请先点击【开始上品】')
+            return
+        
+        if self.current_asin is None:
+            messagebox.showwarning('提示', '请先在左侧选择一个商品')
+            return
+        
+        # 获取商品的图片
+        product_info = self.product_cache.get(self.current_asin)
+        if not product_info or not product_info.get('image_url'):
+            messagebox.showwarning('提示', '该商品没有图片信息，请先抓取商品')
+            return
+        
+        self.status_lbl.config(text='正在上传商品图片...')
+        
+        def _do_upload():
+            try:
+                # 点击"识图发品"按钮
+                self.status_lbl.config(text='点击"识图发品"按钮...')
+                if not self._shein_publisher.click_identify_image_button():
+                    self.after(0, lambda: messagebox.showwarning('失败', '未找到"识图发品"按钮'))
+                    return
+                
+                # 下载图片到临时目录
+                image_url = product_info.get('image_url')
+                temp_dir = os.path.join(tempfile.gettempdir(), 'shein_images')
+                os.makedirs(temp_dir, exist_ok=True)
+                temp_image = os.path.join(temp_dir, '{}.jpg'.format(self.current_asin))
+                
+                self.status_lbl.config(text='下载图片...')
+                try:
+                    response = requests.get(image_url, timeout=10)
+                    with open(temp_image, 'wb') as f:
+                        f.write(response.content)
+                except Exception as e:
+                    self.after(0, lambda err=str(e): messagebox.showerror('下载失败', err[:100]))
+                    return
+                
+                # 上传图片
+                self.status_lbl.config(text='上传图片到 SHEIN...')
+                if self._shein_publisher.upload_product_image(temp_image):
+                    self.after(0, lambda: self.status_lbl.config(text='图片上传成功'))
+                    self.after(0, lambda: messagebox.showinfo('成功', '商品图片已上传'))
+                else:
+                    self.after(0, lambda: messagebox.showerror('失败', '图片上传失败'))
+            except Exception as e:
+                self.after(0, lambda err=str(e): self.status_lbl.config(text='上传出错: ' + err[:40]))
+                self.after(0, lambda err=str(e): messagebox.showerror('错误', err[:100]))
+        
+        threading.Thread(target=_do_upload, daemon=True).start()
 
     def _fetch_sel(self):
         sel=[a for a,v in self.asin_vars.items() if v.get()]
@@ -1134,8 +1266,7 @@ class SheinPublisher:
 
     def dump_page_elements(self):
         """
-        抓取当前页面的所有按钮和输入框信息，帮助定位"识图发品"按钮。
-        返回页面元素的详细信息。
+        抓取当前页面的所有元素信息，重点抓取推荐类目。
         """
         try:
             elements_info = []
@@ -1151,24 +1282,63 @@ class SheinPublisher:
                 except Exception:
                     pass
             
-            # 抓取所有输入框
-            inputs = self.driver.find_elements(By.TAG_NAME, "input")
-            elements_info.append("\n=== 页面输入框 ===")
-            for i, inp in enumerate(inputs):
-                try:
-                    inp_type = inp.get_attribute("type")
-                    placeholder = inp.get_attribute("placeholder")
-                    elements_info.append(f"输入框 {i}: type={inp_type}, placeholder={placeholder}")
-                except Exception:
-                    pass
-            
-            # 抓取所有包含特定文字的元素
-            elements_info.append("\n=== 包含'识图'或'发品'的元素 ===")
-            for el in self.driver.find_elements(By.XPATH, "//*[contains(text(), '识图') or contains(text(), '发品')]"):
+            # 抓取所有包含"推荐"的元素及其子元素
+            elements_info.append("\n=== 推荐类目详细信息 ===")
+            for el in self.driver.find_elements(By.XPATH, "//*[contains(text(), '推荐')]"):
                 try:
                     text = el.text.strip()
                     tag = el.tag_name
                     elements_info.append(f"{tag}: {text}")
+                    # 获取父元素的所有文本
+                    parent = el.find_element(By.XPATH, "..")
+                    parent_text = parent.text.strip()
+                    if parent_text and parent_text != text:
+                        elements_info.append(f"  └─ 父元素: {parent_text[:200]}")
+                except Exception:
+                    pass
+            
+            # 抓取所有 span 元素（可能包含类目名称）
+            elements_info.append("\n=== 所有 SPAN 元素 ===")
+            spans = self.driver.find_elements(By.TAG_NAME, "span")
+            for i, span in enumerate(spans):
+                try:
+                    text = span.text.strip()
+                    if text and len(text) < 100:
+                        elements_info.append(f"span {i}: {text}")
+                except Exception:
+                    pass
+            
+            # 抓取所有 p 元素
+            elements_info.append("\n=== 所有 P 元素 ===")
+            ps = self.driver.find_elements(By.TAG_NAME, "p")
+            for i, p in enumerate(ps):
+                try:
+                    text = p.text.strip()
+                    if text:
+                        elements_info.append(f"p {i}: {text}")
+                except Exception:
+                    pass
+            
+            # 抓取所有 a 元素（可能是可点击的类目）
+            elements_info.append("\n=== 所有 A 元素 ===")
+            links = self.driver.find_elements(By.TAG_NAME, "a")
+            for i, link in enumerate(links):
+                try:
+                    text = link.text.strip()
+                    if text and len(text) < 100:
+                        elements_info.append(f"a {i}: {text}")
+                except Exception:
+                    pass
+            
+            # 抓取所有 div 元素（重点抓取包含数字或中文的）
+            elements_info.append("\n=== 所有 DIV 元素（包含中文或数字） ===")
+            divs = self.driver.find_elements(By.TAG_NAME, "div")
+            for i, div in enumerate(divs):
+                try:
+                    text = div.text.strip()
+                    # 只显示包含中文或数字的短文本
+                    if text and 5 < len(text) < 150 and any('\u4e00' <= c <= '\u9fff' or c.isdigit() for c in text):
+                        elements_info.append(f"div {i}: {text}")
                 except Exception:
                     pass
             
@@ -1178,6 +1348,191 @@ class SheinPublisher:
         except Exception as e:
             self.log("抓取页面信息失败: {}".format(str(e)))
             return ""
+
+    def click_identify_image_button(self):
+        """点击'识图发品'按钮。"""
+        try:
+            self.log("[DEBUG] 查找'识图发品'按钮...")
+            # 方法1：查找包含"识图"的 div 或 button
+            for el in self.driver.find_elements(By.XPATH, "//*[contains(text(), '识图')]"):
+                try:
+                    # 尝试点击这个元素或其父元素
+                    el.click()
+                    self.log("[OK] 已点击'识图发品'按钮")
+                    time.sleep(2)
+                    return True
+                except Exception:
+                    # 尝试点击父元素
+                    try:
+                        parent = el.find_element(By.XPATH, "..")
+                        parent.click()
+                        self.log("[OK] 已点击'识图发品'按钮（父元素）")
+                        time.sleep(2)
+                        return True
+                    except Exception:
+                        continue
+            
+            self.log("[ERROR] 未找到'识图发品'按钮")
+            return False
+        except Exception as e:
+            self.log("[ERROR] 点击按钮失败: {}".format(str(e)))
+            return False
+
+    def upload_product_image(self, image_path):
+        """上传商品图片到'识图发品'页面。"""
+        if not os.path.isfile(image_path):
+            self.log("[ERROR] 图片文件不存在: {}".format(image_path))
+            return False
+        
+        try:
+            self.log("[DEBUG] 查找文件上传框...")
+            file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            
+            if not file_inputs:
+                self.log("[ERROR] 未找到文件上传框")
+                return False
+            
+            # 使用第一个文件上传框
+            file_input = file_inputs[0]
+            abs_path = os.path.abspath(image_path)
+            
+            self.log("[DEBUG] 上传图片: {}".format(os.path.basename(image_path)))
+            file_input.send_keys(abs_path)
+            
+            # 等待上传完成
+            time.sleep(3)
+            self.log("[OK] 图片已上传: {}".format(os.path.basename(image_path)))
+            return True
+        except Exception as e:
+            self.log("[ERROR] 上传失败: {}".format(str(e)[:60]))
+            return False
+
+    def select_first_category(self):
+        """选择第一个推荐类目。"""
+        try:
+            self.log("[DEBUG] 查找推荐类目...")
+            
+            # 方法1：查找所有包含"/"的 span（推荐类目格式）
+            category_spans = self.driver.find_elements(By.XPATH, "//span[contains(text(), '/')]")
+            
+            if category_spans:
+                for span in category_spans:
+                    try:
+                        text = span.text.strip()
+                        # 确保是推荐类目格式（包含多个"/"）
+                        if text.count('/') >= 3:
+                            self.log("[DEBUG] 找到第一个推荐类目: {}".format(text))
+                            span.click()
+                            self.log("[OK] 已选择第一个推荐类目")
+                            time.sleep(1)
+                            return True
+                    except Exception as e:
+                        self.log("[DEBUG] 点击 span 失败: {}".format(str(e)[:40]))
+                        continue
+            
+            # 方法2：查找所有包含"/"的 div（推荐类目格式）
+            category_divs = self.driver.find_elements(By.XPATH, "//div[contains(text(), '/')]")
+            
+            if category_divs:
+                for div in category_divs:
+                    try:
+                        text = div.text.strip()
+                        # 确保是推荐类目格式（包含多个"/"）
+                        if text.count('/') >= 3:
+                            self.log("[DEBUG] 找到第一个推荐类目: {}".format(text))
+                            div.click()
+                            self.log("[OK] 已选择第一个推荐类目")
+                            time.sleep(1)
+                            return True
+                    except Exception as e:
+                        self.log("[DEBUG] 点击 div 失败: {}".format(str(e)[:40]))
+                        continue
+            
+            self.log("[ERROR] 未找到推荐类目（span 和 div 都没找到）")
+            return False
+        except Exception as e:
+            self.log("[ERROR] 选择类目失败: {}".format(str(e)[:60]))
+            return False
+
+    def click_confirm_button(self):
+        """点击'确认，下一步'按钮。"""
+        try:
+            self.log("[DEBUG] 查找'确认，下一步'按钮...")
+            buttons = self.driver.find_elements(By.TAG_NAME, "button")
+            
+            for btn in buttons:
+                try:
+                    text = btn.text.strip()
+                    if "确认" in text and "下一步" in text:
+                        self.log("[DEBUG] 找到'确认，下一步'按钮")
+                        btn.click()
+                        self.log("[OK] 已点击'确认，下一步'按钮")
+                        time.sleep(2)
+                        return True
+                except Exception:
+                    continue
+            
+            self.log("[ERROR] 未找到'确认，下一步'按钮")
+            return False
+        except Exception as e:
+            self.log("[ERROR] 点击按钮失败: {}".format(str(e)[:60]))
+            return False
+        """点击'识图发品'按钮。"""
+        try:
+            self.log("[DEBUG] 查找'识图发品'按钮...")
+            # 方法1：查找包含"识图"的 div 或 button
+            for el in self.driver.find_elements(By.XPATH, "//*[contains(text(), '识图')]"):
+                try:
+                    # 尝试点击这个元素或其父元素
+                    el.click()
+                    self.log("[OK] 已点击'识图发品'按钮")
+                    time.sleep(2)
+                    return True
+                except Exception:
+                    # 尝试点击父元素
+                    try:
+                        parent = el.find_element(By.XPATH, "..")
+                        parent.click()
+                        self.log("[OK] 已点击'识图发品'按钮（父元素）")
+                        time.sleep(2)
+                        return True
+                    except Exception:
+                        continue
+            
+            self.log("[ERROR] 未找到'识图发品'按钮")
+            return False
+        except Exception as e:
+            self.log("[ERROR] 点击按钮失败: {}".format(str(e)))
+            return False
+
+    def upload_product_image(self, image_path):
+        """上传商品图片到'识图发品'页面。"""
+        if not os.path.isfile(image_path):
+            self.log("[ERROR] 图片文件不存在: {}".format(image_path))
+            return False
+        
+        try:
+            self.log("[DEBUG] 查找文件上传框...")
+            file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            
+            if not file_inputs:
+                self.log("[ERROR] 未找到文件上传框")
+                return False
+            
+            # 使用第一个文件上传框
+            file_input = file_inputs[0]
+            abs_path = os.path.abspath(image_path)
+            
+            self.log("[DEBUG] 上传图片: {}".format(os.path.basename(image_path)))
+            file_input.send_keys(abs_path)
+            
+            # 等待上传完成
+            time.sleep(3)
+            self.log("[OK] 图片已上传: {}".format(os.path.basename(image_path)))
+            return True
+        except Exception as e:
+            self.log("[ERROR] 上传失败: {}".format(str(e)[:60]))
+            return False
 
     def quit(self):
         try:
