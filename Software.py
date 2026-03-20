@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
@@ -114,7 +114,7 @@ def fetch_amazon_product(asin):
     hdrs["Referer"] = "https://www.amazon.com/"
     res = {"asin":asin,"title":"获取失败","price":"N/A","rating":"N/A",
            "reviews":"N/A","brand":"N/A","image_url":"",
-           "description":"","features":[],"url":url}
+           "description":"","features":[],"url":url,"model_number":"","description_images":[]}
     try:
         r = requests.Session().get(url, headers=hdrs, timeout=15)
         if r.status_code != 200:
@@ -143,6 +143,85 @@ def fetch_amazon_product(asin):
         res["features"] = feats[:6]
         d = s.select_one("#productDescription p")
         if d: res["description"] = d.get_text(strip=True)[:300]
+        
+        # 抓取商品描述中的图片（仅 Product description 部分，过滤 GIF）
+        desc_images = []
+        # 方法1：查找 <h2>Product description</h2> 标签，然后获取后续的图片
+        h2_tags = s.select("h2")
+        for h2 in h2_tags:
+            if "Product description" in h2.get_text():
+                # 找到 Product description 标题后，获取后续的所有图片
+                current = h2.find_next()
+                while current and len(desc_images) < 5:
+                    if current.name == "h2":  # 遇到下一个 h2 标签，停止
+                        break
+                    if current.name == "img":
+                        try:
+                            img_src = current.get("src") or current.get("data-old-hires") or current.get("data-a-hires")
+                            if img_src and ("amazon" in img_src.lower() or "images-" in img_src.lower()):
+                                # 过滤掉 GIF 格式
+                                if not img_src.lower().endswith(".gif"):
+                                    desc_images.append(img_src)
+                        except Exception:
+                            pass
+                    # 查找当前元素内的所有图片
+                    for img_el in current.select("img"):
+                        try:
+                            img_src = img_el.get("src") or img_el.get("data-old-hires") or img_el.get("data-a-hires")
+                            if img_src and ("amazon" in img_src.lower() or "images-" in img_src.lower()):
+                                # 过滤掉 GIF 格式
+                                if not img_src.lower().endswith(".gif") and img_src not in desc_images:
+                                    desc_images.append(img_src)
+                        except Exception:
+                            pass
+                    current = current.find_next()
+                break
+        
+        # 方法2：如果方法1没找到，尝试查找 #productDescription
+        if not desc_images:
+            prod_desc = s.select_one("#productDescription")
+            if prod_desc:
+                for img_el in prod_desc.select("img"):
+                    try:
+                        img_src = img_el.get("src") or img_el.get("data-old-hires") or img_el.get("data-a-hires")
+                        if img_src and ("amazon" in img_src.lower() or "images-" in img_src.lower()):
+                            # 过滤掉 GIF 格式
+                            if not img_src.lower().endswith(".gif"):
+                                desc_images.append(img_src)
+                    except Exception:
+                        pass
+        
+        res["description_images"] = desc_images[:5]  # 最多5张
+        
+        # 抓取货号（Item model number / Part Number，以P-开头）
+        model_number = ""
+        # 方法1：从商品详情表格中查找
+        for row in s.select("#productDetails_techSpec_section_1 tr, #productDetails_detailBullets_sections1 tr, #detailBullets_feature_div li"):
+            text = row.get_text(" ", strip=True)
+            if any(k in text for k in ["Item model number", "Part Number", "Model Number", "ASIN"]):
+                # 提取值部分
+                parts = text.split("\u200f")  # 零宽不连字符分隔
+                if len(parts) > 1:
+                    val = parts[-1].strip()
+                    if val.upper().startswith("P-") or val.upper().startswith("P "):
+                        model_number = val
+                        break
+                    elif "Item model number" in text or "Part Number" in text:
+                        # 取冒号后面的值
+                        if ":" in text:
+                            val = text.split(":")[-1].strip()
+                            model_number = val
+                            break
+        # 方法2：查找所有包含P-的文本
+        if not model_number:
+            for el in s.select("#detailBullets_feature_div span.a-list-item, #prodDetails td"):
+                text = el.get_text(strip=True)
+                m = re.search(r"P-[A-Z0-9]+", text, re.IGNORECASE)
+                if m:
+                    model_number = m.group()
+                    break
+        if model_number:
+            res["model_number"] = model_number
     except Exception as e:
         res["title"] = "错误: {}".format(e)
     return res
@@ -467,7 +546,7 @@ class SheinApp(tk.Tk):
         threading.Thread(target=_init_selenium, daemon=True).start()
 
     def _auto_upload_image(self):
-        """自动上传商品图片并选择推荐类目（在后台线程中调用）。"""
+        """自动上传商品图片、选择推荐类目、填写基础信息（在后台线程中调用）。"""
         try:
             if self.current_asin is None or self._shein_publisher is None:
                 return
@@ -521,11 +600,21 @@ class SheinApp(tk.Tk):
             time.sleep(1)
             
             # 点击"确认，下一步"按钮
-            if self._shein_publisher.click_confirm_button():
-                self.status_lbl.config(text='✓ 商品类目确认成功')
-                self._pub_log('商品 {} 类目确认成功'.format(self.current_asin))
-            else:
+            if not self._shein_publisher.click_confirm_button():
                 self.status_lbl.config(text='✗ 点击确认按钮失败')
+                return
+            
+            self.status_lbl.config(text='✓ 商品类目确认成功，等待页面加载...')
+            self._pub_log('商品 {} 类目确认成功'.format(self.current_asin))
+            time.sleep(3)
+            
+            # 填写基础信息
+            self.status_lbl.config(text='填写商品基础信息...')
+            if self._shein_publisher.fill_product_info(product_info):
+                self.status_lbl.config(text='✓ 商品基础信息填写完成')
+                self._pub_log('商品 {} 基础信息填写完成'.format(self.current_asin))
+            else:
+                self.status_lbl.config(text='✗ 基础信息填写失败')
         except Exception as e:
             self.status_lbl.config(text='上传出错: ' + str(e)[:40])
             self._pub_log('上传出错: ' + str(e))
@@ -646,7 +735,7 @@ class SheinApp(tk.Tk):
             tk.Label(inf,text=t,font=("Segoe UI",sz,"bold" if bold else "normal"),
                 fg=col,bg=BG_PANEL,wraplength=560,justify="left",anchor="w").pack(fill="x",padx=4,pady=2)
         row(info.get("title",""),13,TEXT_MAIN,True)
-        row("ASIN: {}".format(info.get("asin","")),10,TEXT_SUB)
+        row("ASIN: {}  货号: {}".format(info.get("asin",""), info.get("model_number","N/A")),10,TEXT_SUB)
         row("品牌: {}".format(info.get("brand","N/A")),10,YELLOW)
         row("价格: {}".format(info.get("price","N/A")),12,GREEN,True)
         row("评分: {}  评论数: {}".format(info.get("rating","N/A"),info.get("reviews","N/A")),10,TEXT_SUB)
@@ -675,6 +764,21 @@ class SheinApp(tk.Tk):
             lambda i=info:self._publish(i)).pack(anchor="w",padx=20,pady=(0,16))
         if info.get("image_url"):
             threading.Thread(target=self._load_img,args=(info["image_url"],),daemon=True).start()
+        
+        # 显示商品描述中的图片
+        desc_images = info.get("description_images", [])
+        if desc_images:
+            tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=10)
+            tk.Label(self.df,text="商品详情图片（Ctrl+点击打开）",font=("Segoe UI",11,"bold"),fg=ACCENT2,bg=BG_PANEL).pack(anchor="w",padx=20)
+            for i, img_url in enumerate(desc_images):
+                fr=tk.Frame(self.df,bg=BG_PANEL); fr.pack(fill="x",padx=20,pady=2)
+                tk.Label(fr,text="图片 {}:".format(i+1),fg=TEXT_SUB,bg=BG_PANEL,font=("Segoe UI",9)).pack(side="left")
+                # 创建可点击的链接标签
+                link_lbl=tk.Label(fr,text=img_url[:60]+"...",fg=ACCENT,bg=BG_PANEL,font=("Segoe UI",9),
+                    wraplength=600,justify="left",anchor="w",cursor="hand2")
+                link_lbl.pack(side="left",padx=6)
+                # 绑定 Ctrl+点击事件
+                link_lbl.bind("<Control-Button-1>",lambda e,url=img_url:webbrowser.open(url))
 
     def _load_img(self,url):
         img=download_image(url)
@@ -1353,24 +1457,59 @@ class SheinPublisher:
         """点击'识图发品'按钮。"""
         try:
             self.log("[DEBUG] 查找'识图发品'按钮...")
+            time.sleep(2)  # 等待页面加载
+            
             # 方法1：查找包含"识图"的 div 或 button
             for el in self.driver.find_elements(By.XPATH, "//*[contains(text(), '识图')]"):
                 try:
-                    # 尝试点击这个元素或其父元素
-                    el.click()
-                    self.log("[OK] 已点击'识图发品'按钮")
-                    time.sleep(2)
-                    return True
-                except Exception:
-                    # 尝试点击父元素
-                    try:
-                        parent = el.find_element(By.XPATH, "..")
-                        parent.click()
-                        self.log("[OK] 已点击'识图发品'按钮（父元素）")
+                    text = el.text.strip()
+                    if "识图" in text:
+                        self.log("[DEBUG] 找到识图元素: {}".format(text))
+                        # 尝试点击这个元素
+                        try:
+                            el.click()
+                            self.log("[OK] 已点击'识图发品'按钮")
+                            time.sleep(2)
+                            return True
+                        except Exception:
+                            # 尝试点击父元素
+                            try:
+                                parent = el.find_element(By.XPATH, "..")
+                                parent.click()
+                                self.log("[OK] 已点击'识图发品'按钮（父元素）")
+                                time.sleep(2)
+                                return True
+                            except Exception:
+                                continue
+                except Exception as e:
+                    self.log("[DEBUG] 处理识图元素失败: {}".format(str(e)[:40]))
+                    continue
+            
+            # 方法2：查找所有 span 元素，找包含"识图"的
+            for span in self.driver.find_elements(By.TAG_NAME, "span"):
+                try:
+                    text = span.text.strip()
+                    if "识图" in text:
+                        self.log("[DEBUG] 找到识图 span: {}".format(text))
+                        span.click()
+                        self.log("[OK] 已点击'识图发品'按钮")
                         time.sleep(2)
                         return True
-                    except Exception:
-                        continue
+                except Exception:
+                    continue
+            
+            # 方法3：查找所有 div 元素，找包含"识图"的
+            for div in self.driver.find_elements(By.TAG_NAME, "div"):
+                try:
+                    text = div.text.strip()
+                    if text == "识图发品":
+                        self.log("[DEBUG] 找到识图发品 div")
+                        div.click()
+                        self.log("[OK] 已点击'识图发品'按钮")
+                        time.sleep(2)
+                        return True
+                except Exception:
+                    continue
             
             self.log("[ERROR] 未找到'识图发品'按钮")
             return False
@@ -1477,6 +1616,166 @@ class SheinPublisher:
         except Exception as e:
             self.log("[ERROR] 点击按钮失败: {}".format(str(e)[:60]))
             return False
+
+    def fill_product_info(self, product_info):
+        """填写商品基础信息到 SHEIN 发布页面。"""
+        try:
+            self.log("[DEBUG] 开始填写商品基础信息...")
+            
+            # 1. 填写商品标题(英语)
+            self.log("[DEBUG] 填写商品标题(英语)...")
+            title = product_info.get("title", "")
+            if title:
+                # 查找"商品标题(英语)"对应的输入框
+                # 方法1：查找所有 input，找到在"商品标题(英语)" span 之后的
+                try:
+                    # 先找到"商品标题(英语)"的 span
+                    title_spans = self.driver.find_elements(By.XPATH, "//span[contains(text(), '商品标题')]")
+                    if title_spans:
+                        # 找到最近的 input 元素
+                        for span in title_spans:
+                            try:
+                                # 向上查找到 form 或 div，然后找 input
+                                parent = span.find_element(By.XPATH, "./ancestor::div[contains(@class, 'form') or contains(@class, 'field')]")
+                                inp = parent.find_element(By.TAG_NAME, "input")
+                                inp.clear()
+                                inp.send_keys(title)
+                                self.log("[OK] 商品标题已填写: {}".format(title[:50]))
+                                time.sleep(0.5)
+                                break
+                            except Exception:
+                                continue
+                except Exception as e:
+                    self.log("[DEBUG] 方法1失败: {}".format(str(e)[:40]))
+                
+                # 方法2：查找所有 input，按顺序尝试
+                if not title:  # 如果还没填写
+                    try:
+                        all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
+                        for inp in all_inputs:
+                            try:
+                                # 跳过已有值的输入框
+                                if inp.get_attribute("value"):
+                                    continue
+                                # 尝试填写
+                                inp.clear()
+                                inp.send_keys(title)
+                                self.log("[OK] 商品标题已填写: {}".format(title[:50]))
+                                time.sleep(0.5)
+                                break
+                            except Exception:
+                                continue
+                    except Exception as e:
+                        self.log("[DEBUG] 方法2失败: {}".format(str(e)[:40]))
+            
+            # 2. 填写商品描述
+            self.log("[DEBUG] 填写商品描述...")
+            description = product_info.get("description", "")
+            if description:
+                # 查找商品描述输入框（textarea）
+                textareas = self.driver.find_elements(By.TAG_NAME, "textarea")
+                if textareas:
+                    try:
+                        textareas[0].clear()
+                        textareas[0].send_keys(description)
+                        self.log("[OK] 商品描述已填写: {}".format(description[:50]))
+                        time.sleep(0.5)
+                    except Exception as e:
+                        self.log("[DEBUG] 填写描述失败: {}".format(str(e)[:40]))
+            
+            # 3. 填写商品品牌
+            self.log("[DEBUG] 填写商品品牌...")
+            brand = product_info.get("brand", "").replace("访问 ", "").strip()
+            if brand:
+                # 查找品牌输入框
+                try:
+                    all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
+                    for inp in all_inputs:
+                        try:
+                            placeholder = inp.get_attribute("placeholder")
+                            if placeholder and "品牌" in placeholder:
+                                inp.clear()
+                                inp.send_keys(brand)
+                                self.log("[OK] 商品品牌已填写: {}".format(brand))
+                                time.sleep(0.5)
+                                break
+                        except Exception:
+                            continue
+                except Exception as e:
+                    self.log("[DEBUG] 填写品牌失败: {}".format(str(e)[:40]))
+            
+            # 4. 填写参考产品链接（ASIN链接）
+            self.log("[DEBUG] 填写参考产品链接...")
+            asin_url = product_info.get("url", "")
+            if asin_url:
+                # 查找产品链接输入框（在"参考产品链接"部分）
+                try:
+                    all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
+                    for inp in all_inputs:
+                        try:
+                            placeholder = inp.get_attribute("placeholder")
+                            if placeholder and "链接" in placeholder:
+                                inp.clear()
+                                inp.send_keys(asin_url)
+                                self.log("[OK] 参考产品链接已填写: {}".format(asin_url[:50]))
+                                time.sleep(0.5)
+                                break
+                        except Exception:
+                            continue
+                except Exception as e:
+                    self.log("[DEBUG] 填写链接失败: {}".format(str(e)[:40]))
+            
+            # 5. 填写货号
+            self.log("[DEBUG] 填写货号...")
+            model_number = product_info.get("model_number", "")
+            if model_number:
+                try:
+                    all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
+                    for inp in all_inputs:
+                        try:
+                            placeholder = inp.get_attribute("placeholder")
+                            if placeholder and ("货号" in placeholder or "型号" in placeholder):
+                                inp.clear()
+                                inp.send_keys(model_number)
+                                self.log("[OK] 货号已填写: {}".format(model_number))
+                                time.sleep(0.5)
+                                break
+                        except Exception:
+                            continue
+                except Exception as e:
+                    self.log("[DEBUG] 填写货号失败: {}".format(str(e)[:40]))
+            
+            self.log("[OK] 商品基础信息填写完成")
+            return True
+        except Exception as e:
+            self.log("[ERROR] 填写基础信息失败: {}".format(str(e)[:60]))
+            return False
+
+    def click_confirm_button(self):
+        """点击'确认，下一步'按钮。"""
+        try:
+            self.log("[DEBUG] 查找'确认，下一步'按钮...")
+            buttons = self.driver.find_elements(By.TAG_NAME, "button")
+            
+            for btn in buttons:
+                try:
+                    text = btn.text.strip()
+                    if "确认" in text and "下一步" in text:
+                        self.log("[DEBUG] 找到'确认，下一步'按钮")
+                        btn.click()
+                        self.log("[OK] 已点击'确认，下一步'按钮")
+                        time.sleep(2)
+                        return True
+                except Exception:
+                    continue
+            
+            self.log("[ERROR] 未找到'确认，下一步'按钮")
+            return False
+        except Exception as e:
+            self.log("[ERROR] 点击按钮失败: {}".format(str(e)[:60]))
+            return False
+
+    def click_identify_image_button_OLD(self):
         """点击'识图发品'按钮。"""
         try:
             self.log("[DEBUG] 查找'识图发品'按钮...")
