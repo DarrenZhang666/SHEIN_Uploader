@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
@@ -114,7 +114,7 @@ def fetch_amazon_product(asin):
     hdrs["Referer"] = "https://www.amazon.com/"
     res = {"asin":asin,"title":"获取失败","price":"N/A","rating":"N/A",
            "reviews":"N/A","brand":"N/A","image_url":"",
-           "description":"","features":[],"url":url,"model_number":"","description_images":[]}
+           "description":"","features":[],"url":url,"description_images":[]}
     try:
         r = requests.Session().get(url, headers=hdrs, timeout=15)
         if r.status_code != 200:
@@ -192,36 +192,6 @@ def fetch_amazon_product(asin):
                         pass
         
         res["description_images"] = desc_images[:5]  # 最多5张
-        
-        # 抓取货号（Item model number / Part Number，以P-开头）
-        model_number = ""
-        # 方法1：从商品详情表格中查找
-        for row in s.select("#productDetails_techSpec_section_1 tr, #productDetails_detailBullets_sections1 tr, #detailBullets_feature_div li"):
-            text = row.get_text(" ", strip=True)
-            if any(k in text for k in ["Item model number", "Part Number", "Model Number", "ASIN"]):
-                # 提取值部分
-                parts = text.split("\u200f")  # 零宽不连字符分隔
-                if len(parts) > 1:
-                    val = parts[-1].strip()
-                    if val.upper().startswith("P-") or val.upper().startswith("P "):
-                        model_number = val
-                        break
-                    elif "Item model number" in text or "Part Number" in text:
-                        # 取冒号后面的值
-                        if ":" in text:
-                            val = text.split(":")[-1].strip()
-                            model_number = val
-                            break
-        # 方法2：查找所有包含P-的文本
-        if not model_number:
-            for el in s.select("#detailBullets_feature_div span.a-list-item, #prodDetails td"):
-                text = el.get_text(strip=True)
-                m = re.search(r"P-[A-Z0-9]+", text, re.IGNORECASE)
-                if m:
-                    model_number = m.group()
-                    break
-        if model_number:
-            res["model_number"] = model_number
     except Exception as e:
         res["title"] = "错误: {}".format(e)
     return res
@@ -550,11 +520,17 @@ class SheinApp(tk.Tk):
         try:
             if self.current_asin is None or self._shein_publisher is None:
                 return
-            
+
             product_info = self.product_cache.get(self.current_asin)
             if not product_info or not product_info.get('image_url'):
                 return
-            
+
+            # 先关闭可能弹出的公告弹窗，避免影响后续操作
+            try:
+                self._shein_publisher._dismiss_announcements()
+            except Exception:
+                pass
+
             # 点击"识图发品"按钮
             self.status_lbl.config(text='点击"识图发品"按钮...')
             if not self._shein_publisher.click_identify_image_button():
@@ -658,6 +634,11 @@ class SheinApp(tk.Tk):
         
         def _do_upload():
             try:
+                # 先关闭可能弹出的公告弹窗
+                try:
+                    self._shein_publisher._dismiss_announcements()
+                except Exception:
+                    pass
                 # 点击"识图发品"按钮
                 self.status_lbl.config(text='点击"识图发品"按钮...')
                 if not self._shein_publisher.click_identify_image_button():
@@ -735,7 +716,7 @@ class SheinApp(tk.Tk):
             tk.Label(inf,text=t,font=("Segoe UI",sz,"bold" if bold else "normal"),
                 fg=col,bg=BG_PANEL,wraplength=560,justify="left",anchor="w").pack(fill="x",padx=4,pady=2)
         row(info.get("title",""),13,TEXT_MAIN,True)
-        row("ASIN: {}  货号: {}".format(info.get("asin",""), info.get("model_number","N/A")),10,TEXT_SUB)
+        row("ASIN: {}  货号: XYZ-{}".format(info.get("asin",""), info.get("asin","")),10,TEXT_SUB)
         row("品牌: {}".format(info.get("brand","N/A")),10,YELLOW)
         row("价格: {}".format(info.get("price","N/A")),12,GREEN,True)
         row("评分: {}  评论数: {}".format(info.get("rating","N/A"),info.get("reviews","N/A")),10,TEXT_SUB)
@@ -992,7 +973,7 @@ class SheinPublisher:
         
         _candidates += [
             r"C:\chromedriver\chromedriver.exe",
-            r"C:\chromedriver-win64\chromedriver.exe",
+            r"D:\Work\Project\Python\Shein上品软件\工具\chromedriver-win64\chromedriver.exe",
         ]
         
         # 设置用户数据目录（保存登录信息、cookies 等）
@@ -1371,10 +1352,15 @@ class SheinPublisher:
     def dump_page_elements(self):
         """
         抓取当前页面的所有元素信息，重点抓取推荐类目。
+        进入时先关闭公告弹窗，避免公告内容混入抓取结果。
         """
         try:
+            # 先关闭公告弹窗，确保抓取的是业务页面内容
+            self._dismiss_announcements()
+            time.sleep(0.5)
+
             elements_info = []
-            
+
             # 抓取所有按钮
             buttons = self.driver.find_elements(By.TAG_NAME, "button")
             elements_info.append("=== 页面按钮 ===")
@@ -1725,25 +1711,62 @@ class SheinPublisher:
                 except Exception as e:
                     self.log("[DEBUG] 填写链接失败: {}".format(str(e)[:40]))
             
-            # 5. 填写货号
+            # 5. 填写货号（XYZ-{ASIN}）
             self.log("[DEBUG] 填写货号...")
-            model_number = product_info.get("model_number", "")
-            if model_number:
+            asin = product_info.get("asin", "")
+            if asin:
+                model_number = "XYZ-{}".format(asin)
+                filled = False
                 try:
-                    all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
-                    for inp in all_inputs:
+                    # 方法1：查找"货号" span 的同级或相邻 input
+                    for span in self.driver.find_elements(By.TAG_NAME, "span"):
                         try:
-                            placeholder = inp.get_attribute("placeholder")
-                            if placeholder and ("货号" in placeholder or "型号" in placeholder):
-                                inp.clear()
-                                inp.send_keys(model_number)
-                                self.log("[OK] 货号已填写: {}".format(model_number))
-                                time.sleep(0.5)
-                                break
+                            if span.text.strip() == "货号":
+                                # 找到父元素，再找 input
+                                parent = span.find_element(By.XPATH, "./..")
+                                for _ in range(5):  # 最多向上5层
+                                    try:
+                                        inp = parent.find_element(By.TAG_NAME, "input")
+                                        inp.clear()
+                                        inp.send_keys(model_number)
+                                        self.log("[OK] 货号已填写: {}".format(model_number))
+                                        time.sleep(0.5)
+                                        filled = True
+                                        break
+                                    except Exception:
+                                        parent = parent.find_element(By.XPATH, "./..")
+                                if filled:
+                                    break
                         except Exception:
                             continue
                 except Exception as e:
-                    self.log("[DEBUG] 填写货号失败: {}".format(str(e)[:40]))
+                    self.log("[DEBUG] 方法1填写货号失败: {}".format(str(e)[:40]))
+                
+                # 方法2：用 placeholder 查找
+                if not filled:
+                    try:
+                        all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
+                        for inp in all_inputs:
+                            try:
+                                placeholder = inp.get_attribute("placeholder")
+                                if placeholder and ("货号" in placeholder or "型号" in placeholder):
+                                    inp.clear()
+                                    inp.send_keys(model_number)
+                                    self.log("[OK] 货号已填写(方法2): {}".format(model_number))
+                                    time.sleep(0.5)
+                                    filled = True
+                                    break
+                            except Exception:
+                                continue
+                    except Exception as e:
+                        self.log("[DEBUG] 方法2填写货号失败: {}".format(str(e)[:40]))
+                
+                if not filled:
+                    self.log("[ERROR] 未能填写货号")
+            
+            # 6. 上传主规格图和细节图
+            self.log("[DEBUG] 上传商品图片...")
+            self._upload_product_images(product_info)
             
             self.log("[OK] 商品基础信息填写完成")
             return True
@@ -1751,29 +1774,73 @@ class SheinPublisher:
             self.log("[ERROR] 填写基础信息失败: {}".format(str(e)[:60]))
             return False
 
-    def click_confirm_button(self):
-        """点击'确认，下一步'按钮。"""
+    def _upload_product_images(self, product_info):
+        """上传细节图到 SHEIN 发布页面（主规格图不上传）。"""
+        import tempfile as _tmp
         try:
-            self.log("[DEBUG] 查找'确认，下一步'按钮...")
-            buttons = self.driver.find_elements(By.TAG_NAME, "button")
+            asin = product_info.get("asin", "")
+            image_url = product_info.get("image_url", "")
+            desc_images = product_info.get("description_images", [])
             
-            for btn in buttons:
+            # 合并所有要上传的图片：主图 + 细节图，全部上传到细节图
+            all_images = []
+            if image_url:
+                all_images.append(("main", image_url))
+            for i, url in enumerate(desc_images):
+                all_images.append(("desc_{}".format(i), url))
+            
+            if not all_images:
+                self.log("[DEBUG] 没有图片需要上传")
+                return
+            
+            # 下载目录
+            temp_dir = os.path.join(_tmp.gettempdir(), "shein_images")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # 先下载所有图片到本地
+            local_paths = []
+            for tag, url in all_images:
                 try:
-                    text = btn.text.strip()
-                    if "确认" in text and "下一步" in text:
-                        self.log("[DEBUG] 找到'确认，下一步'按钮")
-                        btn.click()
-                        self.log("[OK] 已点击'确认，下一步'按钮")
-                        time.sleep(2)
-                        return True
-                except Exception:
-                    continue
+                    img_path = os.path.join(temp_dir, "{}_{}.jpg".format(asin, tag))
+                    r = requests.get(url, timeout=10)
+                    with open(img_path, "wb") as f:
+                        f.write(r.content)
+                    local_paths.append(img_path)
+                    self.log("[DEBUG] 图片已下载: {}_{}.jpg".format(asin, tag))
+                except Exception as e:
+                    self.log("[DEBUG] 图片下载失败({}): {}".format(tag, str(e)[:40]))
             
-            self.log("[ERROR] 未找到'确认，下一步'按钮")
-            return False
+            if not local_paths:
+                self.log("[ERROR] 所有图片下载失败")
+                return
+            
+            # 找到"细节图"区域的 file input
+            # 方法1：通过"细节图" span 定位
+            uploaded = 0
+            for img_path in local_paths:
+                try:
+                    # 每次重新获取 file inputs
+                    file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                    if not file_inputs:
+                        self.log("[ERROR] 未找到文件上传框")
+                        break
+                    # 跳过第一个（主规格图），从第二个开始（细节图）
+                    if len(file_inputs) < 2:
+                        self.log("[DEBUG] 上传框数量不足，当前: {}".format(len(file_inputs)))
+                        break
+                    # 找最后一个空的上传框（细节图区域）
+                    target_input = file_inputs[uploaded + 1]  # +1 跳过主规格图
+                    target_input.send_keys(os.path.abspath(img_path))
+                    uploaded += 1
+                    self.log("[OK] 细节图 {} 已上传: {}".format(uploaded, os.path.basename(img_path)))
+                    time.sleep(2)
+                except Exception as e:
+                    self.log("[DEBUG] 细节图上传失败: {}".format(str(e)[:60]))
+                    break
+            
+            self.log("[OK] 共上传 {} 张细节图".format(uploaded))
         except Exception as e:
-            self.log("[ERROR] 点击按钮失败: {}".format(str(e)[:60]))
-            return False
+            self.log("[ERROR] 上传商品图片失败: {}".format(str(e)[:60]))
 
     def click_identify_image_button_OLD(self):
         """点击'识图发品'按钮。"""
@@ -2815,6 +2882,69 @@ class SheinPublisher:
                     pass
 
     # ── 主流程
+    def _dismiss_announcements(self):
+        """检测并关闭商品发布页面的公告弹窗（支持多条公告）。
+        以公告专用按钮是否存在作为检测依据，避免误判页面中普通的"公告"文字。
+        """
+        # 公告弹窗专用按钮关键词（按优先级排列）
+        # 注意：不包含「确认，下一步」，避免误点类目选择按钮
+        ANNOUNCEMENT_BTN_KEYWORDS = [
+            "我已确认本公告内容",      # 单条公告
+            "我已确认本公告，下一条",  # 多条公告翻页
+            "我已确认本公告",          # 通用前缀
+            "下一条",                  # 公告翻页
+            "知道了",
+            "我知道了",
+        ]
+
+        def _find_announcement_btn():
+            """查找当前页面上可见的公告专用按钮，返回 (element, keyword) 或 (None, None)。"""
+            for kw in ANNOUNCEMENT_BTN_KEYWORDS:
+                try:
+                    els = self.driver.find_elements(
+                        By.XPATH, "//*[contains(text(), '{}')]".format(kw))
+                    for el in els:
+                        try:
+                            if not el.is_displayed():
+                                continue
+                            txt = (el.text or "").strip()
+                            # 严格排除「确认，下一步」等业务按钮
+                            if "下一步" in txt:
+                                continue
+                            return el, kw
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+            return None, None
+
+        max_attempts = 20
+        dismissed = 0
+        for attempt in range(max_attempts):
+            try:
+                btn, kw = _find_announcement_btn()
+                if btn is None:
+                    # 没有公告按钮：若刚关闭过，等一下确认下一条是否出现
+                    if dismissed > 0:
+                        time.sleep(1.2)
+                        btn, kw = _find_announcement_btn()
+                    if btn is None:
+                        if dismissed > 0:
+                            self.log("[OK] 所有公告已关闭 (共 {} 条)".format(dismissed))
+                        return  # 无公告，直接返回
+
+                self.log("[DEBUG] 发现公告按钮: {} (第 {} 条)".format(kw, dismissed + 1))
+                self.driver.execute_script("arguments[0].click();", btn)
+                dismissed += 1
+                self.log("[DEBUG] 已点击公告按钮，等待下一条渲染...")
+                time.sleep(2.0)  # 等待公告关闭动画 + 下一条渲染
+
+            except Exception as e:
+                self.log("[DEBUG] 处理公告失败: {}".format(str(e)[:50]))
+                return
+
+        self.log("[DEBUG] 已处理最大公告数量 ({})".format(max_attempts))
+
     def publish_product(self, info, category):
         """
         category: list of category names from root to leaf, e.g. ["女装", "连衣裙", "迷你裙"]
@@ -2973,6 +3103,10 @@ class SheinPublisher:
                 "请在浏览器中手动检查。")
 
         time.sleep(2)
+
+        # 关闭可能弹出的公告弹窗，避免影响类目选择等后续操作
+        self._dismiss_announcements()
+        time.sleep(1)
 
         # Step2: 选择类目（优先识图，其次关键词树，最后列表模式）
         img_url = info.get("image_url", "")
