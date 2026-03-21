@@ -2019,11 +2019,25 @@ class SheinPublisher:
             return False
 
     def _upload_product_images(self, product_info):
-        """上传细节图到 SHEIN 发布页面（自动上传主页图，最多5张）。"""
+        """上传细节图到 SHEIN 发布页面（规格及供应信息 - 主规格图 - 细节图）。"""
         try:
             asin = product_info.get("asin", "")
             
-            # 优先使用主页图（main_images），如果没有则使用image_url
+            # ===== 抓取页面HTML并保存到桌面 =====
+            try:
+                page_html = self.driver.page_source
+                desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+                os.makedirs(desktop, exist_ok=True)
+                
+                # 保存完整HTML
+                html_file = os.path.join(desktop, "SHEIN_页面_{}_{}.html".format(asin, int(time.time())))
+                with open(html_file, "w", encoding="utf-8") as f:
+                    f.write(page_html)
+                self.log("[OK] 页面HTML已保存到: {}".format(html_file))
+            except Exception as e:
+                self.log("[DEBUG] 保存HTML失败: {}".format(str(e)[:60]))
+            
+            # ===== 优先使用主页图（main_images），如果没有则使用image_url =====
             main_images = product_info.get("main_images", [])
             if not main_images and product_info.get("image_url"):
                 main_images = [product_info.get("image_url")]
@@ -2036,91 +2050,139 @@ class SheinPublisher:
             images_to_upload = main_images[:5]
             self.log("[DEBUG] 准备上传 {} 张主页图到细节图".format(len(images_to_upload)))
             
-            uploaded = 0
-            max_uploads = 5
-            
+            # ===== 查找detail_img_container容器 =====
             try:
-                # Step1: 找到所有"细节图"的 span 元素（精确匹配）
-                detail_img_spans = self.driver.find_elements(By.XPATH, "//span[text()='细节图']")
-                if not detail_img_spans:
-                    self.log("[ERROR] 未找到'细节图'标签")
+                detail_container = self.driver.find_element(By.ID, "userguide_commodities_info_skc_title_table")
+                self.log("[DEBUG] 找到detail_img_container容器")
+            except Exception as e:
+                self.log("[ERROR] 未找到detail_img_container容器: {}".format(str(e)[:40]))
+                # 备选方案：使用class查找
+                try:
+                    detail_container = self.driver.find_element(By.CLASS_NAME, "detail_img_container")
+                    self.log("[DEBUG] 使用class查找找到detail_img_container容器")
+                except Exception as e2:
+                    self.log("[ERROR] 备选方案也失败: {}".format(str(e2)[:40]))
+                    return
+            
+            # ===== 在容器内查找所有"点击上传"按钮 =====
+            try:
+                # 方法1：使用精确的class名称查找
+                upload_buttons = detail_container.find_elements(By.XPATH, ".//div[@class='spmp_style__uploadText--IK54MR06']")
+                self.log("[DEBUG] 方法1找到 {} 个'点击上传'按钮".format(len(upload_buttons)))
+                
+                if not upload_buttons:
+                    # 方法2：使用class包含匹配
+                    upload_buttons = detail_container.find_elements(By.XPATH, ".//div[contains(@class, 'uploadText')]")
+                    self.log("[DEBUG] 方法2找到 {} 个'点击上传'按钮".format(len(upload_buttons)))
+                
+                if not upload_buttons:
+                    # 方法3：使用文本内容查找
+                    upload_buttons = detail_container.find_elements(By.XPATH, ".//div[contains(text(),'点击上传')]")
+                    self.log("[DEBUG] 方法3找到 {} 个'点击上传'按钮".format(len(upload_buttons)))
+                
+                if not upload_buttons:
+                    self.log("[ERROR] 在detail_img_container内未找到任何'点击上传'按钮")
                     return
                 
-                self.log("[DEBUG] 找到 {} 个'细节图'标签".format(len(detail_img_spans)))
+                self.log("[DEBUG] 共找到 {} 个'点击上传'按钮".format(len(upload_buttons)))
                 
-                # Step2: 对每个"细节图"标签，找到其对应的"点击上传"按钮
-                for detail_idx, detail_span in enumerate(detail_img_spans):
-                    try:
-                        # 从"细节图" span 向上找到其所在的最近的大容器
-                        container = detail_span.find_element(By.XPATH, "./ancestor::div[contains(text(), '点击上传')]")
-                        self.log("[DEBUG] 找到细节图容器 {}".format(detail_idx + 1))
-                    except Exception:
-                        # 备选方案：向上找更高层的 div（通常是5-10层）
-                        try:
-                            container = detail_span.find_element(By.XPATH, "./ancestor::div[10]")
-                        except Exception:
-                            self.log("[DEBUG] 无法定位细节图容器 {}，跳过".format(detail_idx + 1))
-                            continue
+                # ===== 遍历每个上传按钮，上传图片 =====
+                for idx, img_url in enumerate(images_to_upload):
+                    if idx >= len(upload_buttons):
+                        self.log("[DEBUG] 上传按钮数量不足，已上传 {} 张".format(idx))
+                        break
                     
-                    # Step3: 在容器内查找"点击上传"按钮
                     try:
-                        # 方法1：精确查找包含"点击上传"文本的 div
-                        upload_btns = container.find_elements(By.XPATH, ".//div[text()='点击上传']")
+                        self.log("[DEBUG] 上传第 {} 张图片...".format(idx + 1))
                         
-                        if not upload_btns:
-                            # 方法2：查找包含 uploadText 类名的 div
-                            upload_btns = container.find_elements(By.XPATH, ".//div[contains(@class, 'uploadText')]")
-                        
-                        if not upload_btns:
-                            self.log("[DEBUG] 细节图容器内未找到'点击上传'按钮")
+                        # 下载图片到临时文件
+                        img_path = self._save_img_temp(img_url)
+                        if not img_path:
+                            self.log("[ERROR] 第 {} 张图片下载失败".format(idx + 1))
                             continue
                         
-                        self.log("[DEBUG] 在细节图容器内找到 {} 个'点击上传'按钮".format(len(upload_btns)))
-                        upload_btn = upload_btns[0]
+                        # 获取当前上传按钮
+                        btn = upload_buttons[idx]
                         
-                        # Step4: 循环上传图片（最多5张）
-                        for img_idx, img_url in enumerate(images_to_upload):
-                            if uploaded >= max_uploads:
-                                self.log("[DEBUG] 已达到最大上传数量 ({})".format(max_uploads))
-                                break
-                            
-                            try:
-                                # 点击"点击上传"按钮
-                                self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", upload_btn)
-                                time.sleep(0.5)
-                                self.driver.execute_script("arguments[0].click();", upload_btn)
-                                self.log("[DEBUG] 第 {} 次点击'点击上传'按钮".format(img_idx + 1))
-                                time.sleep(2)
-                                
-                                # 找到 file input 并上传图片
-                                file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-                                if file_inputs:
-                                    # 使用最后一个 file input（最新打开的）
-                                    target_input = file_inputs[-1]
-                                    target_input.send_keys(img_url)
-                                    uploaded += 1
-                                    self.log("[OK] 细节图 {} 已上传: {}".format(uploaded, img_url[:60]))
-                                    time.sleep(2)
-                                else:
-                                    self.log("[ERROR] 未找到 file input")
+                        # 滚动到按钮
+                        self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                        time.sleep(0.5)
+                        
+                        # 找到按钮所在的uploadHandle容器，然后找到其中的file input
+                        try:
+                            # 从"点击上传"div向上找到uploadHandle容器
+                            upload_handle = btn.find_element(By.XPATH, "./ancestor::div[contains(@class, 'uploadHandle')]")
+                            # 在uploadHandle容器内找到file input
+                            file_input = upload_handle.find_element(By.XPATH, ".//input[@type='file']")
+                            self.log("[DEBUG] 找到第 {} 个对应的file input".format(idx + 1))
+                        except Exception as e:
+                            self.log("[DEBUG] 使用相对路径查找file input失败: {}，尝试全局查找".format(str(e)[:30]))
+                            # 备选方案：全局查找所有file input
+                            file_inputs = self.driver.find_elements(By.XPATH, "//input[@type='file']")
+                            if not file_inputs:
+                                self.log("[ERROR] 第 {} 张图片：未找到任何文件输入框".format(idx + 1))
+                                continue
+                            file_input = file_inputs[-1]
+                        
+                        # 点击上传按钮
+                        self.driver.execute_script("arguments[0].click();", btn)
+                        self.log("[DEBUG] 已点击第 {} 个上传按钮".format(idx + 1))
+                        time.sleep(1.5)
+                        
+                        # 显示隐藏的file input
+                        self.driver.execute_script("arguments[0].style.display='block';", file_input)
+                        self.driver.execute_script("arguments[0].style.visibility='visible';", file_input)
+                        self.driver.execute_script("arguments[0].style.opacity='1';", file_input)
+                        
+                        # 发送文件路径
+                        self.log("[DEBUG] 发送文件路径: {}".format(img_path))
+                        file_input.send_keys(img_path)
+                        self.log("[OK] 第 {} 张图片已上传".format(idx + 1))
+
+                        # 上传后：如果出现裁剪弹窗则点击“确认裁剪”，不出现则跳过
+                        try:
+                            crop_selectors = [
+                                (By.XPATH, "//div[contains(@class,'cropBtn') and contains(normalize-space(.),'确认裁剪') ]"),
+                                (By.XPATH, "//button[contains(@class,'cropBtn') and contains(normalize-space(.),'确认裁剪') ]"),
+                                (By.XPATH, "//*[contains(@class,'cropModalBox')]//*[contains(normalize-space(.),'确认裁剪')]")
+                            ]
+                            clicked_crop = False
+                            for by, sel in crop_selectors:
+                                try:
+                                    crop_btn = WebDriverWait(self.driver, 2).until(
+                                        EC.element_to_be_clickable((by, sel))
+                                    )
+                                    self.driver.execute_script("arguments[0].click();", crop_btn)
+                                    self.log("[DEBUG] 检测到裁剪弹窗，已点击‘确认裁剪’")
+                                    clicked_crop = True
+                                    time.sleep(0.8)
                                     break
-                            except Exception as e:
-                                self.log("[DEBUG] 第 {} 次上传失败: {}".format(img_idx + 1, str(e)[:60]))
-                                break
+                                except Exception:
+                                    continue
+                            if not clicked_crop:
+                                self.log("[DEBUG] 未出现裁剪弹窗，跳过确认裁剪")
+                        except Exception:
+                            self.log("[DEBUG] 裁剪弹窗处理已跳过")
+
+                        time.sleep(2)
                         
-                        # 如果已上传足够的图片，就停止
-                        if uploaded >= max_uploads:
-                            break
+                        # 清理临时文件
+                        try:
+                            os.remove(img_path)
+                        except:
+                            pass
+                        
                     except Exception as e:
-                        self.log("[DEBUG] 查找'点击上传'按钮失败: {}".format(str(e)[:40]))
+                        self.log("[ERROR] 第 {} 张图片上传失败: {}".format(idx + 1, str(e)[:50]))
                         continue
-            
+                
+                self.log("[OK] 完成上传 {} 张主页图到细节图".format(min(len(images_to_upload), len(upload_buttons))))
+                
             except Exception as e:
-                self.log("[ERROR] 上传过程异常: {}".format(str(e)[:60]))
-            
-            self.log("[OK] 共上传 {} 张细节图".format(uploaded))
+                self.log("[ERROR] 查找上传按钮失败: {}".format(str(e)[:60]))
+                
         except Exception as e:
-            self.log("[ERROR] 上传商品图片失败: {}".format(str(e)[:60]))
+            self.log("[ERROR] 上传细节图异常: {}".format(str(e)[:60]))
 
     def click_identify_image_button_OLD(self):
         """点击'识图发品'按钮。"""
@@ -2245,98 +2307,6 @@ class SheinPublisher:
         except Exception:
             pass
         return None
-
-    def _upload_product_images(self, image_urls, driver):
-        """自动上传多张主页图到SHEIN的'细节图'中（最多5张）。
-        
-        流程：
-        1. 查找"细节图"或"详情图"的上传入口
-        2. 点击"点击上传"按钮
-        3. 逐张上传图片到 file input
-        4. 等待上传完成
-        """
-        if not image_urls:
-            self.log("没有主页图需要上传")
-            return
-        
-        try:
-            # 查找"细节图"或"详情图"的上传入口
-            self.log("查找细节图上传入口...")
-            detail_img_found = False
-            
-            # 方法1：查找包含"细节图"或"详情图"的元素
-            for text_keyword in ["细节图", "详情图", "产品图", "商品图"]:
-                for el in driver.find_elements(By.XPATH, f"//*[contains(text(), '{text_keyword}')]"):
-                    try:
-                        if el.is_displayed():
-                            self.log(f"找到{text_keyword}元素")
-                            # 向下查找"点击上传"按钮
-                            parent = el.find_element(By.XPATH, "./ancestor::div[contains(@class, 'form') or contains(@class, 'field') or contains(@class, 'item')]")
-                            upload_btn = parent.find_element(By.XPATH, ".//*[contains(text(), '点击上传') or contains(text(), '上传图片')]")
-                            if upload_btn.is_displayed():
-                                detail_img_found = True
-                                break
-                    except Exception:
-                        continue
-                if detail_img_found:
-                    break
-            
-            if not detail_img_found:
-                self.log("未找到细节图上传入口，跳过")
-                return
-            
-            # 上传图片（最多5张）
-            for idx, img_url in enumerate(image_urls[:5]):
-                try:
-                    self.log(f"上传第 {idx+1} 张主页图...")
-                    
-                    # 下载图片到临时文件
-                    img_path = self._save_img_temp(img_url)
-                    if not img_path:
-                        self.log(f"第 {idx+1} 张图片下载失败，跳过")
-                        continue
-                    
-                    try:
-                        # 查找 file input 并上传
-                        file_inputs = driver.find_elements(By.XPATH, "//input[@type='file']")
-                        uploaded = False
-                        
-                        for inp in file_inputs:
-                            try:
-                                # 显示隐藏的 file input
-                                driver.execute_script(
-                                    "arguments[0].style.display='block';"
-                                    "arguments[0].style.visibility='visible';"
-                                    "arguments[0].style.opacity='1';", inp)
-                                
-                                # 发送图片路径
-                                inp.send_keys(img_path)
-                                self.log(f"第 {idx+1} 张图片已上传")
-                                uploaded = True
-                                time.sleep(2)  # 等待上传完成
-                                break
-                            except Exception as e:
-                                self.log(f"file input 尝试失败: {e}")
-                                continue
-                        
-                        if not uploaded:
-                            self.log(f"第 {idx+1} 张图片上传失败")
-                    finally:
-                        # 清理临时文件
-                        try:
-                            os.remove(img_path)
-                        except Exception:
-                            pass
-                    
-                except Exception as e:
-                    self.log(f"上传第 {idx+1} 张图片异常: {e}")
-                    continue
-            
-            self.log(f"完成上传 {min(len(image_urls), 5)} 张主页图到细节图")
-            
-        except Exception as e:
-            self.log(f"自动上传细节图失败: {e}")
-
 
     # ── 识图选类目
     def select_category_by_image(self, img_url_or_path, timeout=60):
@@ -3760,7 +3730,7 @@ class SheinPublisher:
         main_images = info.get("main_images", [])
         if main_images:
             self.log("自动上传 {} 张主页图到细节图...".format(len(main_images[:5])))
-            self._upload_detail_images(main_images[:5], driver)
+            self._upload_detail_images(main_images[:5])
 
         # Step7: 提交发布
         self.log("点击发布商品...")
@@ -3776,7 +3746,7 @@ class SheinPublisher:
         self.log("商品已提交发布")
         return True
 
-    def _upload_detail_images(self, image_urls, driver):
+    def _upload_detail_images(self, image_urls):
         """
         上传细节图到SHEIN商品发布页面。
         流程：
@@ -3788,15 +3758,92 @@ class SheinPublisher:
         if not image_urls:
             return
         
+        driver = self.driver
         try:
-            # 查找所有"点击上传"按钮
-            upload_buttons = driver.find_elements(By.XPATH, "//div[contains(text(),'点击上传')]")
+            # 方法1：查找所有包含"点击上传"文本的可点击元素（div、button、span等）
+            upload_buttons = []
+            
+            # 查找所有包含"点击上传"的元素
+            for selector in [
+                "//div[contains(text(),'点击上传')]",
+                "//button[contains(text(),'点击上传')]",
+                "//span[contains(text(),'点击上传')]",
+                "//*[contains(text(),'点击上传') and (self::div or self::button or self::span)]"
+            ]:
+                try:
+                    elements = driver.find_elements(By.XPATH, selector)
+                    upload_buttons.extend(elements)
+                except Exception:
+                    pass
+            
+            # 去重
+            upload_buttons = list(dict.fromkeys(upload_buttons))
             self.log("找到 {} 个上传按钮".format(len(upload_buttons)))
             
             if not upload_buttons:
-                self.log("未找到上传按钮，尝试查找其他选择器...")
-                upload_buttons = driver.find_elements(By.XPATH, 
-                    "//button[contains(text(),'上传')] | //span[contains(text(),'上传')]")
+                self.log("未找到上传按钮，跳过细节图上传")
+                return
+            
+            # 遍历每个图片URL
+            for idx, img_url in enumerate(image_urls):
+                if idx >= len(upload_buttons):
+                    self.log("上传按钮数量不足，已上传 {} 张图片".format(idx))
+                    break
+                
+                try:
+                    self.log("上传第 {} 张图片: {}".format(idx + 1, img_url[:50]))
+                    
+                    # 下载图片到临时文件
+                    img_path = self._save_img_temp(img_url)
+                    if not img_path:
+                        self.log("第 {} 张图片下载失败，跳过".format(idx + 1))
+                        continue
+                    
+                    # 获取当前上传按钮
+                    btn = upload_buttons[idx]
+                    
+                    # 滚动到上传按钮
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                    time.sleep(0.5)
+                    
+                    # 点击上传按钮
+                    try:
+                        driver.execute_script("arguments[0].click();", btn)
+                    except Exception:
+                        # 如果JS点击失败，尝试普通点击
+                        btn.click()
+                    
+                    time.sleep(1)
+                    
+                    # 查找文件输入框并上传
+                    file_inputs = driver.find_elements(By.XPATH, "//input[@type='file']")
+                    if file_inputs:
+                        # 使用最后一个file input（通常是最新打开的）
+                        file_input = file_inputs[-1]
+                        driver.execute_script("arguments[0].style.display='block';", file_input)
+                        driver.execute_script("arguments[0].style.visibility='visible';", file_input)
+                        driver.execute_script("arguments[0].style.opacity='1';", file_input)
+                        
+                        # 发送文件路径
+                        file_input.send_keys(img_path)
+                        self.log("第 {} 张图片已上传".format(idx + 1))
+                        time.sleep(2)
+                    else:
+                        self.log("第 {} 张图片：未找到文件输入框".format(idx + 1))
+                    
+                    # 清理临时文件
+                    try:
+                        os.remove(img_path)
+                    except:
+                        pass
+                    
+                except Exception as e:
+                    self.log("第 {} 张图片上传失败: {}".format(idx + 1, e))
+                    continue
+            
+            self.log("细节图上传完成")
+        except Exception as e:
+            self.log("细节图上传过程出错: {}".format(e))
             
             # 遍历每个图片URL
             for idx, img_url in enumerate(image_urls):
