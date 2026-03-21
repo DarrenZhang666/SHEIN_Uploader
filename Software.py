@@ -765,6 +765,22 @@ class SheinApp(tk.Tk):
             if self._shein_publisher.fill_product_info(product_info):
                 self.status_lbl.config(text='✓ 商品基础信息填写完成')
                 self._pub_log('商品 {} 基础信息填写完成'.format(self.current_asin))
+
+                # 等待页面稳定后继续填写规格及供应信息
+                self.status_lbl.config(text='等待页面加载，准备填写规格及供应信息...')
+                self._pub_log('[DEBUG] 等待2秒后开始填写规格及供应信息...')
+                time.sleep(2)
+
+                # 填写规格及供应信息
+                self.status_lbl.config(text='填写规格及供应信息...')
+                self._pub_log('[DEBUG] 开始填写规格及供应信息...')
+                try:
+                    self._shein_publisher.fill_spec_and_supply_info(product_info)
+                    self.status_lbl.config(text='✓ 规格及供应信息填写完成')
+                    self._pub_log('商品 {} 规格及供应信息填写完成'.format(self.current_asin))
+                except Exception as spec_e:
+                    self._pub_log('[ERROR] 规格及供应信息填写异常: {}'.format(str(spec_e)[:80]))
+                    self.status_lbl.config(text='规格及供应信息填写遇到问题，请手动检查')
             else:
                 self.status_lbl.config(text='✗ 基础信息填写失败')
         except Exception as e:
@@ -2008,9 +2024,12 @@ class SheinPublisher:
                 if not filled:
                     self.log("[ERROR] 未能填写货号")
             
-            # 6. 上传主规格图和细节图
+            # 6. 上传主规格图和细节图（非阻塞：失败不影响后续“规格及供应信息”流程）
             self.log("[DEBUG] 上传商品图片...")
-            self._upload_product_images(product_info)
+            try:
+                self._upload_product_images(product_info)
+            except Exception as e:
+                self.log("[DEBUG] 上传商品图片步骤异常，继续后续流程: {}".format(str(e)[:60]))
             
             self.log("[OK] 商品基础信息填写完成")
             return True
@@ -2018,27 +2037,159 @@ class SheinPublisher:
             self.log("[ERROR] 填写基础信息失败: {}".format(str(e)[:60]))
             return False
 
+    def fill_spec_and_supply_info(self, product_info):
+        """填写'规格及供应信息'板块（价格、SKU、库存等）。"""
+        try:
+            self.log("[DEBUG] 开始填写规格及供应信息...")
+            driver = self.driver
+
+            # 等待规格板块出现（查找包含'规格'或'供应'的标题）
+            spec_visible = False
+            for _ in range(10):
+                try:
+                    els = driver.find_elements(By.XPATH,
+                        "//*[contains(text(),'规格及供应') or contains(text(),'规格信息') or contains(text(),'供应信息')]")
+                    if els:
+                        spec_visible = True
+                        self.log("[OK] 找到规格及供应信息板块")
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+
+            if not spec_visible:
+                self.log("[DEBUG] 未检测到规格板块标题，继续尝试填写...")
+
+            # 提取商品信息
+            price_raw = product_info.get("price", "")
+            asin = product_info.get("asin", "")
+            main_images = product_info.get("main_images", [])
+
+            # ── 解析价格（转为数字字符串，去掉货币符号）
+            price_num = ""
+            if price_raw and price_raw != "N/A":
+                m = re.search(r"[\d]+\.?[\d]*", price_raw.replace(",", ""))
+                if m:
+                    price_num = m.group()
+
+            # ── 1. 填写销售价格
+            if price_num:
+                self.log("[DEBUG] 填写销售价格: {}".format(price_num))
+                price_filled = False
+                price_selectors = [
+                    (By.XPATH, "//input[contains(@placeholder,'价格') or contains(@placeholder,'售价') or contains(@placeholder,'Price')]"),
+                    (By.XPATH, "//*[contains(text(),'销售价') or contains(text(),'售价') or contains(text(),'价格')]/following::input[1]"),
+                    (By.XPATH, "//*[contains(text(),'Price')]/following::input[1]"),
+                    (By.CSS_SELECTOR, "input[name='price'], input[name='salePrice'], input[name='sellPrice']"),
+                ]
+                for by, sel in price_selectors:
+                    try:
+                        inp = WebDriverWait(driver, 4).until(EC.presence_of_element_located((by, sel)))
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                        inp.clear()
+                        self._js_input(inp, price_num)
+                        self.log("[OK] 销售价格已填写: {}".format(price_num))
+                        price_filled = True
+                        time.sleep(0.5)
+                        break
+                    except Exception:
+                        continue
+                if not price_filled:
+                    self.log("[DEBUG] 未找到价格输入框，跳过")
+
+            # ── 2. 填写货号/SKU（XYZ-{ASIN}）
+            if asin:
+                sku_val = "XYZ-{}".format(asin)
+                self.log("[DEBUG] 填写SKU/货号: {}".format(sku_val))
+                sku_filled = False
+                sku_selectors = [
+                    (By.XPATH, "//input[contains(@placeholder,'SKU') or contains(@placeholder,'货号') or contains(@placeholder,'编号')]"),
+                    (By.XPATH, "//*[contains(text(),'SKU') or contains(text(),'货号')]/following::input[1]"),
+                    (By.CSS_SELECTOR, "input[name='sku'], input[name='skuCode']"),
+                ]
+                for by, sel in sku_selectors:
+                    try:
+                        inp = WebDriverWait(driver, 4).until(EC.presence_of_element_located((by, sel)))
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                        existing = inp.get_attribute("value") or ""
+                        if existing:  # 已有值则跳过（基础信息可能已填）
+                            self.log("[DEBUG] SKU输入框已有值: {}，跳过".format(existing))
+                            sku_filled = True
+                            break
+                        inp.clear()
+                        self._js_input(inp, sku_val)
+                        self.log("[OK] SKU已填写: {}".format(sku_val))
+                        sku_filled = True
+                        time.sleep(0.5)
+                        break
+                    except Exception:
+                        continue
+                if not sku_filled:
+                    self.log("[DEBUG] 未找到SKU输入框，跳过")
+
+            # ── 3. 填写库存数量（默认999）
+            self.log("[DEBUG] 填写库存数量...")
+            stock_filled = False
+            stock_selectors = [
+                (By.XPATH, "//input[contains(@placeholder,'库存') or contains(@placeholder,'数量') or contains(@placeholder,'Quantity') or contains(@placeholder,'Stock')]"),
+                (By.XPATH, "//*[contains(text(),'库存') or contains(text(),'可售数量')]/following::input[1]"),
+                (By.CSS_SELECTOR, "input[name='stock'], input[name='quantity'], input[name='inventory']"),
+            ]
+            for by, sel in stock_selectors:
+                try:
+                    inp = WebDriverWait(driver, 4).until(EC.presence_of_element_located((by, sel)))
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                    inp.clear()
+                    self._js_input(inp, "999")
+                    self.log("[OK] 库存数量已填写: 999")
+                    stock_filled = True
+                    time.sleep(0.5)
+                    break
+                except Exception:
+                    continue
+            if not stock_filled:
+                self.log("[DEBUG] 未找到库存输入框，跳过")
+
+            # ── 4. 上传主规格图（第一张主图）
+            if main_images:
+                self.log("[DEBUG] 上传主规格图...")
+                try:
+                    main_img_url = main_images[0]
+                    img_path = self._save_img_temp(main_img_url)
+                    if img_path:
+                        # 查找规格图上传区域的 file input
+                        file_inputs = driver.find_elements(By.XPATH, "//input[@type='file']")
+                        if file_inputs:
+                            fi = file_inputs[0]
+                            driver.execute_script(
+                                "arguments[0].style.cssText='display:block!important;visibility:visible!important;opacity:1!important;';", fi)
+                            fi.send_keys(img_path)
+                            self.log("[OK] 主规格图已上传")
+                            time.sleep(2)
+                        try:
+                            os.remove(img_path)
+                        except Exception:
+                            pass
+                    else:
+                        self.log("[DEBUG] 主规格图下载失败，跳过")
+                except Exception as e:
+                    self.log("[DEBUG] 主规格图上传异常: {}".format(str(e)[:60]))
+
+            self.log("[OK] 规格及供应信息填写完成")
+            return True
+        except Exception as e:
+            self.log("[ERROR] 填写规格及供应信息失败: {}".format(str(e)[:80]))
+            return False
+
     def _upload_product_images(self, product_info):
         """上传细节图到 SHEIN 发布页面（规格及供应信息 - 主规格图 - 细节图）。"""
         try:
             asin = product_info.get("asin", "")
-            
-            # ===== 抓取页面HTML并保存到桌面 =====
-            try:
-                page_html = self.driver.page_source
-                desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-                os.makedirs(desktop, exist_ok=True)
-                
-                # 保存完整HTML
-                html_file = os.path.join(desktop, "SHEIN_页面_{}_{}.html".format(asin, int(time.time())))
-                with open(html_file, "w", encoding="utf-8") as f:
-                    f.write(page_html)
-                self.log("[OK] 页面HTML已保存到: {}".format(html_file))
-            except Exception as e:
-                self.log("[DEBUG] 保存HTML失败: {}".format(str(e)[:60]))
-            
+            self.log("开始上传细节图...")
+
             # ===== 优先使用主页图（main_images），如果没有则使用image_url =====
             main_images = product_info.get("main_images", [])
+            
             if not main_images and product_info.get("image_url"):
                 main_images = [product_info.get("image_url")]
             
@@ -2138,32 +2289,6 @@ class SheinPublisher:
                         self.log("[DEBUG] 发送文件路径: {}".format(img_path))
                         file_input.send_keys(img_path)
                         self.log("[OK] 第 {} 张图片已上传".format(idx + 1))
-
-                        # 上传后：如果出现裁剪弹窗则点击“确认裁剪”，不出现则跳过
-                        try:
-                            crop_selectors = [
-                                (By.XPATH, "//div[contains(@class,'cropBtn') and contains(normalize-space(.),'确认裁剪') ]"),
-                                (By.XPATH, "//button[contains(@class,'cropBtn') and contains(normalize-space(.),'确认裁剪') ]"),
-                                (By.XPATH, "//*[contains(@class,'cropModalBox')]//*[contains(normalize-space(.),'确认裁剪')]")
-                            ]
-                            clicked_crop = False
-                            for by, sel in crop_selectors:
-                                try:
-                                    crop_btn = WebDriverWait(self.driver, 2).until(
-                                        EC.element_to_be_clickable((by, sel))
-                                    )
-                                    self.driver.execute_script("arguments[0].click();", crop_btn)
-                                    self.log("[DEBUG] 检测到裁剪弹窗，已点击‘确认裁剪’")
-                                    clicked_crop = True
-                                    time.sleep(0.8)
-                                    break
-                                except Exception:
-                                    continue
-                            if not clicked_crop:
-                                self.log("[DEBUG] 未出现裁剪弹窗，跳过确认裁剪")
-                        except Exception:
-                            self.log("[DEBUG] 裁剪弹窗处理已跳过")
-
                         time.sleep(2)
                         
                         # 清理临时文件
