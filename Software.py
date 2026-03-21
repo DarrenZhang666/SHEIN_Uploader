@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
@@ -1763,6 +1763,170 @@ class SheinPublisher:
             self.log("[ERROR] 点击按钮失败: {}".format(str(e)))
             return False
 
+
+    def _handle_crop_dialog(self):
+        """
+        处理"图片裁剪"弹框（基于真实页面HTML）:
+          弹框标题: 图片裁剪 (class: so-card-header so-modal-title)
+          1:1 radio label: so-checkinput-radio-container > span.so-checkinput-desc 文字为"1:1"
+          确认裁剪按钒: class 含 cropBtn, span 文字为"确认裁剪"
+        返回 True 成功处理，False 未出现弹框或处理失败。
+        """
+        driver = self.driver
+
+        def _is_crop_dialog_visible():
+            try:
+                for el in driver.find_elements(
+                        By.XPATH,
+                        "//div[contains(@class,'so-modal-title') and normalize-space(text())='图片裁剪']"):
+                    if el.is_displayed():
+                        return True
+                for el in driver.find_elements(
+                        By.XPATH, "//div[contains(@class,'so-modal-show')]"):
+                    if el.is_displayed():
+                        return True
+            except Exception:
+                pass
+            return False
+
+        def _select_ratio_1_1():
+            # 方法1: JS直接操作
+            js = """
+            var labels = document.querySelectorAll('label.so-checkinput-radio-container');
+            for (var i = 0; i < labels.length; i++) {
+                var desc = labels[i].querySelector('.so-checkinput-desc');
+                if (desc && desc.textContent.trim() === '1:1') {
+                    var radio = labels[i].querySelector('input[type="radio"]');
+                    if (radio && !radio.checked) {
+                        labels[i].click();
+                        radio.checked = true;
+                        radio.dispatchEvent(new Event('change', {bubbles: true}));
+                        radio.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                    }
+                    return true;
+                }
+            }
+            return false;
+            """
+            try:
+                if driver.execute_script(js):
+                    return True
+            except Exception:
+                pass
+            # 方法2: Selenium XPath
+            xpaths = [
+                "//label[contains(@class,'so-checkinput-radio-container') and .//span[contains(@class,'so-checkinput-desc') and normalize-space(text())='1:1']]",
+                "//span[contains(@class,'so-checkinput-desc') and normalize-space(text())='1:1']/ancestor::label[1]",
+                "//label[.//span[normalize-space(text())='1:1']]",
+            ]
+            for xp in xpaths:
+                for label in driver.find_elements(By.XPATH, xp):
+                    try:
+                        if not label.is_displayed():
+                            continue
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});", label)
+                        time.sleep(0.1)
+                        driver.execute_script("arguments[0].click();", label)
+                        try:
+                            radio = label.find_element(By.XPATH, ".//input[@type='radio']")
+                            driver.execute_script(
+                                "arguments[0].checked=true;"
+                                "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));"
+                                "arguments[0].dispatchEvent(new MouseEvent('click',{bubbles:true}));",
+                                radio)
+                        except Exception:
+                            pass
+                        return True
+                    except Exception:
+                        continue
+            return False
+
+        def _click_confirm():
+            # 方法1: JS匹配 cropBtn class
+            js = """
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+                var c = btns[i].className || '';
+                var t = btns[i].textContent.trim();
+                if ((c.indexOf('cropBtn') !== -1 || t === '确认裁剪') && !btns[i].disabled) {
+                    btns[i].click();
+                    return true;
+                }
+            }
+            return false;
+            """
+            try:
+                if driver.execute_script(js):
+                    return True
+            except Exception:
+                pass
+            # 方法2: Selenium XPath
+            xpaths = [
+                "//button[contains(@class,'cropBtn') and not(@disabled)]",
+                "//div[contains(@class,'so-modal-show')]//button[contains(@class,'so-button-primary') and .//span[normalize-space(text())='确认裁剪'] and not(@disabled)]",
+                "//button[.//span[normalize-space(text())='确认裁剪'] and not(@disabled)]",
+                "//div[contains(@class,'so-modal-show')]//button[contains(@class,'so-button-primary') and not(@disabled)]",
+            ]
+            for xp in xpaths:
+                for btn in driver.find_elements(By.XPATH, xp):
+                    try:
+                        if not btn.is_displayed():
+                            continue
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});", btn)
+                        time.sleep(0.1)
+                        driver.execute_script("arguments[0].click();", btn)
+                        return True
+                    except Exception:
+                        continue
+            return False
+
+        try:
+            # Step0: 等待弹框出现（8秒）
+            self.log("[DEBUG] 等待图片裁剪弹框...")
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                if _is_crop_dialog_visible():
+                    self.log("[OK] 检测到图片裁剪弹框")
+                    break
+                time.sleep(0.4)
+            else:
+                self.log("[DEBUG] 未检测到裁剪弹框，跳过")
+                return False
+
+            time.sleep(0.3)
+
+            # Step1: 选择 1:1 裁剪比例
+            if _select_ratio_1_1():
+                self.log("[OK] 已选择 1:1 裁剪比例")
+                time.sleep(0.5)
+            else:
+                self.log("[WARN] 未找到 1:1 比例选项，继续点击确认...")
+
+            # Step2: 点击确认裁剪
+            if _click_confirm():
+                self.log("[OK] 已点击确认裁剪")
+                time.sleep(2)
+            else:
+                self.log("[ERROR] 未能点击确认裁剪按钒")
+                return False
+
+            # Step3: 等待弹框关闭
+            self.log("[DEBUG] 等待裁剪弹框关闭...")
+            deadline2 = time.time() + 10
+            while time.time() < deadline2:
+                if not _is_crop_dialog_visible():
+                    self.log("[OK] 裁剪弹框已关闭")
+                    break
+                time.sleep(0.4)
+
+            return True
+
+        except Exception as e:
+            self.log("[ERROR] 处理裁剪弹框失败: {}".format(str(e)[:80]))
+            return False
+
     def upload_product_image(self, image_path):
         """上传商品图片到'识图发品'页面。"""
         if not os.path.isfile(image_path):
@@ -1784,8 +1948,12 @@ class SheinPublisher:
             self.log("[DEBUG] 上传图片: {}".format(os.path.basename(image_path)))
             file_input.send_keys(abs_path)
             
+            # 上传后处理裁剪弹框
+            self.log("[DEBUG] 检测是否有裁剪弹框...")
+            self._handle_crop_dialog()
+
             # 等待上传完成
-            time.sleep(3)
+            time.sleep(2)
             self.log("[OK] 图片已上传: {}".format(os.path.basename(image_path)))
             return True
         except Exception as e:
@@ -2182,130 +2350,109 @@ class SheinPublisher:
             return False
 
     def _upload_product_images(self, product_info):
-        """上传细节图到 SHEIN 发布页面（规格及供应信息 - 主规格图 - 细节图）。"""
+        """
+        上传细节图到 SHEIN 发布页面。
+        策略：不依赖容器ID，直接找页面中的 file input 逐一上传。
+        每张上传后处理裁剪弹框。
+        """
         try:
-            asin = product_info.get("asin", "")
-            self.log("开始上传细节图...")
-
-            # ===== 优先使用主页图（main_images），如果没有则使用image_url =====
             main_images = product_info.get("main_images", [])
-            
             if not main_images and product_info.get("image_url"):
-                main_images = [product_info.get("image_url")]
-            
+                main_images = [product_info["image_url"]]
             if not main_images:
                 self.log("[ERROR] 没有主页图可以上传")
                 return
-            
-            # 限制最多5张
+
             images_to_upload = main_images[:5]
+            self.log("开始上传细节图...")
             self.log("[DEBUG] 准备上传 {} 张主页图到细节图".format(len(images_to_upload)))
-            
-            # ===== 查找detail_img_container容器 =====
-            try:
-                detail_container = self.driver.find_element(By.ID, "userguide_commodities_info_skc_title_table")
-                self.log("[DEBUG] 找到detail_img_container容器")
-            except Exception as e:
-                self.log("[ERROR] 未找到detail_img_container容器: {}".format(str(e)[:40]))
-                # 备选方案：使用class查找
+
+            # 滚动页面使细节图区域渲染
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1.5)
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.5);")
+            time.sleep(1.5)
+
+            for idx, img_url in enumerate(images_to_upload):
                 try:
-                    detail_container = self.driver.find_element(By.CLASS_NAME, "detail_img_container")
-                    self.log("[DEBUG] 使用class查找找到detail_img_container容器")
-                except Exception as e2:
-                    self.log("[ERROR] 备选方案也失败: {}".format(str(e2)[:40]))
-                    return
-            
-            # ===== 在容器内查找所有"点击上传"按钮 =====
-            try:
-                # 方法1：使用精确的class名称查找
-                upload_buttons = detail_container.find_elements(By.XPATH, ".//div[@class='spmp_style__uploadText--IK54MR06']")
-                self.log("[DEBUG] 方法1找到 {} 个'点击上传'按钮".format(len(upload_buttons)))
-                
-                if not upload_buttons:
-                    # 方法2：使用class包含匹配
-                    upload_buttons = detail_container.find_elements(By.XPATH, ".//div[contains(@class, 'uploadText')]")
-                    self.log("[DEBUG] 方法2找到 {} 个'点击上传'按钮".format(len(upload_buttons)))
-                
-                if not upload_buttons:
-                    # 方法3：使用文本内容查找
-                    upload_buttons = detail_container.find_elements(By.XPATH, ".//div[contains(text(),'点击上传')]")
-                    self.log("[DEBUG] 方法3找到 {} 个'点击上传'按钮".format(len(upload_buttons)))
-                
-                if not upload_buttons:
-                    self.log("[ERROR] 在detail_img_container内未找到任何'点击上传'按钮")
-                    return
-                
-                self.log("[DEBUG] 共找到 {} 个'点击上传'按钮".format(len(upload_buttons)))
-                
-                # ===== 遍历每个上传按钮，上传图片 =====
-                for idx, img_url in enumerate(images_to_upload):
-                    if idx >= len(upload_buttons):
-                        self.log("[DEBUG] 上传按钮数量不足，已上传 {} 张".format(idx))
-                        break
-                    
-                    try:
-                        self.log("[DEBUG] 上传第 {} 张图片...".format(idx + 1))
-                        
-                        # 下载图片到临时文件
-                        img_path = self._save_img_temp(img_url)
-                        if not img_path:
-                            self.log("[ERROR] 第 {} 张图片下载失败".format(idx + 1))
-                            continue
-                        
-                        # 获取当前上传按钮
-                        btn = upload_buttons[idx]
-                        
-                        # 滚动到按钮
-                        self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                        time.sleep(0.5)
-                        
-                        # 找到按钮所在的uploadHandle容器，然后找到其中的file input
-                        try:
-                            # 从"点击上传"div向上找到uploadHandle容器
-                            upload_handle = btn.find_element(By.XPATH, "./ancestor::div[contains(@class, 'uploadHandle')]")
-                            # 在uploadHandle容器内找到file input
-                            file_input = upload_handle.find_element(By.XPATH, ".//input[@type='file']")
-                            self.log("[DEBUG] 找到第 {} 个对应的file input".format(idx + 1))
-                        except Exception as e:
-                            self.log("[DEBUG] 使用相对路径查找file input失败: {}，尝试全局查找".format(str(e)[:30]))
-                            # 备选方案：全局查找所有file input
-                            file_inputs = self.driver.find_elements(By.XPATH, "//input[@type='file']")
-                            if not file_inputs:
-                                self.log("[ERROR] 第 {} 张图片：未找到任何文件输入框".format(idx + 1))
-                                continue
-                            file_input = file_inputs[-1]
-                        
-                        # 点击上传按钮
-                        self.driver.execute_script("arguments[0].click();", btn)
-                        self.log("[DEBUG] 已点击第 {} 个上传按钮".format(idx + 1))
-                        time.sleep(1.5)
-                        
-                        # 显示隐藏的file input
-                        self.driver.execute_script("arguments[0].style.display='block';", file_input)
-                        self.driver.execute_script("arguments[0].style.visibility='visible';", file_input)
-                        self.driver.execute_script("arguments[0].style.opacity='1';", file_input)
-                        
-                        # 发送文件路径
-                        self.log("[DEBUG] 发送文件路径: {}".format(img_path))
-                        file_input.send_keys(img_path)
-                        self.log("[OK] 第 {} 张图片已上传".format(idx + 1))
-                        time.sleep(2)
-                        
-                        # 清理临时文件
-                        try:
-                            os.remove(img_path)
-                        except:
-                            pass
-                        
-                    except Exception as e:
-                        self.log("[ERROR] 第 {} 张图片上传失败: {}".format(idx + 1, str(e)[:50]))
+                    self.log("[DEBUG] 上传细节图第 {} 张...".format(idx + 1))
+                    img_path = self._save_img_temp(img_url)
+                    if not img_path:
+                        self.log("[ERROR] 第 {} 张图片下载失败".format(idx + 1))
                         continue
-                
-                self.log("[OK] 完成上传 {} 张主页图到细节图".format(min(len(images_to_upload), len(upload_buttons))))
-                
-            except Exception as e:
-                self.log("[ERROR] 查找上传按钮失败: {}".format(str(e)[:60]))
-                
+
+                    # 获取当前所有 file input
+                    all_inputs = self.driver.find_elements(By.XPATH, "//input[@type='file']")
+                    self.log("[DEBUG] 当前页面共 {} 个 file input".format(len(all_inputs)))
+
+                    if not all_inputs:
+                        self.log("[ERROR] 第 {} 张：未找到任何 file input，跳过".format(idx + 1))
+                        try:
+                            import os as _os; _os.remove(img_path)
+                        except Exception:
+                            pass
+                        continue
+
+                    # 跳过第一个 input（通常是主图区域），剩余供细节图使用
+                    detail_inputs = all_inputs[1:] if len(all_inputs) > 1 else all_inputs
+
+                    # 按 idx 匹配对应的 input，超出则取最后一个
+                    if idx < len(detail_inputs):
+                        targets = [detail_inputs[idx]]
+                    else:
+                        targets = [detail_inputs[-1]]
+
+                    uploaded = False
+                    for file_input in targets:
+                        try:
+                            self.driver.execute_script(
+                                "arguments[0].style.display='block';"
+                                "arguments[0].style.visibility='visible';"
+                                "arguments[0].style.opacity='1';",
+                                file_input
+                            )
+                            file_input.send_keys(img_path)
+                            self.log("[OK] 第 {} 张细节图已送入上传".format(idx + 1))
+                            uploaded = True
+                            break
+                        except Exception as ie:
+                            self.log("[DEBUG] 尝试 file input 失败: {}".format(str(ie)[:40]))
+                            continue
+
+                    # 备用：全部 input 逐个尝试
+                    if not uploaded:
+                        for file_input in reversed(all_inputs):
+                            try:
+                                self.driver.execute_script(
+                                    "arguments[0].style.display='block';"
+                                    "arguments[0].style.visibility='visible';"
+                                    "arguments[0].style.opacity='1';",
+                                    file_input
+                                )
+                                file_input.send_keys(img_path)
+                                self.log("[OK] 第 {} 张细节图已送入上传（备用）".format(idx + 1))
+                                uploaded = True
+                                break
+                            except Exception:
+                                continue
+
+                    if uploaded:
+                        self._handle_crop_dialog()
+                        time.sleep(1.5)
+                    else:
+                        self.log("[ERROR] 第 {} 张细节图所有 file input 尝试均失败".format(idx + 1))
+
+                    try:
+                        import os as _os; _os.remove(img_path)
+                    except Exception:
+                        pass
+
+                except Exception as e:
+                    self.log("[ERROR] 第 {} 张细节图上传失败: {}".format(idx + 1, str(e)[:60]))
+                    continue
+
+            self.log("[OK] 细节图上传完成")
+
         except Exception as e:
             self.log("[ERROR] 上传细节图异常: {}".format(str(e)[:60]))
 
@@ -3875,153 +4022,74 @@ class SheinPublisher:
         """
         上传细节图到SHEIN商品发布页面。
         流程：
-          1. 查找"细节图"部分的"点击上传"按钮
-          2. 点击按钮打开文件选择器
-          3. 下载图片并上传
-          4. 重复直到所有图片上传完成
+          1. 找到细节图区域的 file input（不依赖"点击上传"按钮文字）
+          2. 逐张下载图片并通过 send_keys 上传
+          3. 处理每次上传后可能弹出的"图片处理"裁剪弹框
         """
         if not image_urls:
             return
-        
         driver = self.driver
         try:
-            # 方法1：查找所有包含"点击上传"文本的可点击元素（div、button、span等）
-            upload_buttons = []
-            
-            # 查找所有包含"点击上传"的元素
-            for selector in [
-                "//div[contains(text(),'点击上传')]",
-                "//button[contains(text(),'点击上传')]",
-                "//span[contains(text(),'点击上传')]",
-                "//*[contains(text(),'点击上传') and (self::div or self::button or self::span)]"
-            ]:
-                try:
-                    elements = driver.find_elements(By.XPATH, selector)
-                    upload_buttons.extend(elements)
-                except Exception:
-                    pass
-            
-            # 去重
-            upload_buttons = list(dict.fromkeys(upload_buttons))
-            self.log("找到 {} 个上传按钮".format(len(upload_buttons)))
-            
-            if not upload_buttons:
-                self.log("未找到上传按钮，跳过细节图上传")
-                return
-            
-            # 遍历每个图片URL
             for idx, img_url in enumerate(image_urls):
-                if idx >= len(upload_buttons):
-                    self.log("上传按钮数量不足，已上传 {} 张图片".format(idx))
-                    break
-                
                 try:
-                    self.log("上传第 {} 张图片: {}".format(idx + 1, img_url[:50]))
-                    
-                    # 下载图片到临时文件
+                    self.log("上传细节图第 {} 张: {}".format(idx + 1, img_url[:60]))
                     img_path = self._save_img_temp(img_url)
                     if not img_path:
                         self.log("第 {} 张图片下载失败，跳过".format(idx + 1))
                         continue
-                    
-                    # 获取当前上传按钮
-                    btn = upload_buttons[idx]
-                    
-                    # 滚动到上传按钮
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                    time.sleep(0.5)
-                    
-                    # 点击上传按钮
-                    try:
-                        driver.execute_script("arguments[0].click();", btn)
-                    except Exception:
-                        # 如果JS点击失败，尝试普通点击
-                        btn.click()
-                    
-                    time.sleep(1)
-                    
-                    # 查找文件输入框并上传
-                    file_inputs = driver.find_elements(By.XPATH, "//input[@type='file']")
-                    if file_inputs:
-                        # 使用最后一个file input（通常是最新打开的）
-                        file_input = file_inputs[-1]
-                        driver.execute_script("arguments[0].style.display='block';", file_input)
-                        driver.execute_script("arguments[0].style.visibility='visible';", file_input)
-                        driver.execute_script("arguments[0].style.opacity='1';", file_input)
-                        
-                        # 发送文件路径
-                        file_input.send_keys(img_path)
-                        self.log("第 {} 张图片已上传".format(idx + 1))
-                        time.sleep(2)
-                    else:
-                        self.log("第 {} 张图片：未找到文件输入框".format(idx + 1))
-                    
-                    # 清理临时文件
-                    try:
-                        os.remove(img_path)
-                    except:
-                        pass
-                    
-                except Exception as e:
-                    self.log("第 {} 张图片上传失败: {}".format(idx + 1, e))
-                    continue
-            
-            self.log("细节图上传完成")
-        except Exception as e:
-            self.log("细节图上传过程出错: {}".format(e))
-            
-            # 遍历每个图片URL
-            for idx, img_url in enumerate(image_urls):
-                if idx >= len(upload_buttons):
-                    self.log("上传按钮数量不足，已上传 {} 张图片".format(idx))
-                    break
-                
-                try:
-                    self.log("上传第 {} 张图片: {}".format(idx + 1, img_url[:50]))
-                    
-                    # 下载图片到临时文件
-                    img_path = self._save_img_temp(img_url)
-                    if not img_path:
-                        self.log("第 {} 张图片下载失败，跳过".format(idx + 1))
-                        continue
-                    
-                    # 滚动到上传按钮
-                    btn = upload_buttons[idx]
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                    time.sleep(0.5)
-                    
-                    # 点击上传按钮
-                    driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(1)
-                    
-                    # 查找文件输入框并上传
-                    file_inputs = driver.find_elements(By.XPATH, "//input[@type='file']")
-                    if file_inputs:
-                        # 使用最后一个file input（通常是最新打开的）
-                        file_input = file_inputs[-1]
-                        driver.execute_script("arguments[0].style.display='block';", file_input)
-                        file_input.send_keys(img_path)
-                        self.log("第 {} 张图片已上传".format(idx + 1))
-                        time.sleep(2)
-                    else:
-                        self.log("第 {} 张图片：未找到文件输入框".format(idx + 1))
-                    
-                    # 清理临时文件
-                    try:
-                        os.remove(img_path)
-                    except:
-                        pass
-                    
-                except Exception as e:
-                    self.log("第 {} 张图片上传失败: {}".format(idx + 1, e))
-                    continue
-            
-            self.log("细节图上传完成")
-        except Exception as e:
-            self.log("细节图上传过程出错: {}".format(e))
 
+                    # 找到所有 file input，优先找细节图区域的
+                    file_inputs = driver.find_elements(
+                        By.XPATH,
+                        "//input[@type='file']"
+                    )
+                    if not file_inputs:
+                        self.log("第 {} 张：未找到 file input，跳过".format(idx + 1))
+                        try:
+                            import os as _os
+                            _os.remove(img_path)
+                        except Exception:
+                            pass
+                        continue
+
+                    # 使用最后一个可用的 file input（页面后半段的细节图区域）
+                    uploaded = False
+                    for file_input in reversed(file_inputs):
+                        try:
+                            driver.execute_script(
+                                "arguments[0].style.display='block';"
+                                "arguments[0].style.visibility='visible';"
+                                "arguments[0].style.opacity='1';",
+                                file_input
+                            )
+                            file_input.send_keys(img_path)
+                            self.log("第 {} 张细节图已送入上传".format(idx + 1))
+                            uploaded = True
+                            break
+                        except Exception:
+                            continue
+
+                    if not uploaded:
+                        self.log("第 {} 张：send_keys 均失败，跳过".format(idx + 1))
+                    else:
+                        # 处理可能弹出的"图片处理"裁剪弹框
+                        self._handle_crop_dialog()
+                        time.sleep(1.5)
+
+                    try:
+                        import os as _os
+                        _os.remove(img_path)
+                    except Exception:
+                        pass
+
+                except Exception as e:
+                    self.log("第 {} 张细节图上传失败: {}".format(idx + 1, str(e)[:80]))
+                    continue
+
+            self.log("细节图上传完成")
+        except Exception as e:
+            self.log("细节图上传过程出错: {}".format(str(e)[:80]))
 
 if __name__ == "__main__":
     app=SheinApp()
     app.mainloop()
-
