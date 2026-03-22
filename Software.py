@@ -218,15 +218,13 @@ def fetch_amazon_product(asin):
                                 
                                 if img_src not in main_images:
                                     main_images.append(img_src)
-                                    if len(main_images) >= 5:  # 只需要5张
-                                        break
                     except Exception:
                         pass
         except Exception:
             pass
         
         # 方法2：如果没找到，从 #imageBlock 中获取
-        if not main_images or len(main_images) < 5:
+        if not main_images or len(main_images) < 1:
             try:
                 image_block = s.select_one("#imageBlock, #imageBlockContainer")
                 if image_block:
@@ -264,8 +262,6 @@ def fetch_amazon_product(asin):
                                     
                                     if img_src not in main_images:
                                         main_images.append(img_src)
-                                        if len(main_images) >= 5:
-                                            break
                         except Exception:
                             pass
             except Exception:
@@ -310,7 +306,7 @@ def fetch_amazon_product(asin):
                 pass
         
         # 保存所有主图到 main_images（只需5张）
-        res["main_images"] = main_images[:5]
+        res["main_images"] = main_images
         if main_images:
             res["image_url"] = main_images[0]
         
@@ -2454,7 +2450,7 @@ class SheinPublisher:
             if not main_images:
                 self.log("[ERROR] 没有主页图可以上传")
                 return
-            images_to_upload = main_images[:5]
+            images_to_upload = main_images
             self.log("开始上传细节图...")
             self.log("[DEBUG] 准备上传 {} 张图片到细节图".format(len(images_to_upload)))
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -4043,8 +4039,8 @@ class SheinPublisher:
         # Step6.5: 自动上传主页图到"细节图"（最多5张）
         main_images = info.get("main_images", [])
         if main_images:
-            self.log("自动上传 {} 张主页图到细节图...".format(len(main_images[:5])))
-            self._upload_detail_images(main_images[:5])
+            self.log("自动上传 {} 张主页图到细节图...".format(len(main_images)))
+            self._upload_detail_images(main_images)
 
         # Step7: 提交发布
         self.log("点击发布商品...")
