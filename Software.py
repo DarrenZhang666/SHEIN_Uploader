@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
@@ -110,15 +110,35 @@ ACCENT="#e84393"; ACCENT2="#ff6bae"; TEXT_MAIN="#f0f0f0"
 TEXT_SUB="#a0a3b1"; BORDER="#3a3d55"; GREEN="#4cde96"
 YELLOW="#ffc857"; RED="#ff5f57"
 
-def fetch_amazon_product(asin):
-    url = AMAZON_PRODUCT_URL.format(asin=asin)
+def fetch_amazon_product(asin, region="美国"):
+    _REGION_DOMAINS = {
+        "美国": "www.amazon.com",
+        "英国": "www.amazon.co.uk",
+        "德国": "www.amazon.de",
+        "法国": "www.amazon.fr",
+        "日本": "www.amazon.co.jp",
+        "加拿大": "www.amazon.ca",
+        "澳大利亚": "www.amazon.com.au",
+        "意大利": "www.amazon.it",
+        "西班牙": "www.amazon.es",
+        "墨西哥": "www.amazon.com.mx",
+    }
+    domain = _REGION_DOMAINS.get(region, "www.amazon.com")
+    # 强制美国地区+美元货币，不受VPN影响
+    url = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, asin)
     hdrs = random.choice(HEADERS_POOL).copy()
-    hdrs["Referer"] = "https://www.amazon.com/"
+    hdrs["Referer"] = "https://{}/".format(domain)
+    hdrs["Accept-Language"] = "en-US,en;q=0.9"
     res = {"asin":asin,"title":"获取失败","price":"N/A","rating":"N/A",
            "reviews":"N/A","brand":"N/A","image_url":"",
            "description":"","features":[],"url":url,"description_images":[],"main_images":[]}
     try:
-        r = requests.Session().get(url, headers=hdrs, timeout=15)
+        sess = requests.Session()
+        # 设置美国地区 cookie，强制亚马逊返回美元价格
+        sess.cookies.set("i18n-prefs", "USD", domain=domain)
+        sess.cookies.set("lc-main", "en_US", domain=domain)
+        sess.cookies.set("x-main", "1", domain=domain)
+        r = sess.get(url, headers=hdrs, timeout=15)
         if r.status_code != 200:
             res["title"] = "HTTP {}".format(r.status_code); return res
         s = BeautifulSoup(r.text, "html.parser")
@@ -134,32 +154,10 @@ def fetch_amazon_product(asin):
                 price_raw = p.get_text(strip=True)
                 break
         
-        # 转换价格为美元格式
+        # 解析价格（已通过cookie强制美元，直接提取数字）
         if price_raw != "N/A":
-            # 检测货币类型并转换
-            if "¥" in price_raw or "JPY" in price_raw.upper():
-                # 日元转美元（汇率：1 USD ≈ 150 JPY，可根据实际调整）
-                price_match = re.search(r'[\d,]+\.?\d*', price_raw.replace(',', ''))
-                if price_match:
-                    jpy_price = float(price_match.group())
-                    usd_price = jpy_price / 150.0  # 汇率转换
-                    res["price"] = "${:.2f}".format(usd_price)
-                else:
-                    res["price"] = "N/A"
-            elif "$" in price_raw:
-                # 已经是美元，直接提取
-                price_match = re.search(r'[\d,]+\.?\d*', price_raw.replace(',', ''))
-                if price_match:
-                    res["price"] = "${}".format(price_match.group())
-                else:
-                    res["price"] = price_raw
-            else:
-                # 其他货币，提取数字并加上$
-                price_match = re.search(r'[\d,]+\.?\d*', price_raw.replace(',', ''))
-                if price_match:
-                    res["price"] = "${}".format(price_match.group())
-                else:
-                    res["price"] = "N/A"
+            price_match = re.search(r'[\d,]+\.?\d*', price_raw.replace(',', ''))
+            res["price"] = "${:.2f}".format(float(price_match.group())) if price_match else "N/A"
         else:
             res["price"] = "N/A"
         
@@ -386,6 +384,7 @@ class SheinApp(tk.Tk):
         self.product_cache={}; self.current_asin=None
         self.select_all_var=tk.BooleanVar(value=False)
         self.price_multiplier=tk.StringVar(value="3")
+        self.amazon_region=tk.StringVar(value="美国")
         self._fetch_thread=None; self._photo_ref=None
         self._shein_publisher=None   # 持久化浏览器实例
         self._stop_publish=False      # 停止上品标志
@@ -471,6 +470,13 @@ class SheinApp(tk.Tk):
             activeforeground=ACCENT2,font=("Segoe UI",10),cursor="hand2").pack(side="left")
         self.sel_lbl=tk.Label(sr,text="已选 0",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_PANEL)
         self.sel_lbl.pack(side="right")
+        # 亚马逊地区选择（仅支持美国）
+        rg=tk.Frame(f,bg=BG_PANEL); rg.pack(fill="x",padx=12,pady=(2,4))
+        tk.Label(rg,text="抓取地区:",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_PANEL).pack(side="left")
+        region_cb=ttk.Combobox(rg,textvariable=self.amazon_region,
+            values=["美国","其他国家暂不支持"],
+            state="readonly",width=12,font=("Segoe UI",9))
+        region_cb.pack(side="left",padx=(4,0))
         tk.Frame(f,bg=BORDER,height=1).pack(fill="x",padx=8,pady=(0,4))
         c=tk.Frame(f,bg=BG_PANEL); c.pack(fill="both",expand=True,padx=4,pady=4)
         cv=tk.Canvas(c,bg=BG_PANEL,highlightthickness=0,bd=0)
@@ -897,7 +903,7 @@ class SheinApp(tk.Tk):
         for i,asin in enumerate(asins):
             msg="抓取中 {}/{}：{}".format(i+1,len(asins),asin)
             self.after(0,lambda m=msg:self.status_lbl.config(text=m))
-            info=fetch_amazon_product(asin)
+            info=fetch_amazon_product(asin, region=self.amazon_region.get())
             self.product_cache[asin]=info
             dot=self.asin_dots.get(asin)
             if dot:
