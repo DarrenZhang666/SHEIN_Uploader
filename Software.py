@@ -2236,83 +2236,108 @@ class SheinPublisher:
                 if m:
                     price_num = m.group()
 
-            # ── 1. 填写销售价格
+            # 步骤1: 向供应信息表格的「价格(USD)」列填写价格
             if price_num:
-                self.log("[DEBUG] 填写销售价格: {}".format(price_num))
+                self.log("[DEBUG] 填写价格(USD): {}".format(price_num))
                 price_filled = False
-                price_selectors = [
-                    (By.XPATH, "//input[contains(@placeholder,'价格') or contains(@placeholder,'售价') or contains(@placeholder,'Price')]"),
-                    (By.XPATH, "//*[contains(text(),'销售价') or contains(text(),'售价') or contains(text(),'价格')]/following::input[1]"),
-                    (By.XPATH, "//*[contains(text(),'Price')]/following::input[1]"),
-                    (By.CSS_SELECTOR, "input[name='price'], input[name='salePrice'], input[name='sellPrice']"),
-                ]
-                for by, sel in price_selectors:
+                try:
+                    # 主定位: HTML中确认的 supplier_priceClass_0
+                    inp = driver.find_element(By.CSS_SELECTOR, ".supplier_priceClass_0 input")
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                    self._js_input(inp, price_num)
+                    self.log("[OK] 价格(USD)已填写: {}".format(price_num))
+                    price_filled = True
+                    time.sleep(0.5)
+                except Exception as e1:
+                    self.log("[DEBUG] 主定位失败: {}".format(str(e1)[:50]))
                     try:
-                        inp = WebDriverWait(driver, 4).until(EC.presence_of_element_located((by, sel)))
+                        # 备用: 通过表头 .cost 定位
+                        inp = driver.find_element(By.XPATH,
+                            "//*[contains(@class,'cost')]//following::input[@type='text'][1]")
                         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
-                        inp.clear()
                         self._js_input(inp, price_num)
-                        self.log("[OK] 销售价格已填写: {}".format(price_num))
+                        self.log("[OK] 价格(USD)已填写(备用): {}".format(price_num))
                         price_filled = True
                         time.sleep(0.5)
-                        break
-                    except Exception:
-                        continue
-                if not price_filled:
-                    self.log("[DEBUG] 未找到价格输入框，跳过")
-
-            # ── 2. 填写货号/SKU（XYZ-{ASIN}）
-            if asin:
-                sku_val = "XYZ-{}".format(asin)
-                self.log("[DEBUG] 填写SKU/货号: {}".format(sku_val))
-                sku_filled = False
-                sku_selectors = [
-                    (By.XPATH, "//input[contains(@placeholder,'SKU') or contains(@placeholder,'货号') or contains(@placeholder,'编号')]"),
-                    (By.XPATH, "//*[contains(text(),'SKU') or contains(text(),'货号')]/following::input[1]"),
-                    (By.CSS_SELECTOR, "input[name='sku'], input[name='skuCode']"),
-                ]
-                for by, sel in sku_selectors:
+                    except Exception as e2:
+                        self.log("[WARN] 价格(USD)未能填写: {}".format(str(e2)[:50]))
+            # 步骤2: 点击“编辑库存”，在表格行的「请输入」库存 input 中填200，确定
+            try:
+                self.log("[DEBUG] 处理库存...")
+                edit_stock_btn = None
+                for btn in driver.find_elements(By.XPATH,
+                        "//button[.//span[contains(text(),'编辑库存')] or contains(text(),'编辑库存')]"):
                     try:
-                        inp = WebDriverWait(driver, 4).until(EC.presence_of_element_located((by, sel)))
-                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
-                        existing = inp.get_attribute("value") or ""
-                        if existing:  # 已有值则跳过（基础信息可能已填）
-                            self.log("[DEBUG] SKU输入框已有值: {}，跳过".format(existing))
-                            sku_filled = True
+                        if btn.is_displayed():
+                            edit_stock_btn = btn
                             break
-                        inp.clear()
-                        self._js_input(inp, sku_val)
-                        self.log("[OK] SKU已填写: {}".format(sku_val))
-                        sku_filled = True
-                        time.sleep(0.5)
-                        break
                     except Exception:
                         continue
-                if not sku_filled:
-                    self.log("[DEBUG] 未找到SKU输入框，跳过")
-
-            # ── 3. 填写库存数量（默认999）
-            self.log("[DEBUG] 填写库存数量...")
-            stock_filled = False
-            stock_selectors = [
-                (By.XPATH, "//input[contains(@placeholder,'库存') or contains(@placeholder,'数量') or contains(@placeholder,'Quantity') or contains(@placeholder,'Stock')]"),
-                (By.XPATH, "//*[contains(text(),'库存') or contains(text(),'可售数量')]/following::input[1]"),
-                (By.CSS_SELECTOR, "input[name='stock'], input[name='quantity'], input[name='inventory']"),
-            ]
-            for by, sel in stock_selectors:
-                try:
-                    inp = WebDriverWait(driver, 4).until(EC.presence_of_element_located((by, sel)))
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
-                    inp.clear()
-                    self._js_input(inp, "999")
-                    self.log("[OK] 库存数量已填写: 999")
-                    stock_filled = True
+                if edit_stock_btn is None:
+                    self.log("[WARN] 未找到「编辑库存」按鈕")
+                else:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", edit_stock_btn)
+                    driver.execute_script("arguments[0].click();", edit_stock_btn)
+                    self.log("[DEBUG] 已点击「编辑库存」")
+                    time.sleep(2)
+                    # 等待库存维护对话框
+                    try:
+                        from selenium.webdriver.support.ui import WebDriverWait as _WDW
+                        from selenium.webdriver.support import expected_conditions as _EC
+                        _WDW(driver, 8).until(_EC.presence_of_element_located(
+                            (By.XPATH, "//*[contains(@class,'so-modal-title') and contains(.,'库存维护')]"))
+                        )
+                        self.log("[DEBUG] 库存维护对话框已出现")
+                    except Exception:
+                        self.log("[DEBUG] 库存维护对话框等待超时")
                     time.sleep(0.5)
-                    break
-                except Exception:
-                    continue
-            if not stock_filled:
-                self.log("[DEBUG] 未找到库存输入框，跳过")
+                    stock_filled = False
+                    try:
+                        # 精确定位: class 含 stockInfo_ 的库存 input
+                        row_inps = driver.find_elements(By.XPATH,
+                            "//*[contains(@class,'stockInfo_')]//input[@type='text']")
+                        if not row_inps:
+                            row_inps = driver.find_elements(By.XPATH,
+                                "//*[contains(@class,'warehouseListBox')]//input[@type='text']")
+                        self.log("[DEBUG] 找到库存行 input 数量: {}".format(len(row_inps)))
+                        for row_inp in row_inps:
+                            try:
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row_inp)
+                                driver.execute_script("arguments[0].focus();", row_inp)
+                                time.sleep(0.2)
+                                # 使用 React 原生 setter 设定并触发事件
+                                driver.execute_script("""
+                                    var inp = arguments[0];
+                                    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                    setter.call(inp, '200');
+                                    inp.dispatchEvent(new Event('input', {bubbles:true}));
+                                    inp.dispatchEvent(new Event('change', {bubbles:true}));
+                                    inp.dispatchEvent(new Event('blur', {bubbles:true}));
+                                """, row_inp)
+                                time.sleep(0.8)
+                                # 验证小: 读回属性确认填入成功
+                                val = driver.execute_script("return arguments[0].value;", row_inp)
+                                self.log("[DEBUG] 库存 input 当前値: {}".format(val))
+                                stock_filled = True
+                            except Exception as e:
+                                self.log("[DEBUG] 行 input 填写失败: {}".format(str(e)[:40]))
+                    except Exception as e:
+                        self.log("[DEBUG] 库存 input 定位失败: {}".format(str(e)[:50]))
+                    if not stock_filled:
+                        self.log("[WARN] 库存 input 未找到")
+                    time.sleep(0.5)
+                    # 点击确定按鈕关闭对话框
+                    try:
+                        confirm_btn = driver.find_element(By.XPATH,
+                            "//div[contains(@class,'so-modal-footer') or contains(@class,'so-card-footer')]"
+                            "//button[contains(@class,'so-button-primary')]")
+                        driver.execute_script("arguments[0].click();", confirm_btn)
+                        self.log("[OK] 库存已确认")
+                        time.sleep(1)
+                    except Exception as e:
+                        self.log("[WARN] 确定按鈕失败: {}".format(str(e)[:50]))
+            except Exception as e:
+                self.log("[WARN] 库存处理失败: {}".format(str(e)[:60]))
 
             # [DISABLED] # ── 4. 上传主规格图到细节图/方形图区域（跳过色块图）
             # [DISABLED] if main_images:
