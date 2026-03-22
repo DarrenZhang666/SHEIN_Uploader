@@ -454,7 +454,8 @@ class SheinApp(tk.Tk):
         self._btn(bf,"开始上品","#7c3aed",self._open_publish_page).pack(side="left",padx=5)
         self._btn(bf,"抓取页面信息","#8b5cf6",self._dump_page_info_btn).pack(side="left",padx=5)
         self._btn(bf,"停止","#dc2626",self._stop_publish_action).pack(side="left",padx=5)
-        self._btn(bf,"登录 SHEIN","#059669",self._open_shein).pack(side="left",padx=5)
+        self._shein_login_btn = self._btn(bf,"登录 SHEIN","#059669",self._open_shein)
+        self._shein_login_btn.pack(side="left",padx=5)
 
     def _build_left(self,parent):
         f=tk.Frame(parent,bg=BG_PANEL,width=265)
@@ -606,7 +607,7 @@ class SheinApp(tk.Tk):
         def _launch_chrome():
             try:
                 pub = SheinPublisher(log_cb=self._pub_log)
-                
+
                 # 先尝试连接已打开的 Chrome
                 try:
                     self.status_lbl.config(text='尝试连接已打开的 Chrome...')
@@ -616,10 +617,12 @@ class SheinApp(tk.Tk):
                     pub.driver.get(SHEIN_LOGIN_URL)
                     time.sleep(1)
                     self.status_lbl.config(text='已打开 SHEIN 登录页，请手动登录')
+                    # 启动后台线程监控登录状态，成功后更新按钮
+                    threading.Thread(target=self._watch_login, args=(pub,), daemon=True).start()
                     return
                 except Exception as e:
                     self._pub_log("[DEBUG] 连接已打开的 Chrome 失败，启动新 Chrome...")
-                
+
                 # 如果连接失败，启动新 Chrome
                 self.status_lbl.config(text='启动新 Chrome 浏览器...')
                 pub.start_chrome_browser()
@@ -628,11 +631,77 @@ class SheinApp(tk.Tk):
                 pub.driver.get(SHEIN_LOGIN_URL)
                 time.sleep(1)
                 self.status_lbl.config(text='已打开 SHEIN 登录页，请手动登录')
+                # 启动后台线程监控登录状态，成功后更新按钮
+                threading.Thread(target=self._watch_login, args=(pub,), daemon=True).start()
             except Exception as e:
                 self.status_lbl.config(text='启动失败: ' + str(e)[:40])
                 self.after(0, lambda err=str(e): messagebox.showerror('失败', err[:100]))
-        
+
         threading.Thread(target=_launch_chrome, daemon=True).start()
+
+    def _watch_login(self, pub, timeout=180):
+        """后台轮询检测SHEIN登录状态，成功后更新按钮显示账号。"""
+        import time as _t
+        end = _t.time() + timeout
+        logged_in = False
+        while _t.time() < end:
+            try:
+                url = pub.driver.current_url
+                # 离开登录页即视为登录成功
+                if ("sso.geiwohuo.com" in url or "geiwohuo.com" in url) and "login" not in url.lower():
+                    logged_in = True
+                    break
+            except Exception:
+                pass
+            _t.sleep(1.5)
+
+        if not logged_in:
+            return
+
+        # 已登录，等待页面稳定后获取账号
+        _t.sleep(2.5)
+        account = ""
+        try:
+            from selenium.webdriver.common.by import By as _By
+            # 策略1: 找页面上所有短文本span，过滤出像账号的内容
+            # 账号通常是邮箱或手机号格式，或纯英文/数字组合
+            import re as _re
+            candidates = []
+            for el in pub.driver.find_elements(_By.XPATH,
+                    "//*[contains(@class,'user') or contains(@class,'account') or "
+                    "contains(@class,'nick') or contains(@class,'name') or "
+                    "contains(@class,'email') or contains(@class,'phone') or "
+                    "contains(@class,'login') or contains(@class,'member')]" ):
+                try:
+                    txt = el.text.strip()
+                    # 账号特征：长度2-40，包含@或数字，不含换行
+                    if txt and 2 <= len(txt) <= 40 and '\n' not in txt:
+                        candidates.append(txt)
+                except Exception:
+                    pass
+            # 优先选含@的（邮箱账号）
+            for c in candidates:
+                if '@' in c:
+                    account = c
+                    break
+            # 其次选纯数字11位（手机号）
+            if not account:
+                for c in candidates:
+                    if _re.fullmatch(r'\d{11}', c):
+                        account = c
+                        break
+            # 最后取第一个候选
+            if not account and candidates:
+                account = candidates[0]
+        except Exception:
+            pass
+
+        # 更新按钮
+        label = "已登录 SHEIN: {}".format(account) if account else "已登录 SHEIN"
+        self.after(0, lambda lb=label: self._shein_login_btn.config(
+            text=lb, bg="#0d7a4e", font=("Segoe UI", 9, "bold")))
+        self.after(0, lambda: self.status_lbl.config(text="SHEIN 登录成功" + ("  账号: " + account if account else "")))
+        self._pub_log("[OK] SHEIN 登录成功，账号: {}".format(account or "(未获取到)"))
 
     def _open_publish_page(self):
         """打开 SHEIN 商品发布页面，自动上传选中商品的图片。"""
