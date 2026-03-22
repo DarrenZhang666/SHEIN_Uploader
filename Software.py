@@ -2344,6 +2344,25 @@ class SheinPublisher:
                         time.sleep(0.5)
                     except Exception as e2:
                         self.log("[WARN] 价格(USD)未能填写: {}".format(str(e2)[:50]))
+            # 步骤2.5: 填写含包装重量(g)
+            try:
+                self.log("[DEBUG] 填写含包装重量...")
+                w_inp = driver.find_element(By.CSS_SELECTOR, ".weightClass_0 input")
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", w_inp)
+                driver.execute_script(
+                    "(function(el,val){"
+                    "var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;"
+                    "s.call(el,val);"
+                    "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                    "el.dispatchEvent(new Event('change',{bubbles:true}));"
+                    "el.dispatchEvent(new Event('blur',{bubbles:true}));"
+                    "})(arguments[0],arguments[1]);",
+                    w_inp, "100")
+                self.log("[OK] 含包装重量已填写100g")
+                time.sleep(0.3)
+            except Exception as _we:
+                self.log("[DEBUG] 含包装重量填写失败: {}".format(str(_we)[:60]))
+
             # 步骤2: 点击“编辑库存”，在表格行的「请输入」库存 input 中填200，确定
             try:
                 self.log("[DEBUG] 处理库存...")
