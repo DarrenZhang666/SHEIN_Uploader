@@ -2314,62 +2314,63 @@ class SheinPublisher:
             if not stock_filled:
                 self.log("[DEBUG] 未找到库存输入框，跳过")
 
-            # ── 4. 上传主规格图到细节图/方形图区域（跳过色块图）
-            if main_images:
-                self.log("[DEBUG] 上传主规格图...")
-                try:
-                    main_img_url = main_images[0]
-                    img_path = self._save_img_temp(main_img_url)
-                    if img_path:
-                        # 定位细节图或方形图区域的 file input，明确排除色块图
-                        fi = None
-                        # 方法1：通过祖先标题文字定位
-                        try:
-                            els = driver.find_elements(By.XPATH,
-                                "//*[contains(text(),'细节图') or contains(text(),'方形图')]/following::input[@type='file'][1]")
-                            if els:
-                                fi = els[0]
-                                self.log("[DEBUG] 通过区域标题定位到规格图 input")
-                        except Exception:
-                            pass
-                        # 方法2：遍历所有 file input，跳过色块图区域内的
-                        if fi is None:
-                            all_fi = driver.find_elements(By.XPATH, "//input[@type='file']")
-                            for candidate in all_fi:
-                                try:
-                                    is_swatch = False
-                                    node = candidate
-                                    for _ in range(8):
-                                        try:
-                                            node = node.find_element(By.XPATH, "..")
-                                            node_text = node.get_attribute("innerText") or ""
-                                            if "色块图" in node_text:
-                                                is_swatch = True
-                                                break
-                                        except Exception:
-                                            break
-                                    if not is_swatch:
-                                        fi = candidate
-                                        self.log("[DEBUG] 通过排除色块图定位到规格图 input")
-                                        break
-                                except Exception:
-                                    continue
-                        if fi:
-                            driver.execute_script(
-                                "arguments[0].style.cssText='display:block!important;visibility:visible!important;opacity:1!important;';", fi)
-                            fi.send_keys(img_path)
-                            self.log("[OK] 主规格图已上传")
-                            time.sleep(2)
-                        else:
-                            self.log("[DEBUG] 未找到合适的规格图 file input，跳过")
-                        try:
-                            os.remove(img_path)
-                        except Exception:
-                            pass
-                    else:
-                        self.log("[DEBUG] 主规格图下载失败，跳过")
-                except Exception as e:
-                    self.log("[DEBUG] 主规格图上传异常: {}".format(str(e)[:60]))
+            # [DISABLED] # ── 4. 上传主规格图到细节图/方形图区域（跳过色块图）
+            # [DISABLED] if main_images:
+            # [DISABLED] self.log("[DEBUG] 上传主规格图...")
+            # [DISABLED] try:
+            # [DISABLED] main_img_url = main_images[0]
+            # [DISABLED] img_path = self._save_img_temp(main_img_url)
+            # [DISABLED] if img_path:
+            # [DISABLED] # 定位细节图或方形图区域的 file input，明确排除色块图
+            # [DISABLED] fi = None
+            # [DISABLED] # 方法1：通过祖先标题文字定位
+            # [DISABLED] try:
+            # [DISABLED] els = driver.find_elements(By.XPATH,
+            # [DISABLED] "//td[not(contains(@class,'detail_img'))]//input[@type='file'][1]")
+            # [DISABLED] if els:
+            # [DISABLED] fi = els[0]
+            # [DISABLED] self.log("[DEBUG] 通过区域标题定位到规格图 input")
+            # [DISABLED] except Exception:
+            # [DISABLED] pass
+            # [DISABLED] # 方法2：遍历所有 file input，跳过色块图区域内的
+            # [DISABLED] if fi is None:
+            # [DISABLED] all_fi = driver.find_elements(By.XPATH, "//input[@type='file']")
+            # [DISABLED] for candidate in all_fi:
+            # [DISABLED] try:
+            # [DISABLED] is_swatch = False
+            # [DISABLED] node = candidate
+            # [DISABLED] for _ in range(8):
+            # [DISABLED] try:
+            # [DISABLED] node = node.find_element(By.XPATH, "..")
+            # [DISABLED] node_text = node.get_attribute("innerText") or ""
+            # [DISABLED] if "色块图" in node_text:
+            # [DISABLED] is_swatch = True
+            # [DISABLED] break
+            # [DISABLED] except Exception:
+            # [DISABLED] break
+            # [DISABLED] if not is_swatch:
+            # [DISABLED] fi = candidate
+            # [DISABLED] self.log("[DEBUG] 通过排除色块图定位到规格图 input")
+            # [DISABLED] break
+            # [DISABLED] except Exception:
+            # [DISABLED] continue
+            # [DISABLED] if fi:
+            # [DISABLED] driver.execute_script(
+            # [DISABLED] "arguments[0].style.cssText='display:block!important;visibility:visible!important;opacity:1!important;';", fi)
+            # [DISABLED] fi.send_keys(img_path)
+            # [DISABLED] self._handle_crop_dialog()
+            # [DISABLED] self.log("[OK] 主规格图已上传")
+            # [DISABLED] time.sleep(2)
+            # [DISABLED] else:
+            # [DISABLED] self.log("[DEBUG] 未找到合适的规格图 file input，跳过")
+            # [DISABLED] try:
+            # [DISABLED] os.remove(img_path)
+            # [DISABLED] except Exception:
+            # [DISABLED] pass
+            # [DISABLED] else:
+            # [DISABLED] self.log("[DEBUG] 主规格图下载失败，跳过")
+            # [DISABLED] except Exception as e:
+            # [DISABLED] self.log("[DEBUG] 主规格图上传异常: {}".format(str(e)[:60]))
 
             self.log("[OK] 规格及供应信息填写完成")
             return True
@@ -4009,38 +4010,38 @@ class SheinPublisher:
                 (By.CSS_SELECTOR, "input[name='price'], input[name='salePrice']"),
             ], price_str)
 
-        # Step6: 上传图片
-        img_url = info.get("image_url", "")
-        if img_url:
-            self.log("上传商品图片...")
-            img_path = self._save_img_temp(img_url)
-            if img_path:
-                try:
-                    # 找到文件上传 input
-                    upload_inputs = driver.find_elements(
-                        By.XPATH, "//input[@type='file']"
-                    )
-                    for inp in upload_inputs:
-                        try:
-                            driver.execute_script("arguments[0].style.display='block';", inp)
-                            inp.send_keys(img_path)
-                            time.sleep(3)
-                            break
-                        except Exception:
-                            continue
-                except Exception as e:
-                    self.log("图片上传失败: {}".format(e))
-                finally:
-                    try: os.remove(img_path)
-                    except: pass
+        # [DISABLED] # Step6: 上传图片
+        # [DISABLED] img_url = info.get("image_url", "")
+        # [DISABLED] if img_url:
+        # [DISABLED] self.log("上传商品图片...")
+        # [DISABLED] img_path = self._save_img_temp(img_url)
+        # [DISABLED] if img_path:
+        # [DISABLED] try:
+        # [DISABLED] # 找到文件上传 input
+        # [DISABLED] upload_inputs = driver.find_elements(
+        # [DISABLED] By.XPATH, "//input[@type='file']"
+        # [DISABLED] )
+        # [DISABLED] for inp in upload_inputs:
+        # [DISABLED] try:
+        # [DISABLED] driver.execute_script("arguments[0].style.display='block';", inp)
+        # [DISABLED] inp.send_keys(img_path)
+        # [DISABLED] time.sleep(3)
+        # [DISABLED] break
+        # [DISABLED] except Exception:
+        # [DISABLED] continue
+        # [DISABLED] except Exception as e:
+        # [DISABLED] self.log("图片上传失败: {}".format(e))
+        # [DISABLED] finally:
+        # [DISABLED] try: os.remove(img_path)
+        # [DISABLED] except: pass
 
-        time.sleep(2)
+        # [DISABLED] time.sleep(2)
 
-        # Step6.5: 自动上传主页图到"细节图"（最多5张）
-        main_images = info.get("main_images", [])
-        if main_images:
-            self.log("自动上传 {} 张主页图到细节图...".format(len(main_images)))
-            self._upload_detail_images(main_images)
+        # [DISABLED] # Step6.5: 自动上传主页图到"细节图"（最多5张）
+        # [DISABLED] main_images = info.get("main_images", [])
+        # [DISABLED] if main_images:
+        # [DISABLED] self.log("自动上传 {} 张主页图到细节图...".format(len(main_images)))
+        # [DISABLED] self._upload_detail_images(main_images)
 
         # Step7: 提交发布
         self.log("点击发布商品...")
