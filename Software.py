@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
@@ -2209,7 +2209,68 @@ class SheinPublisher:
                 
                 if not filled:
                     self.log("[ERROR] 未能填写货号")
-            
+
+            # 5.5 展开【商品描述】并填写产品特点
+            self.log("[DEBUG] 填写商品描述(英文)...")
+            features = product_info.get("features", [])
+            desc_text = "\n".join(features) if features else product_info.get("description", "")
+            if desc_text:
+                try:
+                    # 点击"展开添加【商品描述】"折叠按钮
+                    collapse_xpaths = [
+                        "//div[contains(@class,'soui-collapseItem-title') and contains(text(),'商品描述')]",
+                        "//*[contains(@class,'soui-collapseItem-header') and .//*[contains(text(),'商品描述')] ]",
+                        "//*[contains(text(),'展开添加') and contains(text(),'商品描述')]",
+                        "//div[contains(@class,'cbg5ad') or contains(@class,'soui-collapseItem-header')]",
+                    ]
+                    expanded = False
+                    for xp in collapse_xpaths:
+                        try:
+                            els = self.driver.find_elements(By.XPATH, xp)
+                            for el in els:
+                                if el.is_displayed():
+                                    self.driver.execute_script(
+                                        "arguments[0].scrollIntoView({block:'center'});", el)
+                                    time.sleep(0.3)
+                                    self.driver.execute_script("arguments[0].click();", el)
+                                    self.log("[OK] 已展开商品描述区域")
+                                    time.sleep(0.8)
+                                    expanded = True
+                                    break
+                        except Exception:
+                            pass
+                        if expanded:
+                            break
+                    if not expanded:
+                        self.log("[DEBUG] 未找到商品描述折叠按钮，尝试直接查找textarea")
+                    # 找到展开后的textarea（class包含main_desc或multi_desc下的textarea）
+                    desc_filled = False
+                    desc_xpaths = [
+                        "//div[contains(@class,'main_desc') or contains(@class,'multi_desc')]//textarea",
+                        "//div[contains(@class,'soui-collapseItem-expanded')]//textarea",
+                        "//div[contains(@class,'soui-collapseItem-content') and not(contains(@style,'display: none'))]//textarea",
+                        "//textarea[contains(@placeholder,'5000')]",
+                    ]
+                    for xp in desc_xpaths:
+                        try:
+                            ta = WebDriverWait(self.driver, 5).until(
+                                EC.presence_of_element_located((By.XPATH, xp)))
+                            if ta.is_displayed():
+                                self.driver.execute_script(
+                                    "arguments[0].scrollIntoView({block:'center'});", ta)
+                                ta.clear()
+                                ta.send_keys(desc_text)
+                                self.log("[OK] 商品描述(英文)已填写")
+                                desc_filled = True
+                                time.sleep(0.5)
+                                break
+                        except Exception:
+                            pass
+                    if not desc_filled:
+                        self.log("[DEBUG] 未找到商品描述textarea，跳过")
+                except Exception as e:
+                    self.log("[DEBUG] 填写商品描述失败: {}".format(str(e)[:60]))
+
             # 6. 上传主规格图和细节图（非阻塞：失败不影响后续“规格及供应信息”流程）
             self.log("[DEBUG] 上传商品图片...")
             try:
