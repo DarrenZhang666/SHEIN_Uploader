@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
@@ -385,6 +385,7 @@ class SheinApp(tk.Tk):
         self.asin_list=[]; self.asin_vars={}; self.asin_dots={}
         self.product_cache={}; self.current_asin=None
         self.select_all_var=tk.BooleanVar(value=False)
+        self.price_multiplier=tk.StringVar(value="3")
         self._fetch_thread=None; self._photo_ref=None
         self._shein_publisher=None   # 持久化浏览器实例
         self._stop_publish=False      # 停止上品标志
@@ -444,6 +445,11 @@ class SheinApp(tk.Tk):
         tk.Label(lg,text="SHEIN",font=("Segoe UI",18,"bold"),fg=ACCENT,bg=BG_PANEL).pack(side="left")
         tk.Label(lg,text=" 商品采集 & 发布工具",font=("Segoe UI",13),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         bf=tk.Frame(bar,bg=BG_PANEL); bf.pack(side="right",padx=20,pady=10)
+        # 售价倍数输入框（在最后添加，寄弹出效果为最左侧）
+        pm_frame=tk.Frame(bf,bg=BG_PANEL)
+        pm_frame.pack(side="left",padx=(0,10))
+        tk.Label(pm_frame,text="售价倍数:",font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
+        tk.Entry(pm_frame,textvariable=self.price_multiplier,width=4,font=("Segoe UI",10),bg=BG_CARD,fg=TEXT_MAIN,insertbackground=TEXT_MAIN,relief="flat",bd=2).pack(side="left",padx=(4,0))
         self._btn(bf,"导入 ASIN 文本",ACCENT,self._import_txt).pack(side="left",padx=5)
         self._btn(bf,"抓取选中商品","#2563eb",self._fetch_sel).pack(side="left",padx=5)
         self._btn(bf,"开始上品","#7c3aed",self._open_publish_page).pack(side="left",padx=5)
@@ -771,7 +777,23 @@ class SheinApp(tk.Tk):
                 self.status_lbl.config(text='填写规格及供应信息...')
                 self._pub_log('[DEBUG] 开始填写规格及供应信息...')
                 try:
-                    self._shein_publisher.fill_spec_and_supply_info(product_info)
+                    # 应用售价倍数到价格
+                    try:
+                        mult = float(self.price_multiplier.get())
+                    except Exception:
+                        mult = 3.0
+                    import copy as _copy
+                    product_info_pub = _copy.copy(product_info)
+                    price_raw = product_info_pub.get("price", "N/A")
+                    import re as _re
+                    if price_raw and price_raw != "N/A":
+                        _m = _re.search(r"[\d]+\.?[\d]*", price_raw.replace(",",""))
+                        if _m:
+                            _orig = float(_m.group())
+                            _new_price = round(_orig * mult, 2)
+                            product_info_pub["price"] = str(_new_price)
+                            self._pub_log("[DEBUG] 售价倍数{}, 价格 {} -> {}".format(mult, _orig, _new_price))
+                    self._shein_publisher.fill_spec_and_supply_info(product_info_pub)
                     self.status_lbl.config(text='✓ 规格及供应信息填写完成')
                     self._pub_log('商品 {} 规格及供应信息填写完成'.format(self.current_asin))
                 except Exception as spec_e:
