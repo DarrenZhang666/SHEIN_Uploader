@@ -2318,22 +2318,54 @@ class SheinPublisher:
             if not stock_filled:
                 self.log("[DEBUG] 未找到库存输入框，跳过")
 
-            # ── 4. 上传主规格图（第一张主图）
+            # ── 4. 上传主规格图到细节图/方形图区域（跳过色块图）
             if main_images:
                 self.log("[DEBUG] 上传主规格图...")
                 try:
                     main_img_url = main_images[0]
                     img_path = self._save_img_temp(main_img_url)
                     if img_path:
-                        # 查找规格图上传区域的 file input
-                        file_inputs = driver.find_elements(By.XPATH, "//input[@type='file']")
-                        if file_inputs:
-                            fi = file_inputs[0]
+                        # 定位细节图或方形图区域的 file input，明确排除色块图
+                        fi = None
+                        # 方法1：通过祖先标题文字定位
+                        try:
+                            els = driver.find_elements(By.XPATH,
+                                "//*[contains(text(),'细节图') or contains(text(),'方形图')]/following::input[@type='file'][1]")
+                            if els:
+                                fi = els[0]
+                                self.log("[DEBUG] 通过区域标题定位到规格图 input")
+                        except Exception:
+                            pass
+                        # 方法2：遍历所有 file input，跳过色块图区域内的
+                        if fi is None:
+                            all_fi = driver.find_elements(By.XPATH, "//input[@type='file']")
+                            for candidate in all_fi:
+                                try:
+                                    is_swatch = False
+                                    node = candidate
+                                    for _ in range(8):
+                                        try:
+                                            node = node.find_element(By.XPATH, "..")
+                                            node_text = node.get_attribute("innerText") or ""
+                                            if "色块图" in node_text:
+                                                is_swatch = True
+                                                break
+                                        except Exception:
+                                            break
+                                    if not is_swatch:
+                                        fi = candidate
+                                        self.log("[DEBUG] 通过排除色块图定位到规格图 input")
+                                        break
+                                except Exception:
+                                    continue
+                        if fi:
                             driver.execute_script(
                                 "arguments[0].style.cssText='display:block!important;visibility:visible!important;opacity:1!important;';", fi)
                             fi.send_keys(img_path)
                             self.log("[OK] 主规格图已上传")
                             time.sleep(2)
+                        else:
+                            self.log("[DEBUG] 未找到合适的规格图 file input，跳过")
                         try:
                             os.remove(img_path)
                         except Exception:
@@ -2349,12 +2381,72 @@ class SheinPublisher:
             self.log("[ERROR] 填写规格及供应信息失败: {}".format(str(e)[:80]))
             return False
 
+    def _get_detail_img_input(self):
+        """精确定位细节图列的 file input。
+        先滚动页面使容器渲染，再等待它出现，最多重试境欿10次。"""
+        import time as _time
+        driver = self.driver
+        # 先滚动到细节图容器位置并等待其渲染
+        try:
+            driver.execute_script(
+                "var el=document.querySelector('div.detail_img_container,#userguide_commodities_info_skc_title_table');"
+                "if(el){el.scrollIntoView({block:'center',behavior:'smooth'});}"
+                "else{window.scrollTo(0,document.body.scrollHeight*0.6);}"
+            )
+            _time.sleep(1.5)
+        except Exception:
+            pass
+        # 重试最多10次，每次0.8秒
+        for attempt in range(10):
+            # 方法1：通过 detail_img_container 容器
+            try:
+                containers = driver.find_elements(By.CSS_SELECTOR,
+                    "div.detail_img_container, #userguide_commodities_info_skc_title_table")
+                if containers:
+                    inputs = containers[0].find_elements(By.CSS_SELECTOR,
+                        "input[type='file'][multiple]")
+                    if inputs:
+                        self.log("[DEBUG] 细节图 input 找到 (multiple, attempt {})".format(attempt+1))
+                        return inputs[0]
+                    inputs = containers[0].find_elements(By.CSS_SELECTOR, "input[type='file']")
+                    if inputs:
+                        self.log("[DEBUG] 细节图 input 找到 (attempt {})".format(attempt+1))
+                        return inputs[0]
+            except Exception as e:
+                self.log("[DEBUG] 容器定位失败: {}".format(str(e)[:40]))
+            # 方法2： JS 通过祖先查找
+            try:
+                all_fi = driver.find_elements(By.XPATH, "//input[@type='file']")
+                js = ("var el=arguments[0];for(var i=0;i<15;i++){el=el.parentElement;"
+                      "if(!el)return false;var c=el.className||'';var d=el.id||'';"
+                      "if(c.indexOf('detail_img_container')!==-1)return true;"
+                      "if(d==='userguide_commodities_info_skc_title_table')return true;}return false;")
+                for fi in all_fi:
+                    try:
+                        if driver.execute_script(js, fi):
+                            self.log("[DEBUG] JS祖先找到细节图 input (attempt {})".format(attempt+1))
+                            return fi
+                    except Exception:
+                        continue
+            except Exception as e:
+                self.log("[DEBUG] JS定位失败: {}".format(str(e)[:40]))
+            if attempt < 9:
+                self.log("[DEBUG] 细节图 input 未找到，等待0.8s后重试 (attempt {})".format(attempt+1))
+                # 每次重试时再滚动一次
+                try:
+                    driver.execute_script(
+                        "var el=document.querySelector('div.detail_img_container,#userguide_commodities_info_skc_title_table');"
+                        "if(el){el.scrollIntoView({block:'center'});}"
+                        "else{window.scrollTo(0,document.body.scrollHeight*0.6);}"
+                    )
+                except Exception:
+                    pass
+                _time.sleep(0.8)
+        self.log("[ERROR] 细节图 input 经10次重试仍未找到")
+        return None
+
     def _upload_product_images(self, product_info):
-        """
-        上传细节图到 SHEIN 发布页面。
-        策略：不依赖容器ID，直接找页面中的 file input 逐一上传。
-        每张上传后处理裁剪弹框。
-        """
+        "连续上传5张图片到细节图列，每张裁剪后重复。"
         try:
             main_images = product_info.get("main_images", [])
             if not main_images and product_info.get("image_url"):
@@ -2362,97 +2454,47 @@ class SheinPublisher:
             if not main_images:
                 self.log("[ERROR] 没有主页图可以上传")
                 return
-
             images_to_upload = main_images[:5]
             self.log("开始上传细节图...")
-            self.log("[DEBUG] 准备上传 {} 张主页图到细节图".format(len(images_to_upload)))
-
-            # 滚动页面使细节图区域渲染
+            self.log("[DEBUG] 准备上传 {} 张图片到细节图".format(len(images_to_upload)))
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(1.5)
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.5);")
             time.sleep(1.5)
-
             for idx, img_url in enumerate(images_to_upload):
                 try:
                     self.log("[DEBUG] 上传细节图第 {} 张...".format(idx + 1))
                     img_path = self._save_img_temp(img_url)
                     if not img_path:
-                        self.log("[ERROR] 第 {} 张图片下载失败".format(idx + 1))
+                        self.log("[ERROR] 第 {} 张下载失败".format(idx + 1))
                         continue
-
-                    # 获取当前所有 file input
-                    all_inputs = self.driver.find_elements(By.XPATH, "//input[@type='file']")
-                    self.log("[DEBUG] 当前页面共 {} 个 file input".format(len(all_inputs)))
-
-                    if not all_inputs:
-                        self.log("[ERROR] 第 {} 张：未找到任何 file input，跳过".format(idx + 1))
+                    fi = self._get_detail_img_input()
+                    if fi is None:
+                        self.log("[ERROR] 第 {} 张：未找到细节图 input".format(idx + 1))
                         try:
                             import os as _os; _os.remove(img_path)
                         except Exception:
                             pass
                         continue
-
-                    # 跳过第一个 input（通常是主图区域），剩余供细节图使用
-                    detail_inputs = all_inputs[1:] if len(all_inputs) > 1 else all_inputs
-
-                    # 按 idx 匹配对应的 input，超出则取最后一个
-                    if idx < len(detail_inputs):
-                        targets = [detail_inputs[idx]]
-                    else:
-                        targets = [detail_inputs[-1]]
-
-                    uploaded = False
-                    for file_input in targets:
-                        try:
-                            self.driver.execute_script(
-                                "arguments[0].style.display='block';"
-                                "arguments[0].style.visibility='visible';"
-                                "arguments[0].style.opacity='1';",
-                                file_input
-                            )
-                            file_input.send_keys(img_path)
-                            self.log("[OK] 第 {} 张细节图已送入上传".format(idx + 1))
-                            uploaded = True
-                            break
-                        except Exception as ie:
-                            self.log("[DEBUG] 尝试 file input 失败: {}".format(str(ie)[:40]))
-                            continue
-
-                    # 备用：全部 input 逐个尝试
-                    if not uploaded:
-                        for file_input in reversed(all_inputs):
-                            try:
-                                self.driver.execute_script(
-                                    "arguments[0].style.display='block';"
-                                    "arguments[0].style.visibility='visible';"
-                                    "arguments[0].style.opacity='1';",
-                                    file_input
-                                )
-                                file_input.send_keys(img_path)
-                                self.log("[OK] 第 {} 张细节图已送入上传（备用）".format(idx + 1))
-                                uploaded = True
-                                break
-                            except Exception:
-                                continue
-
-                    if uploaded:
+                    try:
+                        self.driver.execute_script(
+                            "arguments[0].style.display='block';"
+                            "arguments[0].style.visibility='visible';"
+                            "arguments[0].style.opacity='1';", fi)
+                        fi.send_keys(img_path)
+                        self.log("[OK] 第 {} 张细节图已送入上传".format(idx + 1))
                         self._handle_crop_dialog()
                         time.sleep(1.5)
-                    else:
-                        self.log("[ERROR] 第 {} 张细节图所有 file input 尝试均失败".format(idx + 1))
-
+                    except Exception as e:
+                        self.log("[ERROR] 第 {} 张 send_keys 失败: {}".format(idx + 1, str(e)[:60]))
                     try:
                         import os as _os; _os.remove(img_path)
                     except Exception:
                         pass
-
                 except Exception as e:
-                    self.log("[ERROR] 第 {} 张细节图上传失败: {}".format(idx + 1, str(e)[:60]))
+                    self.log("[ERROR] 第 {} 张上传失败: {}".format(idx + 1, str(e)[:60]))
                     continue
-
             self.log("[OK] 细节图上传完成")
-
         except Exception as e:
             self.log("[ERROR] 上传细节图异常: {}".format(str(e)[:60]))
 
