@@ -23,6 +23,12 @@ try:
     from selenium.webdriver.chrome.service import Service
     from selenium.common.exceptions import TimeoutException, NoSuchElementException
     try:
+        from selenium.webdriver.edge.options import Options as EdgeOptions
+        from selenium.webdriver.edge.service import Service as EdgeService
+    except ImportError:
+        EdgeOptions = None
+        EdgeService = None
+    try:
         from webdriver_manager.chrome import ChromeDriverManager
         WEBDRIVER_MANAGER = True
     except ImportError:
@@ -386,6 +392,7 @@ class SheinApp(tk.Tk):
         self.price_multiplier=tk.StringVar(value="3")
         self.amazon_region=tk.StringVar(value="美国")
         self._fetch_thread=None; self._photo_ref=None
+        self._launching_browser = False  # 防止重复点击登录按钮
         self._shein_publisher=None   # 持久化浏览器实例
         self._stop_publish=False      # 停止上品标志
         self._driver_ready=False      # 驱动预热完成标志
@@ -601,43 +608,34 @@ class SheinApp(tk.Tk):
             self.select_all_var.set(cnt==len(self.asin_vars))
 
     def _open_shein(self):
-        """打开 SHEIN 登录页面（用 Chrome 浏览器）。"""
-        self.status_lbl.config(text='正在启动 Chrome...')
-        
-        def _launch_chrome():
+        """打开 SHEIN 登录页面。"""
+        # 防止重复点击：如果已有线程正在启动，直接返回
+        if self._launching_browser:
+            self.status_lbl.config(text='浏览器正在启动中，请稍候...')
+            return
+        self._launching_browser = True
+        self.status_lbl.config(text='正在启动浏览器...')
+
+        def _launch():
             try:
                 pub = SheinPublisher(log_cb=self._pub_log)
-
-                # 先尝试连接已打开的 Chrome
-                try:
-                    self.status_lbl.config(text='尝试连接已打开的 Chrome...')
-                    pub._connect_chrome_only()
-                    self._shein_publisher = pub
-                    self.status_lbl.config(text='已连接到 Chrome，打开登录页...')
-                    pub.driver.get(SHEIN_LOGIN_URL)
-                    time.sleep(1)
-                    self.status_lbl.config(text='已打开 SHEIN 登录页，请手动登录')
-                    # 启动后台线程监控登录状态，成功后更新按钮
-                    threading.Thread(target=self._watch_login, args=(pub,), daemon=True).start()
-                    return
-                except Exception as e:
-                    self._pub_log("[DEBUG] 连接已打开的 Chrome 失败，启动新 Chrome...")
-
-                # 如果连接失败，启动新 Chrome
-                self.status_lbl.config(text='启动新 Chrome 浏览器...')
-                pub.start_chrome_browser()
+                # start_browser 内置：先 0.5s 快速连接已有浏览器，失败再启新的
+                pub.start_browser()
                 self._shein_publisher = pub
-                self.status_lbl.config(text='Chrome 已启动，打开登录页...')
+                self.status_lbl.config(text='浏览器已就绪，打开登录页...')
                 pub.driver.get(SHEIN_LOGIN_URL)
                 time.sleep(1)
                 self.status_lbl.config(text='已打开 SHEIN 登录页，请手动登录')
-                # 启动后台线程监控登录状态，成功后更新按钮
+                # 启动后台线程监控登录状态
                 threading.Thread(target=self._watch_login, args=(pub,), daemon=True).start()
             except Exception as e:
-                self.status_lbl.config(text='启动失败: ' + str(e)[:40])
-                self.after(0, lambda err=str(e): messagebox.showerror('失败', err[:100]))
+                self.status_lbl.config(text='启动失败: ' + str(e)[:50])
+                self.after(0, lambda err=str(e): messagebox.showerror('启动失败', err[:200]))
+            finally:
+                self._launching_browser = False
 
-        threading.Thread(target=_launch_chrome, daemon=True).start()
+        threading.Thread(target=_launch, daemon=True).start()
+
 
     def _watch_login(self, pub, timeout=180):
         """后台轮询检测SHEIN登录状态，成功后更新按钮显示账号。"""
@@ -658,43 +656,115 @@ class SheinApp(tk.Tk):
         if not logged_in:
             return
 
-        # 已登录，等待页面稳定后获取账号
-        _t.sleep(2.5)
+        # 已登录，等待页面完全渲染
+        _t.sleep(3)
         account = ""
+        import re as _re
         try:
             from selenium.webdriver.common.by import By as _By
-            # 策略1: 找页面上所有短文本span，过滤出像账号的内容
-            # 账号通常是邮箱或手机号格式，或纯英文/数字组合
-            import re as _re
-            candidates = []
-            for el in pub.driver.find_elements(_By.XPATH,
-                    "//*[contains(@class,'user') or contains(@class,'account') or "
-                    "contains(@class,'nick') or contains(@class,'name') or "
-                    "contains(@class,'email') or contains(@class,'phone') or "
-                    "contains(@class,'login') or contains(@class,'member')]" ):
+
+            # 策略1: 从 Cookie 获取邮笱账号
+            try:
+                cookies = pub.driver.get_cookies()
+                for ck in cookies:
+                    name = ck.get('name', '').lower()
+                    val = ck.get('value', '').strip()
+                    if name in ('username', 'email', 'account', 'loginname',
+                                'user_email', 'user_name', 'userinfo'):
+                        if val and '@' in val and len(val) < 60:
+                            account = val
+                            break
+            except Exception:
+                pass
+
+            # 策略2: 从 localStorage.loginInfo 获取 userName
+            if not account:
                 try:
-                    txt = el.text.strip()
-                    # 账号特征：长度2-40，包含@或数字，不含换行
-                    if txt and 2 <= len(txt) <= 40 and '\n' not in txt:
-                        candidates.append(txt)
+                    js_result = pub.driver.execute_script('''
+                        try {
+                            // 直接从 loginInfo 提取 userName
+                            var info = JSON.parse(localStorage.getItem('loginInfo') || 'null');
+                            if (info && info.userName) return info.userName;
+                            if (info && info.supplierUserName) return info.supplierUserName;
+                            if (info && info.phoneTel) return info.phoneTel;
+                        } catch(e) {}
+                        // 备用：遍历所有 localStorage 项
+                        for (var i=0; i<localStorage.length; i++) {
+                            try {
+                                var k = localStorage.key(i);
+                                var obj = JSON.parse(localStorage.getItem(k));
+                                if (obj && typeof obj === 'object') {
+                                    var u = obj.userName || obj.supplierUserName ||
+                                            obj.username || obj.account || '';
+                                    if (u && u.length > 2 && u.length < 50) return u;
+                                    var em = obj.email || obj.userEmail || '';
+                                    if (em && em.indexOf('@') !== -1) return em;
+                                }
+                            } catch(e) {}
+                        }
+                        return null;
+                    '''
+                    )
+                    if js_result:
+                        account = str(js_result).strip()
                 except Exception:
                     pass
-            # 优先选含@的（邮箱账号）
-            for c in candidates:
-                if '@' in c:
-                    account = c
-                    break
-            # 其次选纯数字11位（手机号）
+
+            # 策略3: JS扫描页面所有邮笱格式文本
             if not account:
-                for c in candidates:
-                    if _re.fullmatch(r'\d{11}', c):
-                        account = c
-                        break
-            # 最后取第一个候选
-            if not account and candidates:
-                account = candidates[0]
+                try:
+                    all_texts = pub.driver.execute_script('''
+                        var texts = [];
+                        var all = document.querySelectorAll('*');
+                        for (var i=0; i<all.length; i++) {
+                            var t = (all[i].childNodes.length === 1 &&
+                                     all[i].childNodes[0].nodeType === 3)
+                                    ? all[i].innerText.trim() : '';
+                            if (t && t.indexOf('@') !== -1 && t.length < 60 && t.indexOf('\n') === -1)
+                                texts.push(t);
+                        }
+                        return texts;
+                    '''
+                    )
+                    if all_texts:
+                        for t in all_texts:
+                            if _re.match(r'[^@\s]+@[^@\s]+\.[^@\s]+', t):
+                                account = t
+                                break
+                except Exception:
+                    pass
+
+            # 策略4: 页面元素笻选手机号
+            if not account:
+                try:
+                    for el in pub.driver.find_elements(_By.XPATH,
+                            '//*[string-length(normalize-space(text()))=11]'):
+                        txt = el.text.strip()
+                        if _re.fullmatch(r'1[3-9]\d{9}', txt):
+                            account = txt
+                            break
+                except Exception:
+                    pass
+
         except Exception:
             pass
+
+        # DEBUG: 记录页面信息帮助分析账号元素位置
+        try:
+            _url = pub.driver.current_url
+            _body = pub.driver.execute_script(
+                "return document.body ? document.body.innerText.slice(0,800) : 'no body';")
+            _ls = pub.driver.execute_script(
+                "var r={}; for(var i=0;i<localStorage.length;i++){"
+                "var k=localStorage.key(i); r[k]=localStorage.getItem(k);}"
+                "return JSON.stringify(r).slice(0,1000);")
+            _cks = [{c['name']: c['value']} for c in pub.driver.get_cookies()]
+            self._pub_log("[ACCT-DEBUG] URL: {}".format(_url))
+            self._pub_log("[ACCT-DEBUG] body: {}".format(str(_body).replace('\n','|')[:400]))
+            self._pub_log("[ACCT-DEBUG] localStorage: {}".format(str(_ls)[:600]))
+            self._pub_log("[ACCT-DEBUG] cookies: {}".format(str(_cks)[:400]))
+        except Exception as _de:
+            self._pub_log("[ACCT-DEBUG] 失败: {}".format(str(_de)[:80]))
 
         # 更新按钮
         label = "已登录 SHEIN: {}".format(account) if account else "已登录 SHEIN"
@@ -1332,117 +1402,101 @@ class SheinPublisher:
 
     # ── 查找本地已缓存的 chromedriver（跳过联网检查）
     def start_browser(self):
-        """启动浏览器。优先用 Edge，其次用 Chrome。"""
-        import glob as _glob
+        """启动浏览器。先尝试连接已有实例，失败则自动起动新实例。"""
+        import threading as _th
         import shutil as _shutil
         _t0 = time.time()
 
-        # 策略0：连接已有 Edge 调试端口（秒级，超时0.5秒跳过）
-        self.log("[DEBUG] 尝试连接已有 Edge (0.5s超时)...")
-        import threading as _th
+        # 策略0: 先尝试连接已有 Edge 调试端口（0.5s超时）
         _conn_result = [None]
-        def _try_connect():
+        def _try_connect_edge():
             try:
                 _o = EdgeOptions()
                 _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(self.DEBUG_PORT))
                 _d = webdriver.Edge(options=_o)
                 _d.current_url
                 _conn_result[0] = _d
-            except Exception as _e:
-                self.log("[DEBUG] Edge 连接失败: {}".format(str(_e)[:40]))
-        _conn_thread = _th.Thread(target=_try_connect, daemon=True)
-        _conn_thread.start()
-        _conn_thread.join(timeout=0.5)
+            except Exception:
+                pass
+        _t = _th.Thread(target=_try_connect_edge, daemon=True)
+        _t.start(); _t.join(timeout=0.5)
         if _conn_result[0] is not None:
             self.driver = _conn_result[0]
             self.wait = WebDriverWait(self.driver, 20)
-            _t1 = time.time()
-            self.log("[OK] 已连接到现有 Edge ({:.1f}s)".format(_t1 - _t0))
+            self.log("[OK] 已连接到现有 Edge ({:.1f}s)".format(time.time() - _t0))
             return
-        else:
-            self.log("[DEBUG] Edge 连接超时或失败，启动新 Edge...")
 
-        # Edge 选项
-        opts = EdgeOptions()
-        opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--disable-extensions")
-        opts.add_argument("--no-first-run")
-        opts.add_argument("--disable-translate")
-        opts.add_argument("--mute-audio")
-        opts.add_argument("--password-store=basic")
-        opts.add_argument("--disable-background-networking")
-        opts.add_argument("--disk-cache-size=0")
-        opts.add_argument("--media-cache-size=0")
-        opts.add_argument("--disable-application-cache")
-        opts.add_argument("--disable-infobars")
-        opts.add_argument("--disable-notifications")
-        opts.add_argument("--remote-debugging-port={}".format(self.DEBUG_PORT))
-        opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-        opts.add_experimental_option("useAutomationExtension", False)
-
-        import tempfile as _tmp
-        _profile = os.path.join(_tmp.gettempdir(), ".shein_edge")
-        os.makedirs(_profile, exist_ok=True)
-        opts.add_argument("--user-data-dir={}".format(_profile))
-
-        def _cdp_hide_webdriver(drv):
+        # 策略1: 先尝试连接已有 Chrome 调试端口
+        _conn_result2 = [None]
+        def _try_connect_chrome():
             try:
-                drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-                    "source": """
-                        Object.defineProperty(navigator, 'webdriver', {
-                            get: () => undefined
-                        });
-                    """
-                })
+                _o = Options()
+                _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(self.DEBUG_PORT))
+                _d = webdriver.Chrome(options=_o)
+                _d.current_url
+                _conn_result2[0] = _d
+            except Exception:
+                pass
+        _t2 = _th.Thread(target=_try_connect_chrome, daemon=True)
+        _t2.start(); _t2.join(timeout=0.5)
+        if _conn_result2[0] is not None:
+            self.driver = _conn_result2[0]
+            self.wait = WebDriverWait(self.driver, 20)
+            self.log("[OK] 已连接到现有 Chrome ({:.1f}s)".format(time.time() - _t0))
+            return
+
+        # 策略2: 启动新 Edge（由 Selenium 自动管理驱动）
+        self.log("[DEBUG] 启动新 Edge 浏览器...")
+        _profile = os.path.join(os.path.expanduser("~"), ".shein_browser_profile")
+        os.makedirs(_profile, exist_ok=True)
+
+        def _make_opts(opt_class):
+            o = opt_class()
+            o.add_argument("--disable-blink-features=AutomationControlled")
+            o.add_argument("--no-sandbox")
+            o.add_argument("--disable-dev-shm-usage")
+            o.add_argument("--disable-gpu")
+            o.add_argument("--disable-infobars")
+            o.add_argument("--remote-debugging-port={}".format(self.DEBUG_PORT))
+            o.add_argument("--user-data-dir={}".format(_profile))
+            o.add_argument("--profile-directory=Default")
+            o.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+            o.add_experimental_option("useAutomationExtension", False)
+            return o
+
+        def _hide_webdriver(drv):
+            try:
+                drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
+                    {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"})
             except Exception:
                 pass
 
-        # 查找本地 Edge 驱动
-        _candidates = []
-        self.log("[DEBUG] 查找本地 Edge 驱动...")
-        _path_driver = _shutil.which("msedgedriver")
-        if _path_driver:
-            self.log("[DEBUG] 找到 PATH msedgedriver: {}".format(_path_driver))
-            _candidates.append(_path_driver)
-        
-        _candidates += [
-            r"C:\msedgedriver\msedgedriver.exe",
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedgedriver.exe",
-        ]
-
-        for _cp in [p for p in _candidates if os.path.isfile(p)]:
-            try:
-                self.log("[DEBUG] 尝试 Edge 驱动: {}".format(os.path.basename(_cp)))
-                _t_start = time.time()
-                self.driver = webdriver.Edge(service=EdgeService(_cp), options=opts)
-                _t_end = time.time()
-                self.log("[OK] 使用 Edge 驱动 ({:.1f}s)".format(_t_end - _t_start))
-                self.wait = WebDriverWait(self.driver, 20)
-                _cdp_hide_webdriver(self.driver)
-                _t_total = time.time()
-                self.log("[TOTAL] Edge 启动完成 ({:.1f}s)".format(_t_total - _t0))
-                return
-            except Exception as _e:
-                self.log("[DEBUG] Edge 驱动失败: {}".format(str(_e)[:60]))
-                self.driver = None
-
-        # 如果 Edge 都失败，尝试 Chrome
-        self.log("[DEBUG] Edge 失败，尝试 Chrome...")
+        # 尝试 Edge（Selenium 自动匹配驱动）
         try:
-            self.driver = webdriver.Chrome(options=Options())
+            edge_opts = _make_opts(EdgeOptions)
+            self.driver = webdriver.Edge(options=edge_opts)
             self.wait = WebDriverWait(self.driver, 20)
-            _cdp_hide_webdriver(self.driver)
-            self.log("[OK] 使用 Chrome 启动")
+            _hide_webdriver(self.driver)
+            self.log("[OK] Edge 启动成功 ({:.1f}s)".format(time.time() - _t0))
             return
         except Exception as _e:
-            raise RuntimeError(
-                "无法启动浏览器！\n\n"
-                "请确保已安装 Microsoft Edge 或 Google Chrome\n\n"
-                "错误: {}".format(str(_e)[:100])
-            )
+            self.log("[DEBUG] Edge 失败: {}".format(str(_e)[:80]))
+
+        # 尝试 Chrome（Selenium 自动匹配驱动）
+        try:
+            chrome_opts = _make_opts(Options)
+            self.driver = webdriver.Chrome(options=chrome_opts)
+            self.wait = WebDriverWait(self.driver, 20)
+            _hide_webdriver(self.driver)
+            self.log("[OK] Chrome 启动成功 ({:.1f}s)".format(time.time() - _t0))
+            return
+        except Exception as _e:
+            self.log("[DEBUG] Chrome 失败: {}".format(str(_e)[:80]))
+
+        raise RuntimeError(
+            "无法启动浏览器！\n\n"
+            "请确保已安装 Microsoft Edge 或 Google Chrome\n"
+            "Selenium 会自动下载匹配的驱动程序，请确保网络可用")
 
     def open_login(self):
         self.driver.get(self.LOGIN_URL)
