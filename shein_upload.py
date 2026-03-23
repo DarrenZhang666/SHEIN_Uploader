@@ -944,6 +944,80 @@ class SheinApp(tk.Tk):
                 except Exception as spec_e:
                     self._pub_log('[ERROR] 规格及供应信息填写异常: {}'.format(str(spec_e)[:80]))
                     self.status_lbl.config(text='规格及供应信息填写遇到问题，请手动检查')
+
+                # 点击发布商品按鈕
+                self.status_lbl.config(text='点击发布商品...')
+                self._pub_log('[DEBUG] 开始点击发布商品按鈕...')
+                try:
+                    from selenium.webdriver.common.by import By as _By
+                    _driver = self._shein_publisher.driver
+                    submitted = False
+                    _pub_xpaths = [
+                        "//div[contains(@class,'auditOperate') or contains(@class,'bottomAlert')]//button[@type='submit']",
+                        "//button[@type='submit' and .//span[normalize-space(text())='发布商品']]",
+                        "//button[.//span[normalize-space(text())='发布商品']]",
+                        "//button[contains(text(),'发布商品')]",
+                        "//span[normalize-space(text())='发布商品']/parent::button",
+                        "//button[contains(text(),'提交')]",
+                        "//span[contains(text(),'发布商品')]",
+                    ]
+                    for _xp in _pub_xpaths:
+                        try:
+                            for _btn in _driver.find_elements(_By.XPATH, _xp):
+                                try:
+                                    if _btn.is_displayed() and _btn.is_enabled():
+                                        _driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _btn)
+                                        time.sleep(0.5)
+                                        _driver.execute_script("arguments[0].click();", _btn)
+                                        self._pub_log('[OK] 已点击发布商品按鈕')
+                                        submitted = True
+                                        break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            continue
+                        if submitted:
+                            break
+                    if submitted:
+                        self.status_lbl.config(text='✓ 已点击发布，等待确认弹窗...')
+                        _confirm_clicked = False
+                        _deadline = time.time() + 15
+                        _dlg_xpaths = [
+                            "//button[.//span[contains(text(),'一件翻译并发布')]]",
+                            "//button[contains(text(),'一件翻译并发布')]",
+                            "//span[contains(text(),'一件翻译并发布')]/parent::button",
+                            "//*[contains(@class,'so-modal') or contains(@class,'dialog')]//button[.//span[contains(text(),'翻译')]]",
+                        ]
+                        while time.time() < _deadline:
+                            for _xp in _dlg_xpaths:
+                                try:
+                                    for _btn in _driver.find_elements(_By.XPATH, _xp):
+                                        if _btn.is_displayed() and _btn.is_enabled():
+                                            _driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _btn)
+                                            time.sleep(0.3)
+                                            _driver.execute_script("arguments[0].click();", _btn)
+                                            self._pub_log('[OK] 已点击一件翻译并发布')
+                                            _confirm_clicked = True
+                                            break
+                                except Exception:
+                                    continue
+                                if _confirm_clicked:
+                                    break
+                            if _confirm_clicked:
+                                break
+                            time.sleep(0.5)
+                        if _confirm_clicked:
+                            self.status_lbl.config(text='✓ 商品已提交发布')
+                            self._pub_log('商品 {} 已提交发布'.format(self.current_asin))
+                        else:
+                            self.status_lbl.config(text='✓ 发布按鈕已点击（未检测到翻译弹窗）')
+                            self._pub_log('[WARN] 未检测到一件翻译并发布弹窗')
+                    else:
+                        self.status_lbl.config(text='✗ 未找到发布按鈕，请手动点击发布')
+                        self._pub_log('[ERROR] 未找到发布商品按鈕')
+                except Exception as pub_e:
+                    self._pub_log('[ERROR] 点击发布商品异常: {}'.format(str(pub_e)[:80]))
+                    self.status_lbl.config(text='发布出错: ' + str(pub_e)[:40])
             else:
                 self.status_lbl.config(text='✗ 基础信息填写失败')
         except Exception as e:
@@ -4299,16 +4373,73 @@ class SheinPublisher:
         # [DISABLED] self.log("自动上传 {} 张主页图到细节图...".format(len(main_images)))
         # [DISABLED] self._upload_detail_images(main_images)
 
-        # Step7: 提交发布
+        # Step7: 点击发布商品按鈕
         self.log("点击发布商品...")
-        submitted = self._try_click([
-            (By.XPATH, "//button[contains(text(),'发布商品')]"),
-            (By.XPATH, "//button[contains(text(),'提交')]"),
-            (By.XPATH, "//span[contains(text(),'发布商品')]"),
-            (By.CSS_SELECTOR, ".submit-btn, .publish-btn"),
-        ], timeout=10)
+        submitted = False
+        _pub_xpaths = [
+            "//div[contains(@class,'auditOperate') or contains(@class,'bottomAlert')]//button[@type='submit']",
+            "//button[@type='submit' and .//span[normalize-space(text())='发布商品']]",
+            "//button[.//span[normalize-space(text())='发布商品']]",
+            "//button[contains(text(),'发布商品')]",
+            "//span[normalize-space(text())='发布商品']/parent::button",
+            "//button[contains(text(),'提交')]",
+            "//span[contains(text(),'发布商品')]",
+        ]
+        for _xp in _pub_xpaths:
+            try:
+                for _btn in driver.find_elements(By.XPATH, _xp):
+                    try:
+                        if _btn.is_displayed() and _btn.is_enabled():
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _btn)
+                            time.sleep(0.5)
+                            driver.execute_script("arguments[0].click();", _btn)
+                            self.log("[OK] 已点击发布商品按鈕")
+                            submitted = True
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+            if submitted:
+                break
         if not submitted:
-            raise Exception("未找到发布按钮，请手动完成发布")
+            raise Exception("未找到发布按鈕，请手动完成发布")
+
+        # Step8: 等待确认弹窗，点击"一件翻译并发布"
+        self.log("等待确认弹窗（一件翻译并发布）...")
+        _confirm_clicked = False
+        _deadline = time.time() + 15
+        while time.time() < _deadline:
+            try:
+                _dlg_xpaths = [
+                    "//button[.//span[contains(text(),'一件翻译并发布')]]",
+                    "//button[contains(text(),'一件翻译并发布')]",
+                    "//span[contains(text(),'一件翻译并发布')]/parent::button",
+                    "//*[contains(@class,'so-modal') or contains(@class,'dialog')]//button[.//span[contains(text(),'翻译')]]",
+                ]
+                for _xp in _dlg_xpaths:
+                    try:
+                        for _btn in driver.find_elements(By.XPATH, _xp):
+                            if _btn.is_displayed() and _btn.is_enabled():
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _btn)
+                                time.sleep(0.3)
+                                driver.execute_script("arguments[0].click();", _btn)
+                                self.log("[OK] 已点击一件翻译并发布")
+                                _confirm_clicked = True
+                                break
+                    except Exception:
+                        continue
+                    if _confirm_clicked:
+                        break
+            except Exception:
+                pass
+            if _confirm_clicked:
+                break
+            time.sleep(0.5)
+
+        if not _confirm_clicked:
+            self.log("[WARN] 未找到'一件翻译并发布'按鈕，弹窗可能未出现或已自动关闭")
+
         time.sleep(3)
         self.log("商品已提交发布")
         return True
