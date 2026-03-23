@@ -13,6 +13,7 @@ import random
 import os
 import tempfile
 import json
+from shein_sensitive_clean import SENSITIVE_WORDS, TITLE_SENSITIVE_WORDS, _filter_sensitive, _filter_title
 
 try:
     from selenium import webdriver
@@ -116,26 +117,8 @@ ACCENT="#e84393"; ACCENT2="#ff6bae"; TEXT_MAIN="#f0f0f0"
 TEXT_SUB="#a0a3b1"; BORDER="#3a3d55"; GREEN="#4cde96"
 YELLOW="#ffc857"; RED="#ff5f57"
 
-# ── 商品文案敏感词集合（含任一词的整句将被过滤）──────────────────────
-# 每个词不区分大小写，逐句匹配，命中则整句删除
-SENSITIVE_WORDS = [
-    "sales",          # 促销/销量相关
-    # 在此处继续添加敏感词，每行一个，字符串格式
-]
 
-def _filter_sensitive(text):
-    """过滤文案中含敏感词的整句（以句号、感叹号、换行为分句依据）。"""
-    if not text or not SENSITIVE_WORDS:
-        return text
-    import re as __re
-    sentences = __re.split(r'(?<=[.!?\n])', text)
-    filtered = []
-    for sent in sentences:
-        lower = sent.lower()
-        if any(w.lower() in lower for w in SENSITIVE_WORDS):
-            continue
-        filtered.append(sent)
-    return ''.join(filtered).strip()
+
 
 
 def fetch_amazon_product(asin, region="美国"):
@@ -171,7 +154,7 @@ def fetch_amazon_product(asin, region="美国"):
             res["title"] = "HTTP {}".format(r.status_code); return res
         s = BeautifulSoup(r.text, "html.parser")
         t = s.select_one("#productTitle")
-        if t: res["title"] = t.get_text(strip=True)
+        if t: res["title"] = _filter_title(t.get_text(strip=True))
         
         # 抓取价格并转换为美元格式
         price_raw = "N/A"
@@ -2571,6 +2554,31 @@ class SheinPublisher:
                         time.sleep(0.5)
                     except Exception as e2:
                         self.log("[WARN] 价格(USD)未能填写: {}".format(str(e2)[:50]))
+            # 步骤1.5: 向“批量填写”区域的「价格」输入框填写价格，并点击「批量填写」按鈕
+            if price_num:
+                try:
+                    _bp_inp = driver.find_element(By.CSS_SELECTOR, ".supplierPriceSupplyFillClass_0 input")
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _bp_inp)
+                    self._js_input(_bp_inp, price_num)
+                    self.log("[OK] 批量填写价格已输入: {}".format(price_num))
+                    time.sleep(0.3)
+                    # 点击「批量填写」按鈕
+                    _batch_btns = driver.find_elements(By.XPATH,
+                        "//button[.//span[normalize-space(text())='批量填写']]")
+                    for _bbtn in _batch_btns:
+                        try:
+                            if _bbtn.is_displayed() and _bbtn.is_enabled():
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _bbtn)
+                                time.sleep(0.2)
+                                driver.execute_script("arguments[0].click();", _bbtn)
+                                self.log("[OK] 已点击批量填写按鈕")
+                                time.sleep(0.5)
+                                break
+                        except Exception:
+                            continue
+                except Exception as _bp_e:
+                    self.log("[WARN] 批量填写价格失败: {}".format(str(_bp_e)[:60]))
+
             # 步骤2.5: 填写含包装重量(g)
             try:
                 self.log("[DEBUG] 填写含包装重量...")
