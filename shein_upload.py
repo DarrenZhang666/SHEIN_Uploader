@@ -116,6 +116,28 @@ ACCENT="#e84393"; ACCENT2="#ff6bae"; TEXT_MAIN="#f0f0f0"
 TEXT_SUB="#a0a3b1"; BORDER="#3a3d55"; GREEN="#4cde96"
 YELLOW="#ffc857"; RED="#ff5f57"
 
+# ── 商品文案敏感词集合（含任一词的整句将被过滤）──────────────────────
+# 每个词不区分大小写，逐句匹配，命中则整句删除
+SENSITIVE_WORDS = [
+    "sales",          # 促销/销量相关
+    # 在此处继续添加敏感词，每行一个，字符串格式
+]
+
+def _filter_sensitive(text):
+    """过滤文案中含敏感词的整句（以句号、感叹号、换行为分句依据）。"""
+    if not text or not SENSITIVE_WORDS:
+        return text
+    import re as __re
+    sentences = __re.split(r'(?<=[.!?\n])', text)
+    filtered = []
+    for sent in sentences:
+        lower = sent.lower()
+        if any(w.lower() in lower for w in SENSITIVE_WORDS):
+            continue
+        filtered.append(sent)
+    return ''.join(filtered).strip()
+
+
 def fetch_amazon_product(asin, region="美国"):
     _REGION_DOMAINS = {
         "美国": "www.amazon.com",
@@ -316,9 +338,11 @@ def fetch_amazon_product(asin, region="美国"):
         
         feats = [li.get_text(strip=True)
                  for li in s.select("#feature-bullets li span.a-list-item") if li.get_text(strip=True)]
+        # 过滤含敏感词的条目
+        feats = [f for f in feats if not any(w.lower() in f.lower() for w in SENSITIVE_WORDS)]
         res["features"] = feats[:6]
         d = s.select_one("#productDescription p")
-        if d: res["description"] = d.get_text(strip=True)[:300]
+        if d: res["description"] = _filter_sensitive(d.get_text(strip=True))[:300]
         
         # 抓取商品描述中的图片（仅 Product description 部分，过滤 GIF）
         desc_images = []
