@@ -2562,6 +2562,41 @@ class SheinPublisher:
                     self._js_input(_bp_inp, price_num)
                     self.log("[OK] 批量填写价格已输入: {}".format(price_num))
                     time.sleep(0.3)
+                    # 点击「件数类型」下拉并选择「单品」
+                    try:
+                        _qty_type_sel = driver.find_element(
+                            By.XPATH,
+                            "//div[contains(@class,'supplierPriceSupplyFillClass_0')]"
+                            "/following-sibling::div[contains(@class,'spmp_style__flexColumnCell')]"
+                            "//div[contains(@class,'so-select-inner')]"
+                        )
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _qty_type_sel)
+                        time.sleep(0.2)
+                        driver.execute_script("arguments[0].click();", _qty_type_sel)
+                        self.log("[DEBUG] 已点开件数类型下拉")
+                        time.sleep(0.5)
+                        # 在下拉列表中找「单品」选项
+                        _found = False
+                        for _opt in driver.find_elements(By.XPATH,
+                                "//*[contains(@class,'so-select-option') or contains(@class,'so-option')]"
+                                "[normalize-space(text())='单品']"):
+                            if _opt.is_displayed():
+                                driver.execute_script("arguments[0].click();", _opt)
+                                self.log("[OK] 已选择件数类型:单品")
+                                _found = True
+                                time.sleep(0.3)
+                                break
+                        if not _found:
+                            # 备用：找包含「单品」文字的任意可见元素
+                            for _li in driver.find_elements(By.XPATH,
+                                    "//*[normalize-space(text())='单品']"):
+                                if _li.is_displayed():
+                                    driver.execute_script("arguments[0].click();", _li)
+                                    self.log("[OK] 已选择件数类型:单品(备用)")
+                                    time.sleep(0.3)
+                                    break
+                    except Exception as _qt_e:
+                        self.log("[WARN] 件数类型选择失败: {}".format(str(_qt_e)[:60]))
                     # 点击「批量填写」按鈕
                     _batch_btns = driver.find_elements(By.XPATH,
                         "//button[.//span[normalize-space(text())='批量填写']]")
@@ -2813,7 +2848,7 @@ class SheinPublisher:
             if not main_images:
                 self.log("[ERROR] 没有主页图可以上传")
                 return
-            images_to_upload = main_images
+            images_to_upload = main_images[:6]  # 最多上传6张细节图
             self.log("开始上传细节图...")
             self.log("[DEBUG] 准备上传 {} 张图片到细节图".format(len(images_to_upload)))
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
