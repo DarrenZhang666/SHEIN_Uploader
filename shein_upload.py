@@ -793,8 +793,8 @@ class SheinApp(tk.Tk):
             messagebox.showwarning('提示', '该商品没有图片信息，请先抓取商品')
             return
         
-        # 如果已经有 Chrome 实例，直接用
-        if self._shein_publisher is not None and self._shein_publisher.is_alive():
+        # 已禁用该主线程分支：避免点击“开始上品”后界面卡死
+        if False and self._shein_publisher is not None and self._shein_publisher.is_alive():
             self.status_lbl.config(text='已有 Chrome 实例，打开商品发布页...')
             try:
                 self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
