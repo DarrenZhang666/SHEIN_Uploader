@@ -800,7 +800,7 @@ class SheinApp(tk.Tk):
                 self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
                 time.sleep(2)
                 self.status_lbl.config(text='正在上传商品图片...')
-                self._auto_upload_image()
+                threading.Thread(target=self._auto_upload_image, daemon=True).start()
                 return
             except Exception as e:
                 self._pub_log('打开页面失败: ' + str(e)[:40])
@@ -824,7 +824,7 @@ class SheinApp(tk.Tk):
                     pub.driver.get(SHEIN_PUBLISH_URL)
                     time.sleep(2)
                     self.status_lbl.config(text='正在上传商品图片...')
-                    self._auto_upload_image()
+                    threading.Thread(target=self._auto_upload_image, daemon=True).start()
                     return
                 except Exception as e:
                     self._pub_log("[DEBUG] 连接已打开的 Chrome 失败: {}".format(str(e)[:40]))
@@ -837,7 +837,7 @@ class SheinApp(tk.Tk):
                 pub.driver.get(SHEIN_PUBLISH_URL)
                 time.sleep(2)
                 self.status_lbl.config(text='正在上传商品图片...')
-                self._auto_upload_image()
+                threading.Thread(target=self._auto_upload_image, daemon=True).start()
             except Exception as e:
                 self.status_lbl.config(text='操作失败: ' + str(e)[:40])
                 self._pub_log('操作失败: ' + str(e))
