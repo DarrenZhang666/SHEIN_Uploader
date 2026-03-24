@@ -403,6 +403,8 @@ class SheinApp(tk.Tk):
         self._shein_publisher=None   # 持久化浏览器实例
         self._stop_publish=False      # 停止上品标志
         self._driver_ready=False      # 驱动预热完成标志
+        self._publish_running=False   # 当前是否正在执行上品流程
+        self._publish_session_id = 0  # 上品会话ID（用于中断旧线程）
         
         # 初始化日志文件
         self._init_log_file()
@@ -793,6 +795,16 @@ class SheinApp(tk.Tk):
             messagebox.showwarning('提示', '该商品没有图片信息，请先抓取商品')
             return
         
+        # 每次点击“开始上品”创建新的会话ID，并清理停止标志
+        self._publish_session_id += 1
+        current_session_id = self._publish_session_id
+        self._stop_publish = False
+        try:
+            if self._shein_publisher is not None:
+                setattr(self._shein_publisher, '_stop_publish', False)
+        except Exception:
+            pass
+
         # 已禁用该主线程分支：避免点击“开始上品”后界面卡死
         if False and self._shein_publisher is not None and self._shein_publisher.is_alive():
             self.status_lbl.config(text='已有 Chrome 实例，打开商品发布页...')
@@ -800,236 +812,275 @@ class SheinApp(tk.Tk):
                 self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
                 time.sleep(2)
                 self.status_lbl.config(text='正在上传商品图片...')
-                threading.Thread(target=self._auto_upload_image, daemon=True).start()
+                threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
                 return
             except Exception as e:
                 self._pub_log('打开页面失败: ' + str(e)[:40])
                 self._shein_publisher = None
         
-        # 否则尝试连接已打开的 Chrome
-        self.status_lbl.config(text='正在连接到 Chrome 浏览器...')
-        
-        # 创建 Selenium 实例以便后续操作
+        # 在后台线程中复用已登录浏览器；没有则再创建
+        self.status_lbl.config(text='准备打开商品发布页...')
+
         def _init_selenium():
             try:
-                pub = SheinPublisher(log_cb=self._pub_log)
-                
-                # 先尝试连接已打开的 Chrome
-                try:
-                    self.status_lbl.config(text='尝试连接已打开的 Chrome...')
-                    pub._connect_chrome_only()
-                    self._shein_publisher = pub
-                    self.status_lbl.config(text='已连接到已打开的 Chrome')
-                    # 导航到商品发布页
-                    pub.driver.get(SHEIN_PUBLISH_URL)
+                # 优先复用已登录的浏览器实例（通常是点击“登录 SHEIN”打开的 Edge）
+                if self._shein_publisher is not None and self._shein_publisher.is_alive():
+                    self.status_lbl.config(text='复用当前浏览器并打开发布页...')
+                    self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
                     time.sleep(2)
                     self.status_lbl.config(text='正在上传商品图片...')
-                    threading.Thread(target=self._auto_upload_image, daemon=True).start()
+                    threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
                     return
-                except Exception as e:
-                    self._pub_log("[DEBUG] 连接已打开的 Chrome 失败: {}".format(str(e)[:40]))
-                
-                # 如果连接失败，启动新 Chrome
-                self.status_lbl.config(text='启动新 Chrome 浏览器...')
-                pub.start_chrome_browser()
+
+                # 没有可用实例时，启动/连接浏览器（优先连接现有 Edge/Chrome）
+                pub = SheinPublisher(log_cb=self._pub_log)
+                self.status_lbl.config(text='正在连接或启动浏览器...')
+                pub.start_browser()
                 self._shein_publisher = pub
-                self.status_lbl.config(text='Chrome 已启动，正在打开商品发布页...')
+                self.status_lbl.config(text='浏览器已就绪，正在打开商品发布页...')
                 pub.driver.get(SHEIN_PUBLISH_URL)
                 time.sleep(2)
                 self.status_lbl.config(text='正在上传商品图片...')
-                threading.Thread(target=self._auto_upload_image, daemon=True).start()
+                threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
             except Exception as e:
                 self.status_lbl.config(text='操作失败: ' + str(e)[:40])
                 self._pub_log('操作失败: ' + str(e))
                 self.after(0, lambda err=str(e): messagebox.showerror('失败', err[:100]))
-        
+
         threading.Thread(target=_init_selenium, daemon=True).start()
 
-    def _auto_upload_image(self):
+    def _is_publish_stopped(self):
+        if self._stop_publish:
+            return True
+        try:
+            return bool(self._shein_publisher is not None and getattr(self._shein_publisher, '_stop_publish', False))
+        except Exception:
+            return False
+
+    def _check_stop_or_return(self, status='已停止上品', session_id=None):
+        # 会话ID变化表示已有新任务启动，旧线程必须立刻退出
+        if session_id is not None and session_id != self._publish_session_id:
+            self._pub_log('[STOP] 检测到新上品会话，旧线程退出')
+            return True
+        if self._is_publish_stopped():
+            self._pub_log('[STOP] 用户点击停止，上品已中断')
+            self.after(0, lambda s=status: self.status_lbl.config(text=s))
+            return True
+        return False
+
+    def _auto_upload_image(self, session_id=None):
         """自动上传商品图片、选择推荐类目、填写基础信息（在后台线程中调用）。"""
+        self._publish_running = True
+        if session_id is None:
+            session_id = self._publish_session_id
         try:
             if self.current_asin is None or self._shein_publisher is None:
+                return
+            if self._check_stop_or_return(session_id=session_id):
                 return
 
             product_info = self.product_cache.get(self.current_asin)
             if not product_info or not product_info.get('image_url'):
                 return
+            if self._check_stop_or_return(session_id=session_id):
+                return
 
-            # 先关闭可能弹出的公告弹窗，避免影响后续操作
             try:
                 self._shein_publisher._dismiss_announcements()
             except Exception:
                 pass
 
-            # 点击"识图发品"按钮
-            self.status_lbl.config(text='点击"识图发品"按钮...')
-            if not self._shein_publisher.click_identify_image_button():
-                self.status_lbl.config(text='未找到"识图发品"按钮')
+            if self._check_stop_or_return(session_id=session_id):
                 return
-            
-            # 下载图片到临时目录
+            self.after(0, lambda: self.status_lbl.config(text='点击"识图发品"按钮...'))
+            if not self._shein_publisher.click_identify_image_button():
+                self.after(0, lambda: self.status_lbl.config(text='未找到"识图发品"按钮'))
+                return
+
+            if self._check_stop_or_return(session_id=session_id):
+                return
             image_url = product_info.get('image_url')
             temp_dir = os.path.join(tempfile.gettempdir(), 'shein_images')
             os.makedirs(temp_dir, exist_ok=True)
             temp_image = os.path.join(temp_dir, '{}.jpg'.format(self.current_asin))
-            
-            self.status_lbl.config(text='下载商品图片...')
+
+            self.after(0, lambda: self.status_lbl.config(text='下载商品图片...'))
             try:
                 response = requests.get(image_url, timeout=10)
                 with open(temp_image, 'wb') as f:
                     f.write(response.content)
             except Exception as e:
-                self.status_lbl.config(text='下载图片失败: ' + str(e)[:40])
+                self.after(0, lambda err=str(e): self.status_lbl.config(text='下载图片失败: ' + err[:40]))
                 return
-            
-            # 上传图片
-            self.status_lbl.config(text='上传图片到 SHEIN...')
+
+            if self._check_stop_or_return(session_id=session_id):
+                return
+            self.after(0, lambda: self.status_lbl.config(text='上传图片到 SHEIN...'))
             if not self._shein_publisher.upload_product_image(temp_image):
-                self.status_lbl.config(text='✗ 图片上传失败')
+                self.after(0, lambda: self.status_lbl.config(text='✗ 图片上传失败'))
                 return
-            
-            self.status_lbl.config(text='✓ 图片上传成功，等待识别中...')
-            self._pub_log('图片已上传，等待 SHEIN 识别（5秒）...')
-            
-            # 等待 5 秒让图片识别完成
+
             for i in range(5, 0, -1):
-                self.status_lbl.config(text='✓ 图片上传成功，等待识别中... {}s'.format(i))
+                if self._check_stop_or_return(session_id=session_id):
+                    return
+                self.after(0, lambda ii=i: self.status_lbl.config(text='✓ 图片上传成功，等待识别中... {}s'.format(ii)))
                 time.sleep(1)
-            
-            # 选择第一个推荐类目
-            self.status_lbl.config(text='选择第一个推荐类目...')
+
+            if self._check_stop_or_return(session_id=session_id):
+                return
+            self.after(0, lambda: self.status_lbl.config(text='选择第一个推荐类目...'))
             if not self._shein_publisher.select_first_category():
-                self.status_lbl.config(text='✗ 选择类目失败')
+                self.after(0, lambda: self.status_lbl.config(text='✗ 选择类目失败'))
                 return
-            
-            self.status_lbl.config(text='✓ 已选择推荐类目，点击确认...')
+
+            if self._check_stop_or_return(session_id=session_id):
+                return
+            self.after(0, lambda: self.status_lbl.config(text='✓ 已选择推荐类目，点击确认...'))
             time.sleep(1)
-            
-            # 点击"确认，下一步"按钮
             if not self._shein_publisher.click_confirm_button():
-                self.status_lbl.config(text='✗ 点击确认按钮失败')
+                self.after(0, lambda: self.status_lbl.config(text='✗ 点击确认按钮失败'))
                 return
-            
-            self.status_lbl.config(text='✓ 商品类目确认成功，等待页面加载...')
-            self._pub_log('商品 {} 类目确认成功'.format(self.current_asin))
-            time.sleep(3)
-            
-            # 填写基础信息
-            self.status_lbl.config(text='填写商品基础信息...')
-            if self._shein_publisher.fill_product_info(product_info):
-                self.status_lbl.config(text='✓ 商品基础信息填写完成')
-                self._pub_log('商品 {} 基础信息填写完成'.format(self.current_asin))
 
-                # 等待页面稳定后继续填写规格及供应信息
-                self.status_lbl.config(text='等待页面加载，准备填写规格及供应信息...')
-                self._pub_log('[DEBUG] 等待2秒后开始填写规格及供应信息...')
-                time.sleep(2)
+            if self._check_stop_or_return(session_id=session_id):
+                return
+            self.after(0, lambda: self.status_lbl.config(text='✓ 商品类目确认成功，等待页面加载...'))
+            time.sleep(1.5)
 
-                # 填写规格及供应信息
-                self.status_lbl.config(text='填写规格及供应信息...')
-                self._pub_log('[DEBUG] 开始填写规格及供应信息...')
+            if self._check_stop_or_return(session_id=session_id):
+                return
+            self.after(0, lambda: self.status_lbl.config(text='填写商品基础信息...'))
+            if not self._shein_publisher.fill_product_info(product_info):
+                self.after(0, lambda: self.status_lbl.config(text='✗ 基础信息填写失败'))
+                return
+
+            if self._check_stop_or_return(session_id=session_id):
+                return
+            self.after(0, lambda: self.status_lbl.config(text='✓ 商品基础信息填写完成'))
+
+            self.after(0, lambda: self.status_lbl.config(text='等待页面加载，准备填写规格及供应信息...'))
+            time.sleep(2)
+            if self._check_stop_or_return(session_id=session_id):
+                return
+
+            self.after(0, lambda: self.status_lbl.config(text='填写规格及供应信息...'))
+            try:
                 try:
-                    # 应用售价倍数到价格
+                    mult = float(self.price_multiplier.get())
+                except Exception:
+                    mult = 3.0
+                import copy as _copy
+                product_info_pub = _copy.copy(product_info)
+                price_raw = product_info_pub.get("price", "N/A")
+                import re as _re
+                if price_raw and price_raw != "N/A":
+                    _m = _re.search(r"[\d]+\.?[\d]*", price_raw.replace(",",""))
+                    if _m:
+                        _orig = float(_m.group())
+                        product_info_pub["price"] = str(round(_orig * mult, 2))
+
+                if self._check_stop_or_return(session_id=session_id):
+                    return
+                self._shein_publisher.fill_spec_and_supply_info(product_info_pub)
+                if self._check_stop_or_return(session_id=session_id):
+                    return
+                self.after(0, lambda: self.status_lbl.config(text='✓ 规格及供应信息填写完成'))
+            except Exception as spec_e:
+                self._pub_log('[ERROR] 规格及供应信息填写异常: {}'.format(str(spec_e)[:80]))
+                self.after(0, lambda: self.status_lbl.config(text='规格及供应信息填写遇到问题，请手动检查'))
+
+            if self._check_stop_or_return(session_id=session_id):
+                return
+            self.after(0, lambda: self.status_lbl.config(text='点击发布商品...'))
+            self._pub_log('[DEBUG] 开始点击发布商品按鈕...')
+            try:
+                from selenium.webdriver.common.by import By as _By
+                _driver = self._shein_publisher.driver
+                submitted = False
+                _pub_xpaths = [
+                    "//div[contains(@class,'auditOperate') or contains(@class,'bottomAlert')]//button[@type='submit']",
+                    "//button[@type='submit' and .//span[normalize-space(text())='发布商品']]",
+                    "//button[.//span[normalize-space(text())='发布商品']]",
+                    "//button[contains(text(),'发布商品')]",
+                    "//span[normalize-space(text())='发布商品']/parent::button",
+                    "//button[contains(text(),'提交')]",
+                    "//span[contains(text(),'发布商品')]",
+                ]
+                for _xp in _pub_xpaths:
+                    if self._check_stop_or_return(session_id=session_id):
+                        return
                     try:
-                        mult = float(self.price_multiplier.get())
+                        for _btn in _driver.find_elements(_By.XPATH, _xp):
+                            if self._check_stop_or_return(session_id=session_id):
+                                return
+                            try:
+                                if _btn.is_displayed() and _btn.is_enabled():
+                                    _driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _btn)
+                                    time.sleep(0.5)
+                                    _driver.execute_script("arguments[0].click();", _btn)
+                                    self._pub_log('[OK] 已点击发布商品按鈕')
+                                    submitted = True
+                                    break
+                            except Exception:
+                                continue
                     except Exception:
-                        mult = 3.0
-                    import copy as _copy
-                    product_info_pub = _copy.copy(product_info)
-                    price_raw = product_info_pub.get("price", "N/A")
-                    import re as _re
-                    if price_raw and price_raw != "N/A":
-                        _m = _re.search(r"[\d]+\.?[\d]*", price_raw.replace(",",""))
-                        if _m:
-                            _orig = float(_m.group())
-                            _new_price = round(_orig * mult, 2)
-                            product_info_pub["price"] = str(_new_price)
-                            self._pub_log("[DEBUG] 售价倍数{}, 价格 {} -> {}".format(mult, _orig, _new_price))
-                    self._shein_publisher.fill_spec_and_supply_info(product_info_pub)
-                    self.status_lbl.config(text='✓ 规格及供应信息填写完成')
-                    self._pub_log('商品 {} 规格及供应信息填写完成'.format(self.current_asin))
-                except Exception as spec_e:
-                    self._pub_log('[ERROR] 规格及供应信息填写异常: {}'.format(str(spec_e)[:80]))
-                    self.status_lbl.config(text='规格及供应信息填写遇到问题，请手动检查')
+                        continue
+                    if submitted:
+                        break
 
-                # 点击发布商品按鈕
-                self.status_lbl.config(text='点击发布商品...')
-                self._pub_log('[DEBUG] 开始点击发布商品按鈕...')
-                try:
-                    from selenium.webdriver.common.by import By as _By
-                    _driver = self._shein_publisher.driver
-                    submitted = False
-                    _pub_xpaths = [
-                        "//div[contains(@class,'auditOperate') or contains(@class,'bottomAlert')]//button[@type='submit']",
-                        "//button[@type='submit' and .//span[normalize-space(text())='发布商品']]",
-                        "//button[.//span[normalize-space(text())='发布商品']]",
-                        "//button[contains(text(),'发布商品')]",
-                        "//span[normalize-space(text())='发布商品']/parent::button",
-                        "//button[contains(text(),'提交')]",
-                        "//span[contains(text(),'发布商品')]",
+                if submitted:
+                    self.after(0, lambda: self.status_lbl.config(text='✓ 已点击发布，等待确认弹窗...'))
+                    _confirm_clicked = False
+                    _deadline = time.time() + 15
+                    _dlg_xpaths = [
+                        "//button[.//span[contains(text(),'一件翻译并发布')]]",
+                        "//button[contains(text(),'一件翻译并发布')]",
+                        "//span[contains(text(),'一件翻译并发布')]/parent::button",
+                        "//*[contains(@class,'so-modal') or contains(@class,'dialog')]//button[.//span[contains(text(),'翻译')]]",
                     ]
-                    for _xp in _pub_xpaths:
-                        try:
-                            for _btn in _driver.find_elements(_By.XPATH, _xp):
-                                try:
+                    while time.time() < _deadline:
+                        if self._check_stop_or_return(session_id=session_id):
+                            return
+                        for _xp in _dlg_xpaths:
+                            try:
+                                for _btn in _driver.find_elements(_By.XPATH, _xp):
+                                    if self._check_stop_or_return(session_id=session_id):
+                                        return
                                     if _btn.is_displayed() and _btn.is_enabled():
                                         _driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _btn)
-                                        time.sleep(0.5)
+                                        time.sleep(0.3)
                                         _driver.execute_script("arguments[0].click();", _btn)
-                                        self._pub_log('[OK] 已点击发布商品按鈕')
-                                        submitted = True
+                                        self._pub_log('[OK] 已点击一件翻译并发布')
+                                        _confirm_clicked = True
                                         break
-                                except Exception:
-                                    continue
-                        except Exception:
-                            continue
-                        if submitted:
-                            break
-                    if submitted:
-                        self.status_lbl.config(text='✓ 已点击发布，等待确认弹窗...')
-                        _confirm_clicked = False
-                        _deadline = time.time() + 15
-                        _dlg_xpaths = [
-                            "//button[.//span[contains(text(),'一件翻译并发布')]]",
-                            "//button[contains(text(),'一件翻译并发布')]",
-                            "//span[contains(text(),'一件翻译并发布')]/parent::button",
-                            "//*[contains(@class,'so-modal') or contains(@class,'dialog')]//button[.//span[contains(text(),'翻译')]]",
-                        ]
-                        while time.time() < _deadline:
-                            for _xp in _dlg_xpaths:
-                                try:
-                                    for _btn in _driver.find_elements(_By.XPATH, _xp):
-                                        if _btn.is_displayed() and _btn.is_enabled():
-                                            _driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _btn)
-                                            time.sleep(0.3)
-                                            _driver.execute_script("arguments[0].click();", _btn)
-                                            self._pub_log('[OK] 已点击一件翻译并发布')
-                                            _confirm_clicked = True
-                                            break
-                                except Exception:
-                                    continue
-                                if _confirm_clicked:
-                                    break
+                            except Exception:
+                                continue
                             if _confirm_clicked:
                                 break
-                            time.sleep(0.5)
                         if _confirm_clicked:
-                            self.status_lbl.config(text='✓ 商品已提交发布')
-                            self._pub_log('商品 {} 已提交发布'.format(self.current_asin))
-                        else:
-                            self.status_lbl.config(text='✓ 发布按鈕已点击（未检测到翻译弹窗）')
-                            self._pub_log('[WARN] 未检测到一件翻译并发布弹窗')
+                            break
+                        time.sleep(0.5)
+                    if _confirm_clicked:
+                        self.after(0, lambda: self.status_lbl.config(text='✓ 商品已提交发布'))
+                        self._pub_log('商品 {} 已提交发布'.format(self.current_asin))
                     else:
-                        self.status_lbl.config(text='✗ 未找到发布按鈕，请手动点击发布')
-                        self._pub_log('[ERROR] 未找到发布商品按鈕')
-                except Exception as pub_e:
-                    self._pub_log('[ERROR] 点击发布商品异常: {}'.format(str(pub_e)[:80]))
-                    self.status_lbl.config(text='发布出错: ' + str(pub_e)[:40])
-            else:
-                self.status_lbl.config(text='✗ 基础信息填写失败')
+                        self.after(0, lambda: self.status_lbl.config(text='✓ 发布按鈕已点击（未检测到翻译弹窗）'))
+                        self._pub_log('[WARN] 未检测到一件翻译并发布弹窗')
+                else:
+                    self.after(0, lambda: self.status_lbl.config(text='✗ 未找到发布按鈕，请手动点击发布'))
+                    self._pub_log('[ERROR] 未找到发布商品按鈕')
+            except Exception as pub_e:
+                self._pub_log('[ERROR] 点击发布商品异常: {}'.format(str(pub_e)[:80]))
+                self.after(0, lambda err=str(pub_e): self.status_lbl.config(text='发布出错: ' + err[:40]))
+
         except Exception as e:
-            self.status_lbl.config(text='上传出错: ' + str(e)[:40])
-            self._pub_log('上传出错: ' + str(e))
+            if '用户已停止上品' in str(e):
+                self._pub_log('[STOP] 用户已停止上品')
+                self.after(0, lambda: self.status_lbl.config(text='已停止上品'))
+            else:
+                self.after(0, lambda err=str(e): self.status_lbl.config(text='上传出错: ' + err[:40]))
+                self._pub_log('上传出错: ' + str(e))
+        finally:
+            self._publish_running = False
 
     def _dump_page_info_btn(self):
         """抓取当前浏览器页面的元素信息，帮助定位'识图发品'按钮。"""
@@ -1226,9 +1277,14 @@ class SheinApp(tk.Tk):
         fail_list = []
         total = len(asins)
         self._stop_publish = False  # 确保开始时标志为 False
+        try:
+            if pub is not None:
+                setattr(pub, '_stop_publish', False)
+        except Exception:
+            pass
         for i,asin in enumerate(asins):
             # 检查停止标志
-            if self._stop_publish:
+            if self._stop_publish or bool(getattr(pub, '_stop_publish', False)):
                 self._pub_log("上品已停止，共完成 {}/{}".format(i, total))
                 break
             info = self.product_cache.get(asin,{})
@@ -1274,15 +1330,52 @@ class SheinApp(tk.Tk):
     def _stop_publish_action(self):
         """停止上品进程。"""
         if not self._stop_publish:
+            stop_session_id = self._publish_session_id
+            self._publish_session_id += 1  # 使当前会话立即失效，强制旧线程退出
             self._stop_publish = True
+            stopped_pub = self._shein_publisher
+            self._shein_publisher = None
+            try:
+                if stopped_pub is not None:
+                    setattr(stopped_pub, '_stop_publish', True)
+            except Exception:
+                pass
             self.progress.stop()
-            self.status_lbl.config(text="正在停止上品，等待当前商品处理完毕...")
+            self.status_lbl.config(text="正在停止上品，等待当前步骤结束...")
+
+            def _go_home_after_stop():
+                time.sleep(1.0)
+                try:
+                    # 若用户已重新开始上品，则不再处理旧会话
+                    if stop_session_id != (self._publish_session_id - 1):
+                        return
+
+                    pub = stopped_pub
+                    if pub is None or not pub.is_alive():
+                        return
+
+                    self._pub_log("[STOP] 停止后清理弹窗并返回主页...")
+                    try:
+                        pub.cleanup_after_stop()
+                    except Exception as e:
+                        self._pub_log("[STOP] 弹窗清理失败: {}".format(str(e)[:60]))
+
+                    # 若用户已重新开始上品，则不再跳回主页
+                    if stop_session_id != (self._publish_session_id - 1):
+                        return
+                    pub.driver.get("https://www.geiwohuo.com/#/oversea-home")
+                    self.after(0, lambda: self.status_lbl.config(text="已停止上品，已清理弹窗并返回主页"))
+                except Exception as e:
+                    self._pub_log("[STOP] 返回主页失败: {}".format(str(e)[:60]))
+
+            threading.Thread(target=_go_home_after_stop, daemon=True).start()
+
             messagebox.showinfo("停止上品",
                 "已发送停止信号。\n"
-                "当前商品处理完毕后将停止，\n"
+                "停止后将先清理发布页临时弹窗，再自动返回主页。\n"
                 "再次点击【开始上品】可重新开始。")
         else:
-            messagebox.showinfo("提示", "上品已经停止，可点击【开始上品】重新开始。")
+            messagebox.showinfo("提示", "停止信号已发送，请稍候...")
 
 
 
@@ -1363,6 +1456,11 @@ class SheinPublisher:
         self.driver = None
         self.wait   = None
         self.log    = log_cb or print
+        self._stop_publish = False
+
+    def _ensure_not_stopped(self):
+        if self._stop_publish:
+            raise RuntimeError("用户已停止上品")
 
     def _connect_chrome_only(self):
         """只尝试连接已打开的 Chrome，不启动新浏览器。"""
@@ -1930,6 +2028,7 @@ class SheinPublisher:
     def click_identify_image_button(self):
         """点击'识图发品'按钮。"""
         try:
+            self._ensure_not_stopped()
             self.log("[DEBUG] 查找'识图发品'按钮...")
             time.sleep(2)  # 等待页面加载
             
@@ -2162,6 +2261,7 @@ class SheinPublisher:
             return False
         
         try:
+            self._ensure_not_stopped()
             self.log("[DEBUG] 查找文件上传框...")
             file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
             
@@ -2191,6 +2291,7 @@ class SheinPublisher:
     def select_first_category(self):
         """选择第一个推荐类目。"""
         try:
+            self._ensure_not_stopped()
             self.log("[DEBUG] 查找推荐类目...")
             
             # 方法1：查找所有包含"/"的 span（推荐类目格式）
@@ -2238,6 +2339,7 @@ class SheinPublisher:
     def click_confirm_button(self):
         """点击'确认，下一步'按钮。"""
         try:
+            self._ensure_not_stopped()
             self.log("[DEBUG] 查找'确认，下一步'按钮...")
             buttons = self.driver.find_elements(By.TAG_NAME, "button")
             
@@ -2262,6 +2364,7 @@ class SheinPublisher:
     def fill_product_info(self, product_info):
         """填写商品基础信息到 SHEIN 发布页面。"""
         try:
+            self._ensure_not_stopped()
             self.log("[DEBUG] 开始填写商品基础信息...")
             
             # 1. 填写商品标题(英语)
@@ -2497,6 +2600,7 @@ class SheinPublisher:
     def fill_spec_and_supply_info(self, product_info):
         """填写'规格及供应信息'板块（价格、SKU、库存等）。"""
         try:
+            self._ensure_not_stopped()
             self.log("[DEBUG] 开始填写规格及供应信息...")
             driver = self.driver
 
@@ -2778,6 +2882,7 @@ class SheinPublisher:
     def _get_detail_img_input(self):
         """精确定位细节图列的 file input。
         先滚动页面使容器渲染，再等待它出现，最多重试境欿10次。"""
+        self._ensure_not_stopped()
         import time as _time
         driver = self.driver
         # 先滚动到细节图容器位置并等待其渲染
@@ -2792,6 +2897,10 @@ class SheinPublisher:
             pass
         # 重试最多10次，每次0.8秒
         for attempt in range(10):
+            try:
+                self._ensure_not_stopped()
+            except Exception:
+                return None
             # 方法1：通过 detail_img_container 容器
             try:
                 containers = driver.find_elements(By.CSS_SELECTOR,
@@ -2842,6 +2951,7 @@ class SheinPublisher:
     def _upload_product_images(self, product_info):
         "连续上传5张图片到细节图列，每张裁剪后重复。"
         try:
+            self._ensure_not_stopped()
             main_images = product_info.get("main_images", [])
             if not main_images and product_info.get("image_url"):
                 main_images = [product_info["image_url"]]
@@ -2857,6 +2967,7 @@ class SheinPublisher:
             time.sleep(1.5)
             for idx, img_url in enumerate(images_to_upload):
                 try:
+                    self._ensure_not_stopped()
                     self.log("[DEBUG] 上传细节图第 {} 张...".format(idx + 1))
                     img_path = self._save_img_temp(img_url)
                     if not img_path:
@@ -2921,7 +3032,7 @@ class SheinPublisher:
             self.log("[ERROR] 点击按钮失败: {}".format(str(e)))
             return False
 
-    def upload_product_image(self, image_path):
+    def upload_product_image_OLD(self, image_path):
         """上传商品图片到'识图发品'页面。"""
         if not os.path.isfile(image_path):
             self.log("[ERROR] 图片文件不存在: {}".format(image_path))
@@ -3931,6 +4042,49 @@ class SheinPublisher:
                     pass
 
     # ── 主流程
+    def cleanup_after_stop(self):
+        """停止后清理页面临时弹窗，避免影响回到主页后的停留稳定性。"""
+        try:
+            if self.driver is None:
+                return
+
+            # 1) 先关闭公告弹窗
+            try:
+                self._dismiss_announcements()
+            except Exception:
+                pass
+
+            # 2) 关闭常见 modal / dialog 的关闭按钮
+            close_xpaths = [
+                "//button[contains(@class,'close')]",
+                "//i[contains(@class,'close')]",
+                "//*[contains(@class,'so-modal') or contains(@class,'dialog')]//*[contains(text(),'关闭') or contains(text(),'取消') or contains(text(),'我知道了') or contains(text(),'知道了')]",
+                "//*[contains(@class,'so-modal') or contains(@class,'dialog')]//button[.//span[contains(text(),'关闭') or contains(text(),'取消') or contains(text(),'我知道了') or contains(text(),'知道了')]]",
+            ]
+            for xp in close_xpaths:
+                try:
+                    for el in self.driver.find_elements(By.XPATH, xp):
+                        try:
+                            if el.is_displayed() and el.is_enabled():
+                                self.driver.execute_script("arguments[0].click();", el)
+                                time.sleep(0.15)
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # 3) 发送 ESC，兜底关闭遮罩层
+            try:
+                from selenium.webdriver.common.action_chains import ActionChains
+                from selenium.webdriver.common.keys import Keys
+                ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            except Exception:
+                pass
+
+            self.log("[STOP] 停止后弹窗清理完成")
+        except Exception as e:
+            self.log("[STOP] 停止后弹窗清理异常: {}".format(str(e)[:80]))
+
     def _dismiss_announcements(self):
         """检测并关闭商品发布页面的公告弹窗（支持多条公告）。
         仅点击公告专用按钮（如「我已确认本公告，下一条」），避免误点「确认，下一步」等业务按钮。
