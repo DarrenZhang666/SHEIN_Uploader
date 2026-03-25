@@ -9,7 +9,7 @@ class SheinApp(tk.Tk):
         self.title("SHEIN 商品采集 & 发布工具")
         self.geometry("1280x800"); self.minsize(1000,680)
         self.configure(bg=BG_DARK)
-        self.asin_list=[]; self.asin_vars={}; self.asin_dots={}
+        self.asin_list=[]; self.asin_vars={}; self.asin_dots={}; self.asin_status={}
         self.product_cache={}; self.current_asin=None
         self.select_all_var=tk.BooleanVar(value=False)
         self.price_multiplier=tk.StringVar(value="3")
@@ -97,6 +97,10 @@ class SheinApp(tk.Tk):
         tk.Label(h,text="ASIN 列表",font=("Segoe UI",11,"bold"),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         self.cnt_lbl=tk.Label(h,text="(0)",font=("Segoe UI",10),fg=TEXT_SUB,bg=BG_PANEL)
         self.cnt_lbl.pack(side="left",padx=4)
+        tk.Label(h,text="●已导入",font=("Segoe UI",9),fg="#ffffff",bg=BG_PANEL).pack(side="right",padx=(6,0))
+        tk.Label(h,text="●抓取中",font=("Segoe UI",9),fg=YELLOW,bg=BG_PANEL).pack(side="right",padx=(6,0))
+        tk.Label(h,text="●抓取失败",font=("Segoe UI",9),fg=RED,bg=BG_PANEL).pack(side="right",padx=(6,0))
+        tk.Label(h,text="●抓取成功",font=("Segoe UI",9),fg=GREEN,bg=BG_PANEL).pack(side="right",padx=(6,0))
         sr=tk.Frame(f,bg=BG_PANEL); sr.pack(fill="x",padx=12,pady=(0,6))
         tk.Checkbutton(sr,text="全选",variable=self.select_all_var,command=self._sel_all,
             bg=BG_PANEL,fg=TEXT_MAIN,selectcolor=BG_CARD,activebackground=BG_PANEL,
@@ -175,6 +179,23 @@ class SheinApp(tk.Tk):
         h=hx.lstrip("#"); r,g,b=(int(h[i:i+2],16) for i in (0,2,4))
         return "#{:02x}{:02x}{:02x}".format(min(255,r+30),min(255,g+30),min(255,b+30))
 
+    def _set_asin_status(self, asin, status):
+        """更新ASIN状态并同步圆点颜色。"""
+        self.asin_status[asin] = status
+        dot = self.asin_dots.get(asin)
+        if not dot:
+            return
+        color_map = {
+            "imported": "#ffffff",      # 导入未抓取
+            "fetching": YELLOW,          # 抓取中
+            "fetch_success": GREEN,      # 抓取成功
+            "fetch_fail": RED,           # 抓取失败
+            "success": GREEN,            # 兼容旧状态（上品成功）
+            "fail": RED,                 # 兼容旧状态（上品失败）
+            "pending": "#ffffff",      # 兼容旧状态
+        }
+        dot.config(fg=color_map.get(status, "#ffffff"))
+
     def _import_txt(self):
         path=filedialog.askopenfilename(title="选择 ASIN 文本文件",
             filetypes=[("文本文件","*.txt"),("所有文件","*.*")])
@@ -185,7 +206,7 @@ class SheinApp(tk.Tk):
             asins=[l for l in lines if re.match(r"^B[A-Z0-9]{9}$",l)]
             if not asins:
                 messagebox.showwarning("提示","未找到有效 ASIN 码"); return
-            self.asin_list=asins; self.asin_vars={}; self.asin_dots={}
+            self.asin_list=asins; self.asin_vars={}; self.asin_dots={}; self.asin_status={}
             self._render_list()
             self.status_lbl.config(text="已载入 {} 个 ASIN".format(len(asins)))
             self._welcome()
@@ -197,12 +218,13 @@ class SheinApp(tk.Tk):
         for idx,asin in enumerate(self.asin_list):
             var=tk.BooleanVar(value=False)
             self.asin_vars[asin]=var
+            self.asin_status[asin]="imported"
             bg=BG_CARD if idx%2==0 else BG_PANEL
             row=tk.Frame(self.lf,bg=bg,cursor="hand2")
             row.pack(fill="x",pady=1)
             tk.Checkbutton(row,variable=var,bg=bg,selectcolor=BG_DARK,
                 activebackground=bg,command=self._upd_cnt).pack(side="left",padx=(8,2))
-            dot=tk.Label(row,text="\u25cf",font=("Segoe UI",8),fg=TEXT_SUB,bg=bg)
+            dot=tk.Label(row,text="\u25cf",font=("Segoe UI",8),fg="#ffffff",bg=bg)
             dot.pack(side="left"); self.asin_dots[asin]=dot
             lbl=tk.Label(row,text=asin,font=("Consolas",10),fg=TEXT_MAIN,bg=bg,anchor="w",cursor="hand2")
             lbl.pack(side="left",padx=4,pady=5)
@@ -492,11 +514,15 @@ class SheinApp(tk.Tk):
         try:
             if self.current_asin is None or self._shein_publisher is None:
                 return
+            target_asin = self.current_asin
             if self._check_stop_or_return(session_id=session_id):
                 return
 
-            product_info = self.product_cache.get(self.current_asin)
+            product_info = self.product_cache.get(target_asin)
+            dot = self.asin_dots.get(target_asin)
             if not product_info or not product_info.get('image_url'):
+                if dot:
+                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
             if self._check_stop_or_return(session_id=session_id):
                 return
@@ -511,6 +537,8 @@ class SheinApp(tk.Tk):
             self.after(0, lambda: self.status_lbl.config(text='点击"识图发品"按钮...'))
             if not self._shein_publisher.click_identify_image_button():
                 self.after(0, lambda: self.status_lbl.config(text='未找到"识图发品"按钮'))
+                if dot:
+                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
             if self._check_stop_or_return(session_id=session_id):
@@ -518,7 +546,7 @@ class SheinApp(tk.Tk):
             image_url = product_info.get('image_url')
             temp_dir = os.path.join(tempfile.gettempdir(), 'shein_images')
             os.makedirs(temp_dir, exist_ok=True)
-            temp_image = os.path.join(temp_dir, '{}.jpg'.format(self.current_asin))
+            temp_image = os.path.join(temp_dir, '{}.jpg'.format(target_asin))
 
             self.after(0, lambda: self.status_lbl.config(text='下载商品图片...'))
             try:
@@ -527,6 +555,8 @@ class SheinApp(tk.Tk):
                     f.write(response.content)
             except Exception as e:
                 self.after(0, lambda err=str(e): self.status_lbl.config(text='下载图片失败: ' + err[:40]))
+                if dot:
+                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
             if self._check_stop_or_return(session_id=session_id):
@@ -534,6 +564,8 @@ class SheinApp(tk.Tk):
             self.after(0, lambda: self.status_lbl.config(text='上传图片到 SHEIN...'))
             if not self._shein_publisher.upload_product_image(temp_image):
                 self.after(0, lambda: self.status_lbl.config(text='✗ 图片上传失败'))
+                if dot:
+                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
             for i in range(5, 0, -1):
@@ -547,6 +579,8 @@ class SheinApp(tk.Tk):
             self.after(0, lambda: self.status_lbl.config(text='选择第一个推荐类目...'))
             if not self._shein_publisher.select_first_category():
                 self.after(0, lambda: self.status_lbl.config(text='✗ 选择类目失败'))
+                if dot:
+                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
             if self._check_stop_or_return(session_id=session_id):
@@ -555,6 +589,8 @@ class SheinApp(tk.Tk):
             time.sleep(1)
             if not self._shein_publisher.click_confirm_button():
                 self.after(0, lambda: self.status_lbl.config(text='✗ 点击确认按钮失败'))
+                if dot:
+                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
             if self._check_stop_or_return(session_id=session_id):
@@ -567,6 +603,8 @@ class SheinApp(tk.Tk):
             self.after(0, lambda: self.status_lbl.config(text='填写商品基础信息...'))
             if not self._shein_publisher.fill_product_info(product_info):
                 self.after(0, lambda: self.status_lbl.config(text='✗ 基础信息填写失败'))
+                if dot:
+                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
             if self._check_stop_or_return(session_id=session_id):
@@ -677,16 +715,24 @@ class SheinApp(tk.Tk):
                         time.sleep(0.5)
                     if _confirm_clicked:
                         self.after(0, lambda: self.status_lbl.config(text='✓ 商品已提交发布'))
-                        self._pub_log('商品 {} 已提交发布'.format(self.current_asin))
+                        if dot:
+                            self.after(0, lambda a=target_asin: self._set_asin_status(a, "success"))
+                        self._pub_log('商品 {} 已提交发布'.format(target_asin))
                     else:
                         self.after(0, lambda: self.status_lbl.config(text='✓ 发布按鈕已点击（未检测到翻译弹窗）'))
+                        if dot:
+                            self.after(0, lambda a=target_asin: self._set_asin_status(a, "success"))
                         self._pub_log('[WARN] 未检测到一件翻译并发布弹窗')
                 else:
                     self.after(0, lambda: self.status_lbl.config(text='✗ 未找到发布按鈕，请手动点击发布'))
+                    if dot:
+                        self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                     self._pub_log('[ERROR] 未找到发布商品按鈕')
             except Exception as pub_e:
                 self._pub_log('[ERROR] 点击发布商品异常: {}'.format(str(pub_e)[:80]))
                 self.after(0, lambda err=str(pub_e): self.status_lbl.config(text='发布出错: ' + err[:40]))
+                if dot:
+                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
 
         except Exception as e:
             if '用户已停止上品' in str(e):
@@ -694,6 +740,8 @@ class SheinApp(tk.Tk):
                 self.after(0, lambda: self.status_lbl.config(text='已停止上品'))
             else:
                 self.after(0, lambda err=str(e): self.status_lbl.config(text='上传出错: ' + err[:40]))
+                if dot:
+                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 self._pub_log('上传出错: ' + str(e))
         finally:
             self._publish_running = False
@@ -790,12 +838,17 @@ class SheinApp(tk.Tk):
         for i,asin in enumerate(asins):
             msg="抓取中 {}/{}：{}".format(i+1,len(asins),asin)
             self.after(0,lambda m=msg:self.status_lbl.config(text=m))
+            # 抓取进行中：黄色
+            self.after(0,lambda a=asin:self._set_asin_status(a, "fetching"))
             info=fetch_amazon_product(asin, region=self.amazon_region.get())
             self.product_cache[asin]=info
-            dot=self.asin_dots.get(asin)
-            if dot:
-                ok=info["title"] not in ("获取失败","") and not info["title"].startswith("错误")
-                self.after(0,lambda d=dot,c=GREEN if ok else RED:d.config(fg=c))
+            # 抓取结果：成功=绿色，失败=红色
+            title = str(info.get("title", ""))
+            is_fail = (not info) or title.startswith("获取失败") or title.startswith("HTTP ")
+            if is_fail:
+                self.after(0,lambda a=asin:self._set_asin_status(a, "fetch_fail"))
+            else:
+                self.after(0,lambda a=asin:self._set_asin_status(a, "fetch_success"))
             if self.current_asin==asin:
                 self.after(0,lambda inf=info:self._show(inf))
             time.sleep(random.uniform(1.5,3.5))
@@ -914,7 +967,7 @@ class SheinApp(tk.Tk):
                 if result:
                     success_list.append(asin)
                     dot = self.asin_dots.get(asin)
-                    if dot: self.after(0, lambda d=dot: d.config(fg="#00ffcc"))
+                    if dot: self.after(0, lambda a=asin: self._set_asin_status(a, "success"))
                     self._pub_log("[OK {}/{}] {} -> {} 上品成功".format(
                         len(success_list), total, asin, " > ".join(cat_path) if cat_path else cat_name))
                 else:
@@ -924,7 +977,7 @@ class SheinApp(tk.Tk):
                 self._pub_log("[FAIL {}/{}] {} 失败: {}".format(
                     len(fail_list), total, asin, e))
                 dot = self.asin_dots.get(asin)
-                if dot: self.after(0, lambda d=dot: d.config(fg=RED))
+                if dot: self.after(0, lambda a=asin: self._set_asin_status(a, "fail"))
             time.sleep(random.uniform(2, 4))
         self.after(0, lambda: self._publish_done(success_list, fail_list))
 
@@ -1061,3 +1114,4 @@ class CategoryDialog(tk.Toplevel):
 if __name__ == '__main__':
     app = SheinApp()
     app.mainloop()
+
