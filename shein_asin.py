@@ -6,6 +6,7 @@ SHEIN ASIN 模块
 import re
 import random
 import io
+import json
 import requests
 from bs4 import BeautifulSoup
 from PIL import Image
@@ -40,32 +41,250 @@ def _to_sx1500(img_src):
     return img_src
 
 
-def fetch_amazon_product(asin, region="\u7f8e\u56fd"):
+def _collect_main_images_from_soup(soup, max_count=None):
+    main_images = []
+
+    try:
+        alt_images_container = soup.select_one("#altImages")
+        if alt_images_container:
+            for img_li in alt_images_container.select("li"):
+                try:
+                    img_el = img_li.select_one("img")
+                    if img_el:
+                        img_src = (img_el.get("data-old-hires")
+                                   or img_el.get("data-a-hires")
+                                   or img_el.get("src"))
+                        if img_src and img_src.lower().endswith((".jpg", ".jpeg", ".png")):
+                            img_src = _to_sx1500(img_src)
+                            if img_src not in main_images:
+                                main_images.append(img_src)
+                                if max_count and len(main_images) >= max_count:
+                                    return main_images
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        image_block = soup.select_one("#imageBlock, #imageBlockContainer")
+        if image_block:
+            for img_el in image_block.select("img"):
+                try:
+                    img_src = (img_el.get("data-old-hires")
+                               or img_el.get("data-a-hires")
+                               or img_el.get("src"))
+                    if img_src and ("amazon" in img_src.lower() or "images-" in img_src.lower()):
+                        if img_src.lower().endswith((".jpg", ".jpeg", ".png")):
+                            img_src = _to_sx1500(img_src)
+                            if img_src not in main_images:
+                                main_images.append(img_src)
+                                if max_count and len(main_images) >= max_count:
+                                    return main_images
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        landing_img = soup.select_one("#landingImage, #imgBlkFront")
+        if landing_img:
+            img_src = (landing_img.get("data-old-hires")
+                       or landing_img.get("data-a-hires")
+                       or landing_img.get("src"))
+            if img_src and img_src.lower().endswith((".jpg", ".jpeg", ".png")):
+                img_src = _to_sx1500(img_src)
+                if img_src not in main_images:
+                    main_images.append(img_src)
+    except Exception:
+        pass
+
+    return main_images[:max_count] if max_count else main_images
+
+
+def _extract_json_object_by_key(text, key):
+    marker = '"{}"'.format(key)
+    start = text.find(marker)
+    if start < 0:
+        start = text.find(key)
+    if start < 0:
+        return None
+
+    brace_start = text.find("{", start)
+    if brace_start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(brace_start, len(text)):
+        ch = text[i]
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[brace_start:i + 1])
+                except Exception:
+                    return None
+    return None
+
+
+def _extract_json_array_by_key(text, key):
+    marker = '"{}"'.format(key)
+    start = text.find(marker)
+    if start < 0:
+        start = text.find(key)
+    if start < 0:
+        return None
+
+    arr_start = text.find("[", start)
+    if arr_start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(arr_start, len(text)):
+        ch = text[i]
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[arr_start:i + 1])
+                except Exception:
+                    return None
+    return None
+
+
+def _normalize_sku_attrs(raw_dimension_key):
+    if not raw_dimension_key:
+        return ""
+    txt = str(raw_dimension_key).replace("_name", "")
+    txt = txt.replace(";", ",").replace("|", ",")
+    txt = txt.replace(":", "=")
+    parts = [p.strip() for p in txt.split(",") if p.strip()]
+    return " / ".join(parts)
+
+
+def _extract_dimension_basis(raw_dimension_key):
+    if not raw_dimension_key:
+        return []
+    txt = str(raw_dimension_key).replace(";", ",").replace("|", ",")
+    parts = [p.strip() for p in txt.split(",") if p.strip()]
+    basis = []
+    for p in parts:
+        if "=" in p:
+            k = p.split("=", 1)[0].strip().replace("_name", "")
+        elif ":" in p:
+            k = p.split(":", 1)[0].strip().replace("_name", "")
+        else:
+            k = p.strip().replace("_name", "")
+        if k and k.lower() not in [x.lower() for x in basis]:
+            basis.append(k)
+    return basis
+
+
+def _extract_color_images_map(page_text):
+    color_images = _extract_json_object_by_key(page_text, "colorImages")
+    if not isinstance(color_images, dict):
+        return {}
+
+    result = {}
+    for color_key, items in color_images.items():
+        urls = []
+        if isinstance(items, list):
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                u = (it.get("hiRes") or it.get("large") or it.get("mainUrl")
+                     or it.get("thumb") or it.get("variant"))
+                if isinstance(u, str) and u:
+                    uu = _to_sx1500(u) if "images/I/" in u else u
+                    if uu not in urls:
+                        urls.append(uu)
+        if urls:
+            result[str(color_key).strip()] = urls
+    return result
+
+
+def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=5):
+    if not color_image_map:
+        return []
+
+    candidates = [str(x).lower() for x in candidate_texts if x]
+    for key, imgs in color_image_map.items():
+        k = str(key).lower().strip()
+        for raw in candidates:
+            if k and raw and (k in raw or raw in k):
+                return imgs[:max_count]
+
+    if len(color_image_map) == 1:
+        return list(color_image_map.values())[0][:max_count]
+
+    return []
+
+
+def _fetch_sku_images(session, domain, sku_asin, headers):
+    try:
+        sku_url = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, sku_asin)
+        r = session.get(sku_url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return []
+        sku_soup = BeautifulSoup(r.text, "html.parser")
+        return _collect_main_images_from_soup(sku_soup, max_count=5)
+    except Exception:
+        return []
+
+
+def fetch_amazon_product(asin, region="美国"):
     _REGION_DOMAINS = {
-        "\u7f8e\u56fd": "www.amazon.com",
-        "\u82f1\u56fd": "www.amazon.co.uk",
-        "\u5fb7\u56fd": "www.amazon.de",
-        "\u6cd5\u56fd": "www.amazon.fr",
-        "\u65e5\u672c": "www.amazon.co.jp",
-        "\u52a0\u62ff\u5927": "www.amazon.ca",
-        "\u6fb3\u5927\u5229\u4e9a": "www.amazon.com.au",
-        "\u610f\u5927\u5229": "www.amazon.it",
-        "\u897f\u73ed\u7259": "www.amazon.es",
-        "\u58a8\u897f\u54e5": "www.amazon.com.mx",
+        "美国": "www.amazon.com",
+        "英国": "www.amazon.co.uk",
+        "德国": "www.amazon.de",
+        "法国": "www.amazon.fr",
+        "日本": "www.amazon.co.jp",
+        "加拿大": "www.amazon.ca",
+        "澳大利亚": "www.amazon.com.au",
+        "意大利": "www.amazon.it",
+        "西班牙": "www.amazon.es",
+        "墨西哥": "www.amazon.com.mx",
     }
     domain = _REGION_DOMAINS.get(region, "www.amazon.com")
-    # \u5f3a\u5236\u7f8e\u56fd\u5730\u533a+\u7f8e\u5143\u8d27\u5e01\uff0c\u4e0d\u53d7VPN\u5f71\u54cd
     url = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, asin)
     hdrs = random.choice(HEADERS_POOL).copy()
     hdrs["Referer"] = "https://{}/".format(domain)
     hdrs["Accept-Language"] = "en-US,en;q=0.9"
-    res = {"asin": asin, "title": "\u83b7\u53d6\u5931\u8d25", "price": "N/A", "rating": "N/A",
+    res = {"asin": asin, "title": "获取失败", "price": "N/A", "rating": "N/A",
            "reviews": "N/A", "brand": "N/A", "image_url": "",
            "description": "", "features": [], "url": url,
-           "description_images": [], "main_images": []}
+           "description_images": [], "main_images": [], "sku_list": []}
     try:
         sess = requests.Session()
-        # \u8bbe\u7f6e\u7f8e\u56fd\u5730\u533a cookie\uff0c\u5f3a\u5236\u4e9a\u9a6c\u900a\u8fd4\u56de\u7f8e\u5143\u4ef7\u683c
         sess.cookies.set("i18n-prefs", "USD", domain=domain)
         sess.cookies.set("lc-main", "en_US", domain=domain)
         sess.cookies.set("x-main", "1", domain=domain)
@@ -79,7 +298,6 @@ def fetch_amazon_product(asin, region="\u7f8e\u56fd"):
         if t:
             res["title"] = _filter_title(t.get_text(strip=True))
 
-        # \u6293\u53d6\u4ef7\u683c\u5e76\u8f6c\u6362\u4e3a\u7f8e\u5143\u683c\u5f0f
         price_raw = "N/A"
         for sel in ["#priceblock_ourprice", ".a-price .a-offscreen",
                     "#priceblock_dealprice", ".apexPriceToPay .a-offscreen"]:
@@ -105,62 +323,7 @@ def fetch_amazon_product(asin, region="\u7f8e\u56fd"):
         if br:
             res["brand"] = br.get_text(strip=True)
 
-        # ===== \u4e3b\u9875\u56fe\uff08SX1500\u683c\u5f0f\uff09=====
-        main_images = []
-
-        # \u65b9\u6cd51\uff1a\u4ece #altImages \u8f6e\u64ad\u56fe\u4e2d\u83b7\u53d6
-        try:
-            alt_images_container = s.select_one("#altImages")
-            if alt_images_container:
-                for img_li in alt_images_container.select("li"):
-                    try:
-                        img_el = img_li.select_one("img")
-                        if img_el:
-                            img_src = (img_el.get("data-old-hires")
-                                       or img_el.get("data-a-hires")
-                                       or img_el.get("src"))
-                            if img_src and img_src.lower().endswith((".jpg", ".jpeg", ".png")):
-                                img_src = _to_sx1500(img_src)
-                                if img_src not in main_images:
-                                    main_images.append(img_src)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        # \u65b9\u6cd52\uff1a\u4ece #imageBlock \u83b7\u53d6
-        if not main_images:
-            try:
-                image_block = s.select_one("#imageBlock, #imageBlockContainer")
-                if image_block:
-                    for img_el in image_block.select("img"):
-                        try:
-                            img_src = (img_el.get("data-old-hires")
-                                       or img_el.get("data-a-hires")
-                                       or img_el.get("src"))
-                            if img_src and ("amazon" in img_src.lower() or "images-" in img_src.lower()):
-                                if img_src.lower().endswith((".jpg", ".jpeg", ".png")):
-                                    img_src = _to_sx1500(img_src)
-                                    if img_src not in main_images:
-                                        main_images.append(img_src)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-        # \u65b9\u6cd53\uff1a\u4ece #landingImage \u83b7\u53d6\u4e3b\u56fe
-        if not main_images:
-            try:
-                landing_img = s.select_one("#landingImage, #imgBlkFront")
-                if landing_img:
-                    img_src = (landing_img.get("data-old-hires")
-                               or landing_img.get("data-a-hires")
-                               or landing_img.get("src"))
-                    if img_src and img_src.lower().endswith((".jpg", ".jpeg", ".png")):
-                        main_images.append(_to_sx1500(img_src))
-            except Exception:
-                pass
-
+        main_images = _collect_main_images_from_soup(s)
         res["main_images"] = main_images
         if main_images:
             res["image_url"] = main_images[0]
@@ -175,7 +338,6 @@ def fetch_amazon_product(asin, region="\u7f8e\u56fd"):
         if d:
             res["description"] = _filter_sensitive(d.get_text(strip=True))[:300]
 
-        # ===== \u6293\u53d6 Product description \u4e2d\u7684\u56fe\u7247\uff08\u8fc7\u6ee4 GIF\uff09=====
         desc_images = []
         h2_tags = s.select("h2")
         for h2 in h2_tags:
@@ -222,13 +384,61 @@ def fetch_amazon_product(asin, region="\u7f8e\u56fd"):
                         pass
 
         res["description_images"] = desc_images[:5]
+
+        sku_list = []
+        sku_seen = set()
+        sku_image_cache = {}
+        dimension_map = _extract_json_object_by_key(r.text, "dimensionToAsinMap")
+        color_image_map = _extract_color_images_map(r.text)
+        fallback_images = main_images[:5] if main_images else ([res["image_url"]] if res.get("image_url") else [])
+
+        if isinstance(dimension_map, dict):
+            for dim_key, sku_asin in dimension_map.items():
+                if not sku_asin:
+                    continue
+                sku_asin = str(sku_asin).strip()
+                if not sku_asin or sku_asin in sku_seen:
+                    continue
+                sku_seen.add(sku_asin)
+
+                if sku_asin == asin:
+                    sku_images = main_images[:5]
+                else:
+                    if sku_asin not in sku_image_cache:
+                        sku_image_cache[sku_asin] = _fetch_sku_images(sess, domain, sku_asin, hdrs)
+                    sku_images = sku_image_cache.get(sku_asin, [])
+
+                if not sku_images:
+                    sku_images = _pick_images_from_color_map(color_image_map, dim_key, sku_asin, max_count=5)
+
+                if not sku_images:
+                    sku_images = main_images[:5]
+
+                basis = _extract_dimension_basis(dim_key)
+
+                sku_list.append({
+                    "sku_asin": sku_asin,
+                    "sku_attributes": _normalize_sku_attrs(dim_key) or "默认规格",
+                    "dimension_basis": basis,
+                    "images": sku_images[:5]
+                })
+
+        if not sku_list:
+            sku_list.append({
+                "sku_asin": asin,
+                "sku_attributes": "默认规格",
+                "dimension_basis": [],
+                "images": main_images[:5]
+            })
+
+        res["sku_list"] = sku_list
     except Exception as e:
-        res["title"] = "\u9519\u8bef: {}".format(e)
+        res["title"] = "错误: {}".format(e)
     return res
 
 
 def download_image(url):
-    """\u4e0b\u8f7d\u56fe\u7247\u5e76\u8fd4\u56de PIL Image \u5bf9\u8c61\u3002"""
+    """下载图片并返回 PIL Image 对象。"""
     if not url:
         return None
     try:

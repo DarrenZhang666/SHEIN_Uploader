@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """GUI layer for SHEIN app."""
 
 from shein_main import *
@@ -929,22 +929,36 @@ class SheinApp(tk.Tk):
         if info.get("image_url"):
             threading.Thread(target=self._load_img,args=(info["image_url"],),daemon=True).start()
         
-        # 显示主页图片（Amazon产品标题旁边的1:1或4:3方形图）
-        main_images = info.get("main_images", [])
+        # 显示 SKU 维度信息（每个SKU展示5张图）
+        sku_list = info.get("sku_list", [])
         tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=10)
-        tk.Label(self.df,text="商品详情图片（Ctrl+点击打开）",font=("Segoe UI",11,"bold"),fg=ACCENT2,bg=BG_PANEL).pack(anchor="w",padx=20)
-        if main_images:
-            for idx, img_url in enumerate(main_images):
-                fr=tk.Frame(self.df,bg=BG_PANEL); fr.pack(fill="x",padx=20,pady=2)
-                tk.Label(fr,text="图片 {}:".format(idx+1),fg=TEXT_SUB,bg=BG_PANEL,font=("Segoe UI",9)).pack(side="left")
-                # 创建可点击的链接标签
-                link_lbl=tk.Label(fr,text=img_url[:60]+"...",fg=ACCENT,bg=BG_PANEL,font=("Segoe UI",9),
-                    wraplength=600,justify="left",anchor="w",cursor="hand2")
-                link_lbl.pack(side="left",padx=6)
-                # 绑定 Ctrl+点击事件
-                link_lbl.bind("<Control-Button-1>",lambda e,url=img_url:webbrowser.open(url))
+        tk.Label(self.df,text="商品详情页 · SKU 信息（每个SKU图片前5张，Ctrl+点击打开）",font=("Segoe UI",11,"bold"),fg=ACCENT2,bg=BG_PANEL).pack(anchor="w",padx=20)
+        if sku_list:
+            for idx, sku in enumerate(sku_list):
+                sku_asin = sku.get("sku_asin", "")
+                sku_attrs = sku.get("sku_attributes", "默认规格")
+                sku_images = sku.get("images", [])[:5]
+                sku_basis = sku.get("dimension_basis", [])
+
+                card=tk.Frame(self.df,bg=BG_CARD)
+                card.pack(fill="x",padx=20,pady=4)
+                tk.Label(card,text="SKU {}: {}".format(idx+1, sku_asin),font=("Consolas",10,"bold"),fg=TEXT_MAIN,bg=BG_CARD,anchor="w").pack(fill="x",padx=10,pady=(8,2))
+                tk.Label(card,text="规格: {}".format(sku_attrs),font=("Segoe UI",9),fg=YELLOW,bg=BG_CARD,anchor="w",wraplength=680,justify="left").pack(fill="x",padx=10,pady=(0,2))
+                basis_text = " / ".join(sku_basis) if sku_basis else "未识别"
+                tk.Label(card,text="分类依据: {}".format(basis_text),font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_CARD,anchor="w",wraplength=680,justify="left").pack(fill="x",padx=10,pady=(0,6))
+
+                if sku_images:
+                    for img_idx, img_url in enumerate(sku_images):
+                        fr=tk.Frame(card,bg=BG_CARD); fr.pack(fill="x",padx=10,pady=(0,2))
+                        tk.Label(fr,text="图{}:".format(img_idx+1),fg=TEXT_SUB,bg=BG_CARD,font=("Segoe UI",9)).pack(side="left")
+                        link_lbl=tk.Label(fr,text=img_url[:78]+("..." if len(img_url) > 78 else ""),fg=ACCENT,bg=BG_CARD,font=("Segoe UI",9),
+                            wraplength=620,justify="left",anchor="w",cursor="hand2")
+                        link_lbl.pack(side="left",padx=6)
+                        link_lbl.bind("<Control-Button-1>",lambda e,url=img_url:webbrowser.open(url))
+                else:
+                    tk.Label(card,text="该SKU暂无图片",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_CARD,anchor="w").pack(fill="x",padx=10,pady=(0,8))
         else:
-            tk.Label(self.df,text="暂无主页图片数据",font=("Segoe UI",10),fg=TEXT_SUB,bg=BG_PANEL).pack(anchor="w",padx=24,pady=4)
+            tk.Label(self.df,text="暂无 SKU 数据",font=("Segoe UI",10),fg=TEXT_SUB,bg=BG_PANEL).pack(anchor="w",padx=24,pady=4)
 
     def _load_img(self,url):
         img=download_image(url)
