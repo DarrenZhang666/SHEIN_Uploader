@@ -956,7 +956,14 @@ class SheinPublisher:
             except Exception as e:
                 self.log("[DEBUG] 填写类目属性失败: {}".format(str(e)[:60]))
 
-            # 6. 上传主规格图和细节图（非阻塞：失败不影响后续“规格及供应信息”流程）
+            # 6. 处理主规格（需在上传细节图前完成）
+            self.log("[DEBUG] 处理主规格...")
+            try:
+                self._handle_main_spec_if_needed()
+            except Exception as e:
+                self.log("[DEBUG] 主规格处理步骤异常，继续后续流程: {}".format(str(e)[:60]))
+
+            # 7. 上传主规格图和细节图（非阻塞：失败不影响后续“规格及供应信息”流程）
             self.log("[DEBUG] 上传商品图片...")
             try:
                 self._upload_product_images(product_info)
@@ -1458,6 +1465,254 @@ class SheinPublisher:
         except Exception as e:
             self.log("[ERROR] 填写规格及供应信息失败: {}".format(str(e)[:80]))
             return False
+
+    def _handle_main_spec_if_needed(self):
+        """
+        处理主规格：
+        1) 若检测到“无主规格”则跳过；
+        2) 否则点击主规格区域下方两个下拉框，并从下拉列表里选择第一个有效选项。
+        """
+        driver = self.driver
+        try:
+            self.log("[DEBUG] 检查主规格是否需要填写...")
+
+            # 1) 定位主规格区域
+            main_spec_box = None
+            for xp in [
+                "//div[contains(@class,'so-form-item') and contains(@class,'main_spec') and .//span[normalize-space(text())='主规格']]",
+                "//div[contains(@class,'main_spec') and .//*[contains(normalize-space(.),'主规格')]]",
+            ]:
+                try:
+                    for box in driver.find_elements(By.XPATH, xp):
+                        if box.is_displayed():
+                            main_spec_box = box
+                            break
+                except Exception:
+                    pass
+                if main_spec_box is not None:
+                    break
+
+            if main_spec_box is None:
+                self.log("[WARN] 未定位到主规格区域(main_spec)，跳过")
+                return
+
+            # 2) 检查无主规格
+            try:
+                area_text = (main_spec_box.text or "").strip()
+                if "无主规格" in area_text:
+                    self.log("[OK] 检测到'无主规格'字样，跳过主规格填写")
+                    return
+            except Exception:
+                pass
+            try:
+                cb = main_spec_box.find_element(By.XPATH, ".//input[@type='checkbox']")
+                if cb.is_selected():
+                    self.log("[OK] 无主规格复选框已勾选，跳过主规格填写")
+                    return
+            except Exception:
+                pass
+
+            self.log("[DEBUG] 未检测到无主规格，开始填写主规格")
+
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", main_spec_box)
+                time.sleep(0.25)
+            except Exception:
+                pass
+
+            # 3) 锁定提示文字下方内容区域
+            spec_content = None
+            try:
+                for c in main_spec_box.find_elements(By.XPATH,
+                    ".//div[contains(@class,'specContent') or contains(@class,'spmp_style__specContent')]"):
+                    if c.is_displayed():
+                        spec_content = c
+                        break
+            except Exception:
+                pass
+            if spec_content is None:
+                spec_content = main_spec_box
+
+            def _open_dropdown(inner):
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inner)
+                except Exception:
+                    pass
+                time.sleep(0.2)
+                clicked = False
+                for _ in range(2):
+                    try:
+                        inner.click()
+                        clicked = True
+                        break
+                    except Exception:
+                        try:
+                            driver.execute_script("arguments[0].click();", inner)
+                            clicked = True
+                            break
+                        except Exception:
+                            pass
+                if not clicked:
+                    try:
+                        caret = inner.find_element(By.XPATH, ".//a[contains(@class,'so-select-caret')]")
+                        driver.execute_script("arguments[0].click();", caret)
+                    except Exception:
+                        pass
+                time.sleep(0.3)
+
+            def _collect_options(data_id):
+                """获取当前下拉浮层中的可点击项，优先 label.so-select-option。"""
+                if not data_id:
+                    return []
+                try:
+                    # 仅拿当前 data-id 对应浮层（优先已显示）
+                    boxes = driver.find_elements(By.XPATH,
+                        "//div[contains(@class,'so-list') and @data-id='{0}' and "
+                        "(contains(@class,'so-hidable-show') or not(contains(@style,'display: none')))]".format(data_id)
+                    )
+                    if not boxes:
+                        boxes = driver.find_elements(By.XPATH,
+                            "//div[contains(@class,'so-list') and @data-id='{0}']".format(data_id)
+                        )
+
+                    candidates = []
+                    for box in boxes:
+                        try:
+                            cur = box.find_elements(By.XPATH,
+                                ".//label[contains(@class,'so-select-option') or contains(@class,'so-checkinput')]"
+                            )
+                            if not cur:
+                                cur = box.find_elements(By.XPATH,
+                                    ".//*[contains(@class,'so-select-option') or contains(@class,'so-option')]"
+                                )
+                            candidates.extend(cur)
+                        except Exception:
+                            continue
+
+                    opts = []
+                    for el in candidates:
+                        try:
+                            if not el.is_displayed():
+                                continue
+                            txt = (el.text or "").strip().replace("\n", " ")
+                            if txt in ("", "无数据", "请选择"):
+                                continue
+                            opts.append(el)
+                        except Exception:
+                            continue
+                    return opts
+                except Exception:
+                    return []
+
+            def _click_option(option_el):
+                # 先点 option 本体，再兜底点内部 radio/input
+                try:
+                    driver.execute_script("arguments[0].click();", option_el)
+                    return True
+                except Exception:
+                    pass
+                try:
+                    option_el.click()
+                    return True
+                except Exception:
+                    pass
+                try:
+                    radio = option_el.find_element(By.XPATH, ".//input[@type='radio' or @type='checkbox']")
+                    driver.execute_script("arguments[0].click();", radio)
+                    return True
+                except Exception:
+                    return False
+
+            def _pick_first(inner, label):
+                data_id = (inner.get_attribute("data-id") or "").strip()
+                self.log("[DEBUG] 点击{}下拉框 data-id={}".format(label, data_id or "N/A"))
+
+                options = []
+                for i in range(5):
+                    _open_dropdown(inner)
+                    options = _collect_options(data_id)
+                    if options:
+                        if i > 0:
+                            self.log("[DEBUG] {} 第{}次重试后拿到选项".format(label, i + 1))
+                        break
+                    time.sleep(0.35)
+
+                if not options:
+                    self.log("[WARN] {} 下拉未获取到可选项".format(label))
+                    return None
+
+                sample = []
+                for o in options[:12]:
+                    t = (o.text or "").strip().replace("\n", " ")
+                    if t:
+                        sample.append(t)
+                self.log("[DEBUG] {} 可选项: {}".format(label, " | ".join(sample) if sample else "(空)"))
+
+                first = options[0]
+                picked = (first.text or "").strip().replace("\n", " ")
+                ok = _click_option(first)
+                if not ok:
+                    self.log("[WARN] {} 首项点击失败".format(label))
+                    return None
+
+                time.sleep(0.35)
+                self.log("[OK] {} 已选择首项: {}".format(label, picked or "(空文本)"))
+                return picked
+
+            # 4) 第一个框：主规格属性下拉
+            attr_inner = None
+            for xp in [
+                ".//div[contains(@class,'specAttrSelect') or contains(@class,'spmp_style__specAttrSelect')]//div[contains(@class,'so-select-inner') and @data-id]",
+                ".//div[contains(@class,'so-select-inner') and @data-id][1]",
+            ]:
+                try:
+                    for el in spec_content.find_elements(By.XPATH, xp):
+                        if el.is_displayed():
+                            attr_inner = el
+                            break
+                except Exception:
+                    pass
+                if attr_inner is not None:
+                    break
+
+            if attr_inner is None:
+                self.log("[WARN] 未找到第1个下拉框(主规格属性)")
+                return
+
+            picked_attr = _pick_first(attr_inner, "主规格属性")
+            if not picked_attr:
+                self.log("[WARN] 第1个下拉框未成功选择")
+                return
+
+            # 5) 第二个框：主规格值下拉
+            value_inner = None
+            for xp in [
+                ".//div[contains(@class,'specValues') or contains(@class,'spmp_style__specValues')]//div[@id='container-1']//div[contains(@class,'so-select-inner') and @data-id]",
+                ".//div[contains(@class,'specValues') or contains(@class,'spmp_style__specValues')]//div[contains(@class,'so-select-inner') and @data-id]",
+            ]:
+                try:
+                    for el in spec_content.find_elements(By.XPATH, xp):
+                        if el.is_displayed():
+                            value_inner = el
+                            break
+                except Exception:
+                    pass
+                if value_inner is not None:
+                    break
+
+            if value_inner is None:
+                self.log("[WARN] 未找到第2个下拉框(主规格值)")
+                return
+
+            picked_val = _pick_first(value_inner, "主规格值")
+            if not picked_val:
+                self.log("[WARN] 第2个下拉框未成功选择")
+                return
+
+            self.log("[OK] 主规格填写完成: 属性={}，值={}".format(picked_attr, picked_val))
+
+        except Exception as e:
+            self.log("[WARN] 主规格处理失败: {}".format(str(e)[:100]))
 
     def _get_detail_img_input(self):
         """精确定位细节图列的 file input。
