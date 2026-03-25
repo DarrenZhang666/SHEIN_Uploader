@@ -985,13 +985,8 @@ class SheinApp(tk.Tk):
                     self._pub_log("[STOP] 返回主页失败: {}".format(str(e)[:60]))
 
             threading.Thread(target=_go_home_after_stop, daemon=True).start()
-
-            messagebox.showinfo("停止上品",
-                "已发送停止信号。\n"
-                "停止后将先清理发布页临时弹窗，再自动返回主页。\n"
-                "再次点击【开始上品】可重新开始。")
         else:
-            messagebox.showinfo("提示", "停止信号已发送，请稍候...")
+            self.status_lbl.config(text="停止信号已发送，请稍候...")
 
 
 
