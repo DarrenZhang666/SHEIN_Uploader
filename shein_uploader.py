@@ -949,6 +949,13 @@ class SheinPublisher:
                 except Exception as e:
                     self.log("[DEBUG] 填写商品描述失败: {}".format(str(e)[:60]))
 
+            # 5.6 填写类目属性（商品属性）
+            self.log("[DEBUG] 填写类目属性...")
+            try:
+                self._fill_category_attributes(asin)
+            except Exception as e:
+                self.log("[DEBUG] 填写类目属性失败: {}".format(str(e)[:60]))
+
             # 6. 上传主规格图和细节图（非阻塞：失败不影响后续“规格及供应信息”流程）
             self.log("[DEBUG] 上传商品图片...")
             try:
@@ -961,6 +968,214 @@ class SheinPublisher:
         except Exception as e:
             self.log("[ERROR] 填写基础信息失败: {}".format(str(e)[:60]))
             return False
+
+    def _fill_category_attributes(self, asin):
+        """填写类目属性中的必填项：产品型号=ASIN，其余必填空项选首个选项。"""
+        driver = self.driver
+
+        try:
+            attr_title = WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((By.XPATH,
+                    "//div[contains(@class,'so-form-label')]//span[normalize-space(text())='商品属性']")))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", attr_title)
+            time.sleep(0.5)
+        except Exception:
+            self.log("[DEBUG] 未明确定位到商品属性标题，继续尝试填写")
+
+        if asin:
+            model_filled = False
+            model_xpaths = [
+                "//span[contains(@class,'spmp_style__productAttrLabel') and contains(normalize-space(.),'产品型号')]/ancestor::div[contains(@class,'so-form-item')]//input",
+                "//span[contains(@class,'spmp_style__productAttrLabel') and contains(normalize-space(.),'Product Model')]/ancestor::div[contains(@class,'so-form-item')]//input",
+                "//div[contains(@class,'so-form-item') and .//span[contains(normalize-space(.),'产品型号')]]//input",
+            ]
+            for xp in model_xpaths:
+                try:
+                    inp = WebDriverWait(driver, 3).until(
+                        EC.presence_of_element_located((By.XPATH, xp)))
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                    self._js_input(inp, asin)
+                    self.log("[OK] 产品型号已填写: {}".format(asin))
+                    model_filled = True
+                    time.sleep(0.3)
+                    break
+                except Exception:
+                    pass
+            if not model_filled:
+                self.log("[DEBUG] 未找到产品型号输入框")
+
+        # 展开全部属性（让折叠区的必填项也参与自动填写）
+        try:
+            expand_xpaths = [
+                "//*[contains(@class,'spmp_style__collapsed') and contains(normalize-space(.),'展开所有属性')]",
+                "//*[contains(normalize-space(.),'展开所有属性')]",
+            ]
+            expanded = False
+            for xp in expand_xpaths:
+                for el in driver.find_elements(By.XPATH, xp):
+                    try:
+                        if not el.is_displayed():
+                            continue
+                        text = (el.text or "").strip()
+                        if "收起" in text:
+                            expanded = True
+                            break
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                        time.sleep(0.2)
+                        try:
+                            el.click()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", el)
+                        self.log("[OK] 已展开所有属性")
+                        expanded = True
+                        time.sleep(0.6)
+                        break
+                    except Exception:
+                        pass
+                if expanded:
+                    break
+        except Exception:
+            pass
+
+        # 展开后做一次滚动触发懒加载，再回到属性区域
+        try:
+            for _ in range(4):
+                driver.execute_script("window.scrollBy(0, 700);")
+                time.sleep(0.25)
+            driver.execute_script("window.scrollBy(0, -2800);")
+            time.sleep(0.35)
+            for _ in range(2):
+                driver.execute_script("window.scrollBy(0, 700);")
+                time.sleep(0.2)
+        except Exception:
+            pass
+
+        required_items = driver.find_elements(By.XPATH,
+            "//div[contains(@class,'so-form-item') and contains(@class,'so-form-required') and contains(@class,'spmp_style__productAttrItem')]")
+        if not required_items:
+            self.log("[DEBUG] 未找到必填商品属性项")
+            return
+
+        auto_filled_count = 0
+        for item in required_items:
+            try:
+                if not item.is_displayed():
+                    continue
+
+                label = ""
+                try:
+                    label = item.find_element(By.XPATH,
+                        ".//span[contains(@class,'spmp_style__productAttrLabel')]"
+                    ).text.strip()
+                except Exception:
+                    pass
+
+                if "产品型号" in label or "Product Model" in label:
+                    continue
+
+                has_value = False
+                try:
+                    inputs = item.find_elements(By.XPATH, ".//input[@type='text' or not(@type)]")
+                    for inp in inputs:
+                        val = (inp.get_attribute("value") or "").strip()
+                        if val:
+                            has_value = True
+                            break
+                except Exception:
+                    pass
+
+                if not has_value:
+                    try:
+                        selected_tags = item.find_elements(By.XPATH,
+                            ".//*[contains(@class,'so-select-item') and not(contains(@class,'compressed'))]")
+                        selected_text = "".join([(t.text or "").strip() for t in selected_tags]).strip()
+                        if selected_text:
+                            has_value = True
+                    except Exception:
+                        pass
+
+                if has_value:
+                    continue
+
+                select_inner = None
+                for sx in [
+                    ".//div[contains(@class,'so-select-inner')]",
+                    ".//div[contains(@class,'so-select-result')]",
+                    ".//a[contains(@class,'so-select-caret')]",
+                ]:
+                    try:
+                        cand = item.find_element(By.XPATH, sx)
+                        if cand.is_displayed():
+                            select_inner = cand
+                            break
+                    except Exception:
+                        pass
+                if not select_inner:
+                    continue
+
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", select_inner)
+                time.sleep(0.2)
+                try:
+                    select_inner.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", select_inner)
+                time.sleep(0.4)
+
+                preferred_option = None
+                if "电源" in label or "Power Supply" in label:
+                    preferred_xpaths = [
+                        "//*[contains(@class,'so-select-option') and normalize-space(.)='No']",
+                        "//*[contains(@class,'so-option') and normalize-space(.)='No']",
+                        "//li[normalize-space(.)='No']",
+                    ]
+                    for px in preferred_xpaths:
+                        try:
+                            cand = WebDriverWait(driver, 2).until(
+                                EC.presence_of_element_located((By.XPATH, px)))
+                            if cand.is_displayed():
+                                preferred_option = cand
+                                break
+                        except Exception:
+                            pass
+
+                first_option = None
+                option_xpaths = [
+                    "(//*[contains(@class,'so-select-option') and not(contains(@class,'disabled')) and normalize-space(.)!=''])[1]",
+                    "(//*[contains(@class,'so-option') and not(contains(@class,'disabled')) and normalize-space(.)!=''])[1]",
+                    "(//li[not(contains(@class,'disabled')) and normalize-space(.)!=''])[1]",
+                ]
+                for ox in option_xpaths:
+                    try:
+                        opt = WebDriverWait(driver, 2).until(
+                            EC.presence_of_element_located((By.XPATH, ox)))
+                        if opt.is_displayed():
+                            first_option = opt
+                            break
+                    except Exception:
+                        pass
+
+                target_option = preferred_option if preferred_option else first_option
+
+                if target_option:
+                    try:
+                        target_option.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", target_option)
+                    auto_filled_count += 1
+                    if preferred_option:
+                        self.log("[OK] 必填属性已选择 No: {}".format(label or "(未识别标签)"))
+                    else:
+                        self.log("[OK] 必填属性已默认选择首项: {}".format(label or "(未识别标签)"))
+                    time.sleep(0.25)
+                else:
+                    try:
+                        driver.execute_script("document.body.click();")
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+
+        self.log("[OK] 类目属性处理完成，自动补全 {} 项".format(auto_filled_count))
 
     def fill_spec_and_supply_info(self, product_info):
         """填写'规格及供应信息'板块（价格、SKU、库存等）。"""
