@@ -1,7 +1,8 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """GUI layer for SHEIN app."""
 
 from shein_main import *
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class SheinApp(tk.Tk):
     def __init__(self):
@@ -13,6 +14,7 @@ class SheinApp(tk.Tk):
         self.product_cache={}; self.current_asin=None
         self.select_all_var=tk.BooleanVar(value=False)
         self.price_multiplier=tk.StringVar(value="3")
+        self.fetch_workers=tk.StringVar(value="5")
         self.amazon_region=tk.StringVar(value="美国")
         self._fetch_thread=None; self._photo_ref=None
         self._launching_browser = False  # 防止重复点击登录按钮
@@ -81,6 +83,10 @@ class SheinApp(tk.Tk):
         pm_frame.pack(side="left",padx=(0,10))
         tk.Label(pm_frame,text="售价倍数:",font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         tk.Entry(pm_frame,textvariable=self.price_multiplier,width=4,font=("Segoe UI",10),bg=BG_CARD,fg=TEXT_MAIN,insertbackground=TEXT_MAIN,relief="flat",bd=2).pack(side="left",padx=(4,0))
+        fw_frame=tk.Frame(bf,bg=BG_PANEL)
+        fw_frame.pack(side="left",padx=(0,10))
+        tk.Label(fw_frame,text="抓取线程:",font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
+        tk.Entry(fw_frame,textvariable=self.fetch_workers,width=4,font=("Segoe UI",10),bg=BG_CARD,fg=TEXT_MAIN,insertbackground=TEXT_MAIN,relief="flat",bd=2).pack(side="left",padx=(4,0))
         self._btn(bf,"导入 ASIN 文本",ACCENT,self._import_txt).pack(side="left",padx=5)
         self._btn(bf,"抓取选中商品","#2563eb",self._fetch_sel).pack(side="left",padx=5)
         self._btn(bf,"开始上品","#7c3aed",self._open_publish_page).pack(side="left",padx=5)
@@ -97,10 +103,7 @@ class SheinApp(tk.Tk):
         tk.Label(h,text="ASIN 列表",font=("Segoe UI",11,"bold"),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         self.cnt_lbl=tk.Label(h,text="(0)",font=("Segoe UI",10),fg=TEXT_SUB,bg=BG_PANEL)
         self.cnt_lbl.pack(side="left",padx=4)
-        tk.Label(h,text="●已导入",font=("Segoe UI",9),fg="#ffffff",bg=BG_PANEL).pack(side="right",padx=(6,0))
-        tk.Label(h,text="●抓取中",font=("Segoe UI",9),fg=YELLOW,bg=BG_PANEL).pack(side="right",padx=(6,0))
-        tk.Label(h,text="●抓取失败",font=("Segoe UI",9),fg=RED,bg=BG_PANEL).pack(side="right",padx=(6,0))
-        tk.Label(h,text="●抓取成功",font=("Segoe UI",9),fg=GREEN,bg=BG_PANEL).pack(side="right",padx=(6,0))
+
         sr=tk.Frame(f,bg=BG_PANEL); sr.pack(fill="x",padx=12,pady=(0,6))
         tk.Checkbutton(sr,text="全选",variable=self.select_all_var,command=self._sel_all,
             bg=BG_PANEL,fg=TEXT_MAIN,selectcolor=BG_CARD,activebackground=BG_PANEL,
@@ -422,15 +425,20 @@ class SheinApp(tk.Tk):
 
     def _open_publish_page(self):
         """打开 SHEIN 商品发布页面，自动上传选中商品的图片。"""
-        # 检查是否选中了商品
-        if self.current_asin is None:
-            messagebox.showwarning('提示', '请先在左侧选择一个商品')
+        # 优先使用勾选的 ASIN；未勾选时回退到当前点击项
+        selected_asins = [a for a, v in self.asin_vars.items() if v.get()]
+        target_asin = selected_asins[0] if selected_asins else self.current_asin
+        if target_asin is None:
+            messagebox.showwarning('提示', '请先勾选一个商品或点击左侧 ASIN')
             return
-        
+
+        # 同步当前 ASIN，后续流程统一使用 current_asin
+        self.current_asin = target_asin
+
         # 检查商品是否有图片
-        product_info = self.product_cache.get(self.current_asin)
+        product_info = self.product_cache.get(target_asin)
         if not product_info or not product_info.get('image_url'):
-            messagebox.showwarning('提示', '该商品没有图片信息，请先抓取商品')
+            messagebox.showwarning('提示', 'ASIN {} 没有图片信息，请先抓取商品'.format(target_asin))
             return
         
         # 每次点击“开始上品”创建新的会话ID，并清理停止标志
@@ -829,29 +837,48 @@ class SheinApp(tk.Tk):
         if not sel: messagebox.showinfo("提示","请先勾选要抓取的 ASIN"); return
         if self._fetch_thread and self._fetch_thread.is_alive():
             messagebox.showinfo("提示","正在抓取中，请稍候..."); return
+        try:
+            max_workers = int(self.fetch_workers.get())
+        except Exception:
+            max_workers = 5
+        max_workers = max(1, min(20, max_workers))
+        self.fetch_workers.set(str(max_workers))
         self.progress.start(12)
-        self.status_lbl.config(text="正在抓取 {} 个商品...".format(len(sel)))
-        self._fetch_thread=threading.Thread(target=self._worker,args=(sel,),daemon=True)
+        self.status_lbl.config(text="正在抓取 {} 个商品（{}线程）...".format(len(sel), max_workers))
+        self._fetch_thread=threading.Thread(target=self._worker,args=(sel,max_workers),daemon=True)
         self._fetch_thread.start()
 
-    def _worker(self,asins):
-        for i,asin in enumerate(asins):
-            msg="抓取中 {}/{}：{}".format(i+1,len(asins),asin)
-            self.after(0,lambda m=msg:self.status_lbl.config(text=m))
+    def _worker(self,asins,max_workers=5):
+        total = len(asins)
+        region = self.amazon_region.get()
+        for asin in asins:
             # 抓取进行中：黄色
-            self.after(0,lambda a=asin:self._set_asin_status(a, "fetching"))
-            info=fetch_amazon_product(asin, region=self.amazon_region.get())
-            self.product_cache[asin]=info
-            # 抓取结果：成功=绿色，失败=红色
-            title = str(info.get("title", ""))
-            is_fail = (not info) or title.startswith("获取失败") or title.startswith("HTTP ")
-            if is_fail:
-                self.after(0,lambda a=asin:self._set_asin_status(a, "fetch_fail"))
-            else:
-                self.after(0,lambda a=asin:self._set_asin_status(a, "fetch_success"))
-            if self.current_asin==asin:
-                self.after(0,lambda inf=info:self._show(inf))
-            time.sleep(random.uniform(1.5,3.5))
+            self.after(0, lambda a=asin: self._set_asin_status(a, "fetching"))
+
+        def _fetch_one(asin):
+            try:
+                info = fetch_amazon_product(asin, region=region)
+                title = str(info.get("title", ""))
+                is_fail = (not info) or title.startswith("获取失败") or title.startswith("HTTP ")
+                return asin, info, is_fail
+            except Exception as e:
+                info = {"asin": asin, "title": "获取失败: {}".format(str(e)[:30])}
+                return asin, info, True
+
+        done = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_fetch_one, asin) for asin in asins]
+            for fut in as_completed(futures):
+                asin, info, is_fail = fut.result()
+                self.product_cache[asin] = info
+                done += 1
+                self.after(0, lambda d=done, t=total, a=asin: self.status_lbl.config(text="抓取完成 {}/{}：{}".format(d, t, a)))
+                if is_fail:
+                    self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_fail"))
+                else:
+                    self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_success"))
+                if self.current_asin == asin:
+                    self.after(0, lambda inf=info: self._show(inf))
         self.after(0,self._done)
 
     def _done(self):
@@ -1114,4 +1141,11 @@ class CategoryDialog(tk.Toplevel):
 if __name__ == '__main__':
     app = SheinApp()
     app.mainloop()
+
+
+
+
+
+
+
 
