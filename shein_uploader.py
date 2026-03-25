@@ -641,12 +641,12 @@ class SheinPublisher:
             self.log("[DEBUG] 上传图片: {}".format(os.path.basename(image_path)))
             file_input.send_keys(abs_path)
             
-            # 上传后处理裁剪弹框
-            self.log("[DEBUG] 检测是否有裁剪弹框...")
-            self._handle_crop_dialog()
+            # 识图发品阶段不做裁剪，等待系统识别类目
+            wait_secs = 4
+            self.log("[DEBUG] 图片已上传，等待系统识别类目 {} 秒...".format(wait_secs))
+            time.sleep(wait_secs)
 
             # 等待上传完成
-            time.sleep(2)
             self.log("[OK] 图片已上传: {}".format(os.path.basename(image_path)))
             return True
         except Exception as e:
@@ -1750,7 +1750,13 @@ class SheinPublisher:
                     try:
                         driver.execute_script(
                             "arguments[0].style.cssText='display:block!important;visibility:visible!important;opacity:1!important;';", inp)
-                        inp.send_keys(img_path)
+                        before_val = (inp.get_attribute("value") or "").strip()
+                        inp.send_keys(os.path.abspath(img_path))
+                        time.sleep(0.4)
+                        after_val = (inp.get_attribute("value") or "").strip()
+                        if not after_val or after_val == before_val:
+                            self.log("[识图选类目] 此 input 未接收文件，尝试下一个")
+                            continue
                         self.log("[识图] 图片已上传"); uploaded = True; break
                     except Exception as e:
                         self.log("[识图] file input 失败: {}".format(e))
@@ -1934,7 +1940,13 @@ class SheinPublisher:
                             "arguments[0].style.display='block';"
                             "arguments[0].style.visibility='visible';"
                             "arguments[0].style.opacity='1';", inp)
-                        inp.send_keys(img_path)
+                        before_val = (inp.get_attribute("value") or "").strip()
+                        inp.send_keys(os.path.abspath(img_path))
+                        time.sleep(0.4)
+                        after_val = (inp.get_attribute("value") or "").strip()
+                        if not after_val or after_val == before_val:
+                            self.log("[识图选类目] 此 input 未接收文件，尝试下一个")
+                            continue
                         self.log("[识图选类目] 图片已上传")
                         uploaded = True
                         break
@@ -2126,7 +2138,13 @@ class SheinPublisher:
                             "arguments[0].style.display='block';"
                             "arguments[0].style.visibility='visible';"
                             "arguments[0].style.opacity='1';", inp)
-                        inp.send_keys(img_path)
+                        before_val = (inp.get_attribute("value") or "").strip()
+                        inp.send_keys(os.path.abspath(img_path))
+                        time.sleep(0.4)
+                        after_val = (inp.get_attribute("value") or "").strip()
+                        if not after_val or after_val == before_val:
+                            self.log("[识图选类目] 此 input 未接收文件，尝试下一个")
+                            continue
                         self.log("[识图选类目] 图片已上传")
                         uploaded = True
                         break
@@ -2318,7 +2336,13 @@ class SheinPublisher:
                             "arguments[0].style.display='block';"
                             "arguments[0].style.visibility='visible';"
                             "arguments[0].style.opacity='1';", inp)
-                        inp.send_keys(img_path)
+                        before_val = (inp.get_attribute("value") or "").strip()
+                        inp.send_keys(os.path.abspath(img_path))
+                        time.sleep(0.4)
+                        after_val = (inp.get_attribute("value") or "").strip()
+                        if not after_val or after_val == before_val:
+                            self.log("[识图选类目] 此 input 未接收文件，尝试下一个")
+                            continue
                         self.log("[识图选类目] 图片已上传")
                         uploaded = True
                         break
@@ -2510,7 +2534,13 @@ class SheinPublisher:
                             "arguments[0].style.display='block';"
                             "arguments[0].style.visibility='visible';"
                             "arguments[0].style.opacity='1';", inp)
-                        inp.send_keys(img_path)
+                        before_val = (inp.get_attribute("value") or "").strip()
+                        inp.send_keys(os.path.abspath(img_path))
+                        time.sleep(0.4)
+                        after_val = (inp.get_attribute("value") or "").strip()
+                        if not after_val or after_val == before_val:
+                            self.log("[识图选类目] 此 input 未接收文件，尝试下一个")
+                            continue
                         self.log("[识图选类目] 图片已上传")
                         uploaded = True
                         break
