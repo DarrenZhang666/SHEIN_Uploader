@@ -181,32 +181,102 @@ def _extract_json_array_by_key(text, key):
     return None
 
 
-def _normalize_sku_attrs(raw_dimension_key):
-    if not raw_dimension_key:
+def _clean_dimension_name(name):
+    n = str(name or "").strip().replace("_name", "")
+    n = n.replace(" ", "_").lower()
+    if n == "colour":
+        n = "color"
+    return n
+
+
+def _split_dimension_parts(raw_dimension_key):
+    txt = str(raw_dimension_key or "").replace(";", ",").replace("|", ",")
+    return [p.strip() for p in txt.split(",") if p.strip()]
+
+
+def _normalize_sku_attrs(raw_dimension_key, dimension_names=None, value_display_map=None):
+    parts = _split_dimension_parts(raw_dimension_key)
+    if not parts:
         return ""
-    txt = str(raw_dimension_key).replace("_name", "")
-    txt = txt.replace(";", ",").replace("|", ",")
-    txt = txt.replace(":", "=")
-    parts = [p.strip() for p in txt.split(",") if p.strip()]
-    return " / ".join(parts)
 
+    value_display_map = value_display_map or {}
+    values = []
+    for idx, p in enumerate(parts):
+        dim_name = ""
+        raw_val = p
 
-def _extract_dimension_basis(raw_dimension_key):
-    if not raw_dimension_key:
-        return []
-    txt = str(raw_dimension_key).replace(";", ",").replace("|", ",")
-    parts = [p.strip() for p in txt.split(",") if p.strip()]
-    basis = []
-    for p in parts:
         if "=" in p:
-            k = p.split("=", 1)[0].strip().replace("_name", "")
+            key, raw_val = p.split("=", 1)
+            dim_name = _clean_dimension_name(key)
         elif ":" in p:
-            k = p.split(":", 1)[0].strip().replace("_name", "")
+            key, raw_val = p.split(":", 1)
+            dim_name = _clean_dimension_name(key)
+        elif isinstance(dimension_names, list) and idx < len(dimension_names):
+            dim_name = _clean_dimension_name(dimension_names[idx])
+
+        raw_val = str(raw_val).strip()
+        display_val = raw_val
+        if dim_name and dim_name in value_display_map:
+            display_val = value_display_map[dim_name].get(raw_val, raw_val)
+        elif "_index_" in value_display_map:
+            display_val = value_display_map["_index_"].get(raw_val, raw_val)
+
+        display_val = str(display_val).strip()
+        if display_val:
+            values.append(display_val)
+
+    return " / ".join(values)
+
+
+def _extract_dimension_basis(raw_dimension_key, dimension_names=None):
+    parts = _split_dimension_parts(raw_dimension_key)
+    basis = []
+
+    for idx, p in enumerate(parts):
+        if "=" in p:
+            k = _clean_dimension_name(p.split("=", 1)[0])
+        elif ":" in p:
+            k = _clean_dimension_name(p.split(":", 1)[0])
+        elif isinstance(dimension_names, list) and idx < len(dimension_names):
+            k = _clean_dimension_name(dimension_names[idx])
         else:
-            k = p.strip().replace("_name", "")
-        if k and k.lower() not in [x.lower() for x in basis]:
+            k = ""
+
+        if k and k not in basis:
             basis.append(k)
+
     return basis
+
+
+def _build_variation_value_maps(page_text):
+    dimension_names = []
+    value_display_map = {}
+
+    variation_values = _extract_json_object_by_key(page_text, "variationValues")
+    if isinstance(variation_values, dict):
+        for dim_name, dim_values in variation_values.items():
+            dim_key = _clean_dimension_name(dim_name)
+            if dim_key and dim_key not in dimension_names:
+                dimension_names.append(dim_key)
+            if isinstance(dim_values, list):
+                value_display_map[dim_key] = {
+                    str(i): str(v).strip()
+                    for i, v in enumerate(dim_values)
+                    if str(v).strip()
+                }
+
+    display_data = _extract_json_object_by_key(page_text, "dimensionValuesDisplayData")
+    if isinstance(display_data, dict):
+        idx_map = {}
+        for k, v in display_data.items():
+            kk = str(k).strip()
+            vv = str(v).strip()
+            if kk and vv:
+                idx_map[kk] = vv
+        if idx_map:
+            value_display_map["_index_"] = idx_map
+
+    return dimension_names, value_display_map
 
 
 def _extract_color_images_map(page_text):
@@ -390,6 +460,7 @@ def fetch_amazon_product(asin, region="美国"):
         sku_image_cache = {}
         dimension_map = _extract_json_object_by_key(r.text, "dimensionToAsinMap")
         color_image_map = _extract_color_images_map(r.text)
+        dimension_names, value_display_map = _build_variation_value_maps(r.text)
         fallback_images = main_images[:5] if main_images else ([res["image_url"]] if res.get("image_url") else [])
 
         if isinstance(dimension_map, dict):
@@ -402,7 +473,7 @@ def fetch_amazon_product(asin, region="美国"):
                 sku_seen.add(sku_asin)
 
                 if sku_asin == asin:
-                    sku_images = main_images[:5]
+                    sku_images = fallback_images[:]
                 else:
                     if sku_asin not in sku_image_cache:
                         sku_image_cache[sku_asin] = _fetch_sku_images(sess, domain, sku_asin, hdrs)
@@ -412,15 +483,21 @@ def fetch_amazon_product(asin, region="美国"):
                     sku_images = _pick_images_from_color_map(color_image_map, dim_key, sku_asin, max_count=5)
 
                 if not sku_images:
-                    sku_images = main_images[:5]
+                    sku_images = fallback_images[:]
 
-                basis = _extract_dimension_basis(dim_key)
+                basis = _extract_dimension_basis(dim_key, dimension_names=dimension_names)
+                sku_attr_text = _normalize_sku_attrs(dim_key, dimension_names=dimension_names, value_display_map=value_display_map) or "默认规格"
 
                 sku_list.append({
                     "sku_asin": sku_asin,
-                    "sku_attributes": _normalize_sku_attrs(dim_key) or "默认规格",
+                    "sku_attributes": sku_attr_text,
                     "dimension_basis": basis,
-                    "images": sku_images[:5]
+                    "images": sku_images[:5],
+                    "debug_variation": {
+                        "raw_dimension_key": str(dim_key),
+                        "dimension_names": list(dimension_names),
+                        "resolved_attributes": sku_attr_text
+                    }
                 })
 
         if not sku_list:
@@ -428,7 +505,7 @@ def fetch_amazon_product(asin, region="美国"):
                 "sku_asin": asin,
                 "sku_attributes": "默认规格",
                 "dimension_basis": [],
-                "images": main_images[:5]
+                "images": fallback_images[:5]
             })
 
         res["sku_list"] = sku_list
