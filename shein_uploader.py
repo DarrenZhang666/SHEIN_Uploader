@@ -1476,7 +1476,151 @@ class SheinPublisher:
         try:
             self.log("[DEBUG] 检查主规格是否需要填写...")
 
-            # 1) 定位主规格区域
+            # 1) 先处理“有无主规格”开关（必须在上传细节图前完成）
+            # 说明：这里不依赖 main_spec_box，避免因为未定位到主规格区而提前 return
+            try:
+                switch_item = None
+                for item in driver.find_elements(By.XPATH, "//div[contains(@class,'so-form-item')]"):
+                    try:
+                        if not item.is_displayed():
+                            continue
+                        label_el = item.find_element(By.XPATH, ".//div[contains(@class,'so-form-label')]")
+                        if "有无主规格" in (label_el.text or ""):
+                            switch_item = item
+                            break
+                    except Exception:
+                        continue
+
+                if switch_item is None:
+                    self.log("[WARN] 未找到'有无主规格'开关区域，继续后续流程")
+                else:
+                    switch_label = None
+                    try:
+                        switch_label = switch_item.find_element(
+                            By.XPATH, ".//label[contains(@class,'so-checkinput-switch')]"
+                        )
+                    except Exception:
+                        pass
+
+                    # 读取当前状态：优先看 children 文案
+                    state_text = ""
+                    try:
+                        state_text = (switch_item.find_element(
+                            By.XPATH, ".//span[contains(@class,'so-checkinput-switch-children')]"
+                        ).text or "").strip()
+                    except Exception:
+                        try:
+                            state_text = (switch_label.text or "").strip() if switch_label is not None else ""
+                        except Exception:
+                            state_text = ""
+
+                    if "无主规格" in state_text:
+                        self.log("[INFO] 检测到'有无主规格'当前为'无主规格'，准备点击切换")
+                        try:
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", switch_item)
+                            time.sleep(0.3)
+                        except Exception:
+                            pass
+
+                        def _click_main_spec_switch_once():
+                            targets = []
+                            # 优先点击你给出的 LTR 滑动指示器
+                            for xp in [
+                                ".//span[contains(@class,'so-checkinput-switch-indicator-ltr')]",
+                                ".//span[contains(@class,'so-checkinput-switch-indicator')]",
+                                ".//i[contains(@class,'so-checkinput-indicator') and contains(@class,'so-checkinput-switch')]",
+                                ".//label[contains(@class,'so-checkinput-switch')]",
+                            ]:
+                                try:
+                                    el = switch_item.find_element(By.XPATH, xp)
+                                    targets.append(el)
+                                except Exception:
+                                    pass
+
+                            clicked = False
+                            for t in targets:
+                                try:
+                                    t.click()
+                                    clicked = True
+                                    break
+                                except Exception:
+                                    try:
+                                        driver.execute_script("arguments[0].click();", t)
+                                        clicked = True
+                                        break
+                                    except Exception:
+                                        pass
+                            return clicked
+
+                        def _confirm_switch_modal_if_needed():
+                            # 最多等待 5 秒，期间如果出现确认弹窗则点击“确认”
+                            for _ in range(10):
+                                try:
+                                    confirm_btns = driver.find_elements(
+                                        By.XPATH,
+                                        "//div[contains(@class,'so-modal-confirm')]"
+                                        "//button[contains(@class,'so-button-primary')]"
+                                        "[.//span[normalize-space(text())='确认']]"
+                                    )
+                                    if not confirm_btns:
+                                        confirm_btns = driver.find_elements(
+                                            By.XPATH,
+                                            "//button[contains(@class,'so-button-primary')]"
+                                            "[.//span[normalize-space(text())='确认']]"
+                                        )
+                                    for btn in confirm_btns:
+                                        if btn.is_displayed():
+                                            try:
+                                                btn.click()
+                                            except Exception:
+                                                driver.execute_script("arguments[0].click();", btn)
+                                            self.log("[OK] 已点击切换确认弹窗的'确认'按钮")
+                                            time.sleep(0.5)
+                                            return
+                                except Exception:
+                                    pass
+                                time.sleep(0.5)
+
+                        def _is_switched_to_main_spec():
+                            try:
+                                txt = (switch_item.find_element(
+                                    By.XPATH, ".//span[contains(@class,'so-checkinput-switch-children')]"
+                                ).text or "").strip()
+                                if "有主规格" in txt:
+                                    return True
+                                if "无主规格" in txt:
+                                    return False
+                            except Exception:
+                                pass
+                            try:
+                                cb = switch_item.find_element(By.XPATH, ".//input[@type='checkbox']")
+                                return bool(cb.is_selected())
+                            except Exception:
+                                return False
+
+                        # 尝试最多 2 次：点击 -> 处理弹窗 -> 校验状态
+                        switched_ok = False
+                        for idx in range(2):
+                            clicked = _click_main_spec_switch_once()
+                            if not clicked:
+                                self.log("[WARN] 第{}次点击'有无主规格'开关失败".format(idx + 1))
+                                continue
+                            self.log("[INFO] 已点击'有无主规格'开关，检查确认弹窗...")
+                            _confirm_switch_modal_if_needed()
+                            time.sleep(0.6)
+                            if _is_switched_to_main_spec():
+                                switched_ok = True
+                                break
+                        if switched_ok:
+                            self.log("[OK] '有无主规格'已切换为'有主规格'")
+                        else:
+                            self.log("[WARN] '有无主规格'切换未确认成功，继续后续流程")
+                    else:
+                        self.log("[DEBUG] '有无主规格'当前非'无主规格'，无需切换")
+            except Exception as e:
+                self.log("[WARN] 处理'有无主规格'开关异常: {}".format(str(e)[:80]))
+
+            # 2) 再定位主规格区域
             main_spec_box = None
             for xp in [
                 "//div[contains(@class,'so-form-item') and contains(@class,'main_spec') and .//span[normalize-space(text())='主规格']]",
@@ -1493,26 +1637,10 @@ class SheinPublisher:
                     break
 
             if main_spec_box is None:
-                self.log("[WARN] 未定位到主规格区域(main_spec)，跳过")
+                self.log("[WARN] 未定位到主规格区域(main_spec)，跳过主规格下拉填写")
                 return
 
-            # 2) 检查无主规格
-            try:
-                area_text = (main_spec_box.text or "").strip()
-                if "无主规格" in area_text:
-                    self.log("[OK] 检测到'无主规格'字样，跳过主规格填写")
-                    return
-            except Exception:
-                pass
-            try:
-                cb = main_spec_box.find_element(By.XPATH, ".//input[@type='checkbox']")
-                if cb.is_selected():
-                    self.log("[OK] 无主规格复选框已勾选，跳过主规格填写")
-                    return
-            except Exception:
-                pass
-
-            self.log("[DEBUG] 未检测到无主规格，开始填写主规格")
+            self.log("[DEBUG] 开始填写主规格")
 
             try:
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", main_spec_box)
