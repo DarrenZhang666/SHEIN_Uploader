@@ -13,10 +13,12 @@ from shein_asin import HEADERS_POOL
 
 try:
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
 except ImportError:
     By = None
+    Keys = None
     WebDriverWait = None
     EC = None
 
@@ -959,7 +961,7 @@ class SheinPublisher:
             # 6. 处理主规格（需在上传细节图前完成）
             self.log("[DEBUG] 处理主规格...")
             try:
-                self._handle_main_spec_if_needed()
+                self._handle_main_spec_if_needed(product_info)
             except Exception as e:
                 self.log("[DEBUG] 主规格处理步骤异常，继续后续流程: {}".format(str(e)[:60]))
 
@@ -1466,11 +1468,12 @@ class SheinPublisher:
             self.log("[ERROR] 填写规格及供应信息失败: {}".format(str(e)[:80]))
             return False
 
-    def _handle_main_spec_if_needed(self):
+    def _handle_main_spec_if_needed(self, product_info=None):
         """
         处理主规格：
-        1) 若检测到“无主规格”则跳过；
-        2) 否则点击主规格区域下方两个下拉框，并从下拉列表里选择第一个有效选项。
+        1) 若检测到“无主规格”则切换到“有主规格”；
+        2) 第一个下拉框优先按 ASIN 爬取的「分类依据」匹配选项（仅1个选项时直接选）；
+        3) 第二个下拉框选择第一个有效选项。
         """
         driver = self.driver
         try:
@@ -1751,6 +1754,56 @@ class SheinPublisher:
                 except Exception:
                     return False
 
+            def _normalize_key(txt):
+                t = (txt or "").strip().lower()
+                t = t.replace(" ", "")
+                t = t.replace("colour", "color")
+                t = t.replace("颜色", "color")
+                t = t.replace("色彩", "color")
+                t = t.replace("款式", "style")
+                t = t.replace("型号", "model")
+                t = t.replace("尺寸", "size")
+                return t
+
+            def _extract_target_spec_value(selected_attr_text):
+                """从 ASIN 首个 SKU 提取用于主规格值输入的文本（如 brown）。"""
+                if not isinstance(product_info, dict):
+                    return ""
+
+                sku_list = product_info.get("sku_list", []) or []
+                if not sku_list:
+                    return ""
+
+                first_sku = sku_list[0] or {}
+                selected_norm = _normalize_key(selected_attr_text)
+
+                try:
+                    raw_key = str(((first_sku.get("debug_variation") or {}).get("raw_dimension_key") or "")).strip()
+                    if raw_key:
+                        for part in re.split(r"[;,|]", raw_key):
+                            seg = str(part or "").strip()
+                            if not seg:
+                                continue
+                            key = ""
+                            val = ""
+                            if "=" in seg:
+                                key, val = seg.split("=", 1)
+                            elif ":" in seg:
+                                key, val = seg.split(":", 1)
+                            if key and val and _normalize_key(key) == selected_norm:
+                                vv = str(val).strip()
+                                if vv:
+                                    return vv
+                except Exception:
+                    pass
+
+                sku_attrs = str(first_sku.get("sku_attributes") or "").strip()
+                if sku_attrs and sku_attrs != "默认规格":
+                    first_part = sku_attrs.split("/")[0].strip()
+                    if first_part:
+                        return first_part
+                return ""
+
             def _pick_first(inner, label):
                 data_id = (inner.get_attribute("data-id") or "").strip()
                 self.log("[DEBUG] 点击{}下拉框 data-id={}".format(label, data_id or "N/A"))
@@ -1776,9 +1829,40 @@ class SheinPublisher:
                         sample.append(t)
                 self.log("[DEBUG] {} 可选项: {}".format(label, " | ".join(sample) if sample else "(空)"))
 
-                first = options[0]
-                picked = (first.text or "").strip().replace("\n", " ")
-                ok = _click_option(first)
+                target = options[0]
+                picked = (target.text or "").strip().replace("\n", " ")
+
+                if label == "主规格属性":
+                    preferred_basis = []
+                    if isinstance(product_info, dict):
+                        for sku in product_info.get("sku_list", []) or []:
+                            for b in sku.get("dimension_basis", []) or []:
+                                bb = str(b or "").strip()
+                                if bb and bb not in preferred_basis:
+                                    preferred_basis.append(bb)
+
+                    if preferred_basis:
+                        norm_basis_set = set(_normalize_key(x) for x in preferred_basis if _normalize_key(x))
+                        if len(options) == 1:
+                            self.log("[DEBUG] 主规格属性仅 1 个选项，直接选择")
+                        else:
+                            matched = None
+                            for opt in options:
+                                opt_text = (opt.text or "").strip().replace("\n", " ")
+                                if _normalize_key(opt_text) in norm_basis_set:
+                                    matched = opt
+                                    break
+                            if matched is not None:
+                                target = matched
+                                picked = (matched.text or "").strip().replace("\n", " ")
+                                self.log("[OK] 主规格属性已按分类依据匹配: {} (依据: {})".format(
+                                    picked, " / ".join(preferred_basis)))
+                            else:
+                                self.log("[WARN] 主规格属性未匹配到分类依据({})，回退首项".format(
+                                    " / ".join(preferred_basis)))
+                    else:
+                        self.log("[DEBUG] 未获取到 ASIN 分类依据，主规格属性回退首项")
+                ok = _click_option(target)
                 if not ok:
                     self.log("[WARN] {} 首项点击失败".format(label))
                     return None
@@ -1787,7 +1871,213 @@ class SheinPublisher:
                 self.log("[OK] {} 已选择首项: {}".format(label, picked or "(空文本)"))
                 return picked
 
-            # 4) 第一个框：主规格属性下拉
+            def _type_and_pick_first(inner, label, typed_text):
+                seed_text = (typed_text or "").strip()
+                if not seed_text:
+                    self.log("[WARN] {} 未拿到ASIN规格关键字，无法执行输入匹配".format(label))
+                    return None
+                data_id = (inner.get_attribute("data-id") or "").strip()
+
+                def _build_keywords(seed):
+                    kws = []
+
+                    def _add(x):
+                        t = (x or "").strip()
+                        if t and t not in kws:
+                            kws.append(t)
+
+                    _add(seed)
+                    txt = seed.replace("/", " ").replace("_", " ").replace("-", " ")
+                    parts = [p.strip() for p in txt.split() if p.strip()]
+                    # ?????????????? Double Brown -> Brown?
+                    for p in reversed(parts):
+                        if len(p) >= 2:
+                            _add(p)
+                    # ???????
+                    for p in parts:
+                        if len(p) >= 2:
+                            _add(p)
+                    return kws
+
+                keywords = _build_keywords(seed_text)
+                self.log("[DEBUG] {} 候选输入词: {}".format(label, " | ".join(keywords)))
+
+                def _dismiss_error_modal_if_any(wait_rounds=6):
+                    for _ in range(wait_rounds):
+                        try:
+                            modal = driver.find_elements(By.XPATH,
+                                "//div[contains(@class,'soui-modal-panel') and .//*[contains(normalize-space(.),'错误信息')]]"
+                            )
+                            know_btn = driver.find_elements(By.XPATH,
+                                "//div[contains(@class,'soui-modal-panel')]//button[.//span[normalize-space(text())='我知道了'] or normalize-space(text())='我知道了']"
+                            )
+                            if modal and know_btn:
+                                clicked = False
+                                for b in know_btn:
+                                    try:
+                                        if b.is_displayed():
+                                            try:
+                                                b.click()
+                                            except Exception:
+                                                driver.execute_script("arguments[0].click();", b)
+                                            clicked = True
+                                            break
+                                    except Exception:
+                                        continue
+                                if clicked:
+                                    time.sleep(0.5)
+                                    self.log("[WARN] {} 触发错误弹窗，已点击'我知道了'".format(label))
+                                    return True
+                        except Exception:
+                            pass
+                        time.sleep(0.25)
+                    return False
+
+                def _attempt_once(one_kw):
+                    self.log("[DEBUG] {} 尝试输入: {}".format(label, one_kw))
+                    _open_dropdown(inner)
+                    time.sleep(0.25)
+
+                    input_el = None
+                    candidates = []
+                    try:
+                        candidates.extend(inner.find_elements(By.XPATH, ".//input[not(@type='hidden') and not(@disabled)]"))
+                    except Exception:
+                        pass
+                    try:
+                        if data_id:
+                            candidates.extend(driver.find_elements(By.XPATH,
+                                "//div[contains(@class,'so-list') and @data-id='{}']//input[not(@type='hidden') and not(@disabled)]".format(data_id)
+                            ))
+                    except Exception:
+                        pass
+                    try:
+                        candidates.extend(driver.find_elements(By.XPATH,
+                            "//input[not(@type='hidden') and not(@disabled) and "
+                            "(contains(@class,'so-select') or contains(@class,'search') or @type='search' or @role='combobox')]"
+                        ))
+                    except Exception:
+                        pass
+
+                    for ip in candidates:
+                        try:
+                            if ip.is_displayed() and ip.is_enabled():
+                                input_el = ip
+                                break
+                        except Exception:
+                            continue
+
+                    typed_ok = False
+                    if input_el is not None:
+                        try:
+                            driver.execute_script(
+                                "var el=arguments[0],v=arguments[1];"
+                                "el.focus();"
+                                "el.value='';"
+                                "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                                "el.value=v;"
+                                "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                                "el.dispatchEvent(new Event('change',{bubbles:true}));",
+                                input_el, one_kw
+                            )
+                            typed_ok = True
+                        except Exception:
+                            pass
+                        if not typed_ok:
+                            try:
+                                input_el.click()
+                            except Exception:
+                                pass
+                            try:
+                                input_el.clear()
+                            except Exception:
+                                pass
+                            try:
+                                input_el.send_keys(one_kw)
+                                typed_ok = True
+                            except Exception:
+                                pass
+
+                    if not typed_ok:
+                        try:
+                            ae = driver.switch_to.active_element
+                            if ae is not None:
+                                ae.send_keys(one_kw)
+                                typed_ok = True
+                        except Exception:
+                            pass
+
+                    if not typed_ok:
+                        try:
+                            inner.click()
+                        except Exception:
+                            pass
+                        try:
+                            inner.send_keys(one_kw)
+                            typed_ok = True
+                        except Exception:
+                            pass
+
+                    if not typed_ok:
+                        self.log("[WARN] {} 输入失败: {}".format(label, one_kw))
+                        return None, False
+
+                    time.sleep(0.55)
+                    options = _collect_options(data_id)
+                    if not options:
+                        try:
+                            options = [el for el in driver.find_elements(By.XPATH,
+                                "//label[contains(@class,'so-select-option') or contains(@class,'so-checkinput')]"
+                                " | //*[contains(@class,'so-select-option') or contains(@class,'so-option')]"
+                            ) if el.is_displayed() and (el.text or '').strip() not in ('', '无数据', '请选择')]
+                        except Exception:
+                            options = []
+
+                    target = None
+                    low = one_kw.lower().strip()
+                    if options and low:
+                        for op in options:
+                            try:
+                                txt = (op.text or "").strip().lower()
+                                if low in txt:
+                                    target = op
+                                    break
+                            except Exception:
+                                continue
+
+                    if target is None and options:
+                        target = options[0]
+
+                    if target is None:
+                        self.log("[WARN] {} 输入'{}'后无可选项".format(label, one_kw))
+                        return None, False
+
+                    picked = (target.text or "").strip().replace("\n", " ")
+                    ok = _click_option(target)
+                    if not ok:
+                        self.log("[WARN] {} 输入'{}'后选项点击失败".format(label, one_kw))
+                        return None, False
+
+                    time.sleep(0.45)
+                    has_err = _dismiss_error_modal_if_any(wait_rounds=6)
+                    if has_err:
+                        return None, True
+
+                    self.log("[OK] {} 输入'{}'后已选择: {}".format(label, one_kw, picked or "(空文本)"))
+                    return picked, False
+
+                for kw in keywords:
+                    picked, got_error_modal = _attempt_once(kw)
+                    if picked:
+                        return picked
+                    if got_error_modal:
+                        self.log("[DEBUG] {} 将继续尝试下一个关键词".format(label))
+                        continue
+
+                self.log("[WARN] {} 所有关键词尝试后仍未成功".format(label))
+                return None
+
+            # 4) ????????????
             attr_inner = None
             for xp in [
                 ".//div[contains(@class,'specAttrSelect') or contains(@class,'spmp_style__specAttrSelect')]//div[contains(@class,'so-select-inner') and @data-id]",
@@ -1832,7 +2122,15 @@ class SheinPublisher:
                 self.log("[WARN] 未找到第2个下拉框(主规格值)")
                 return
 
-            picked_val = _pick_first(value_inner, "主规格值")
+            target_spec_value = _extract_target_spec_value(picked_attr)
+            if target_spec_value:
+                picked_val = _type_and_pick_first(value_inner, "主规格值", target_spec_value)
+                if not picked_val:
+                    self.log("[WARN] 第2个下拉框输入匹配失败，回退首项选择")
+                    picked_val = _pick_first(value_inner, "主规格值")
+            else:
+                self.log("[DEBUG] 未提取到主规格值，回退首项选择")
+                picked_val = _pick_first(value_inner, "主规格值")
             if not picked_val:
                 self.log("[WARN] 第2个下拉框未成功选择")
                 return
