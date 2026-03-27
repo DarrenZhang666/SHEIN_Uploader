@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """SHEIN 上品自动化模块。"""
 
 import os
@@ -2136,6 +2136,9 @@ class SheinPublisher:
                 return
 
             self.log("[OK] 主规格填写完成: 属性={}，值={}".format(picked_attr, picked_val))
+            # 主规格填写完成后，检测并取消可能弹出的"切换清空"确认弹窗
+            time.sleep(0.5)
+            self._dismiss_switch_confirm_modal()
 
         except Exception as e:
             self.log("[WARN] 主规格处理失败: {}".format(str(e)[:100]))
@@ -2234,6 +2237,8 @@ class SheinPublisher:
                     if not img_path:
                         self.log("[ERROR] 第 {} 张下载失败".format(idx + 1))
                         continue
+                    # 获取细节图 input 前，先检查并取消可能残留的"切换清空"弹窗
+                    self._dismiss_switch_confirm_modal()
                     fi = self._get_detail_img_input()
                     if fi is None:
                         self.log("[ERROR] 第 {} 张：未找到细节图 input".format(idx + 1))
@@ -2249,6 +2254,8 @@ class SheinPublisher:
                             "arguments[0].style.opacity='1';", fi)
                         fi.send_keys(img_path)
                         self.log("[OK] 第 {} 张细节图已送入上传".format(idx + 1))
+                        # 上传后检查并取消可能弹出的"切换清空"确认弹窗
+                        self._dismiss_switch_confirm_modal()
                         self._handle_crop_dialog()
                         time.sleep(1.5)
                     except Exception as e:
@@ -3375,6 +3382,42 @@ class SheinPublisher:
             self.log("[STOP] 停止后弹窗清理完成")
         except Exception as e:
             self.log("[STOP] 停止后弹窗清理异常: {}".format(str(e)[:80]))
+
+    def _dismiss_switch_confirm_modal(self):
+        """
+        检测页面上是否弹出"切换后，将清空已填写SKC、SKU信息，是否确认切换？"弹窗，
+        若存在则点击"取消"按钮，避免误清空已填写数据。
+        返回 True 表示检测到并已点击取消，False 表示未检测到弹窗。
+        """
+        driver = self.driver
+        try:
+            # 通过弹窗特征文字定位
+            modal_xpaths = [
+                "//div[contains(@class,'so-modal-confirm') and .//*[contains(text(),'清空已填写')]]//button[contains(@class,'so-button-default')]",
+                "//div[contains(@class,'so-modal-confirm') and .//*[contains(text(),'SKC')]]//button[contains(@class,'so-button-default')]",
+                "//div[contains(@class,'so-modal-confirm')]//button[@id[contains(.,'cancel')]]",
+                "//div[contains(@class,'so-modal-confirm') and .//*[contains(text(),'切换后')]]//button[.//span[normalize-space(text())='取消']]",
+                "//div[contains(@class,'so-card') and .//*[contains(text(),'清空已填写')]]//button[.//span[normalize-space(text())='取消']]",
+            ]
+            for xp in modal_xpaths:
+                try:
+                    btns = driver.find_elements(By.XPATH, xp)
+                    for btn in btns:
+                        if btn.is_displayed():
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                            time.sleep(0.1)
+                            try:
+                                btn.click()
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", btn)
+                            self.log("[OK] 检测到'切换清空'确认弹窗，已点击取消")
+                            time.sleep(0.5)
+                            return True
+                except Exception:
+                    continue
+        except Exception as e:
+            self.log("[DEBUG] _dismiss_switch_confirm_modal 异常: {}".format(str(e)[:60]))
+        return False
 
     def _dismiss_announcements(self):
         """检测并关闭商品发布页面的公告弹窗（支持多条公告）。
