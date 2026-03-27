@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 SHEIN ASIN 模块
 通过 ASIN 从亚马逊爬取商品信息
@@ -15,12 +15,64 @@ from shein_sensitive_clean import SENSITIVE_WORDS, _filter_sensitive, _filter_ti
 AMAZON_PRODUCT_URL = "https://www.amazon.com/dp/{asin}"
 
 HEADERS_POOL = [
-    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
-     "Accept-Language": "en-US,en;q=0.9", "Accept": "text/html,*/*;q=0.8"},
-    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-     "Accept-Language": "en-US,en;q=0.9", "Accept": "text/html,*/*;q=0.8"},
-    {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
-     "Accept-Language": "en-US,en;q=0.9", "Accept": "text/html,*/*;q=0.8"},
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
+        "Connection": "keep-alive",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "sec-ch-ua": '"Microsoft Edge";v="130", "Chromium";v="130", "Not_A Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
+        "Connection": "keep-alive",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
+        "Connection": "keep-alive",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
+        "Connection": "keep-alive",
+        "TE": "trailers",
+    },
 ]
 
 
@@ -346,9 +398,6 @@ def fetch_amazon_product(asin, region="美国"):
     }
     domain = _REGION_DOMAINS.get(region, "www.amazon.com")
     url = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, asin)
-    hdrs = random.choice(HEADERS_POOL).copy()
-    hdrs["Referer"] = "https://{}/".format(domain)
-    hdrs["Accept-Language"] = "en-US,en;q=0.9"
     res = {"asin": asin, "title": "获取失败", "price": "N/A", "rating": "N/A",
            "reviews": "N/A", "brand": "N/A", "image_url": "",
            "description": "", "features": [], "url": url,
@@ -358,9 +407,36 @@ def fetch_amazon_product(asin, region="美国"):
         sess.cookies.set("i18n-prefs", "USD", domain=domain)
         sess.cookies.set("lc-main", "en_US", domain=domain)
         sess.cookies.set("x-main", "1", domain=domain)
-        r = sess.get(url, headers=hdrs, timeout=15)
-        if r.status_code != 200:
-            res["title"] = "HTTP {}".format(r.status_code)
+        # 尝试每个 headers 直到取到有效页面（最多重试 len(HEADERS_POOL) 次）
+        import time as _time
+        r = None
+        hdrs = random.choice(HEADERS_POOL).copy()
+        _headers_order = random.sample(HEADERS_POOL, len(HEADERS_POOL))
+        for _attempt, _hdrs in enumerate(_headers_order):
+            _hdrs = _hdrs.copy()
+            _hdrs["Referer"] = "https://{}/".format(domain)
+            try:
+                if _attempt > 0:
+                    _time.sleep(random.uniform(1.5, 3.0))
+                r = sess.get(url, headers=_hdrs, timeout=20)
+                _tl = r.text.lower()
+                _blocked = (
+                    r.status_code == 503 or
+                    (r.status_code == 404 and "automated" in _tl) or
+                    "captcha" in _tl or
+                    ("sorry" in _tl and "automated" in _tl)
+                )
+                if not _blocked:
+                    hdrs = _hdrs
+                    break
+            except Exception:
+                continue
+        if r is None or r.status_code not in (200, 301, 302):
+            res["title"] = "HTTP {}".format(r.status_code if r else "无响应")
+            return res
+        _tl = r.text.lower()
+        if "captcha" in _tl or ("sorry" in _tl and "automated" in _tl):
+            res["title"] = "被亚马逊反爬拦截，请稍后重试"
             return res
         s = BeautifulSoup(r.text, "html.parser")
 
