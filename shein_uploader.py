@@ -983,11 +983,10 @@ class SheinPublisher:
         driver = self.driver
 
         try:
-            attr_title = WebDriverWait(driver, 8).until(
+            attr_title = WebDriverWait(driver, 3).until(
                 EC.presence_of_element_located((By.XPATH,
                     "//div[contains(@class,'so-form-label')]//span[normalize-space(text())='商品属性']")))
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", attr_title)
-            time.sleep(0.5)
         except Exception:
             self.log("[DEBUG] 未明确定位到商品属性标题，继续尝试填写")
 
@@ -1000,13 +999,12 @@ class SheinPublisher:
             ]
             for xp in model_xpaths:
                 try:
-                    inp = WebDriverWait(driver, 3).until(
+                    inp = WebDriverWait(driver, 2).until(
                         EC.presence_of_element_located((By.XPATH, xp)))
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
                     self._js_input(inp, asin)
                     self.log("[OK] 产品型号已填写: {}".format(asin))
                     model_filled = True
-                    time.sleep(0.3)
                     break
                 except Exception:
                     pass
@@ -1030,14 +1028,13 @@ class SheinPublisher:
                             expanded = True
                             break
                         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                        time.sleep(0.2)
                         try:
                             el.click()
                         except Exception:
                             driver.execute_script("arguments[0].click();", el)
                         self.log("[OK] 已展开所有属性")
                         expanded = True
-                        time.sleep(0.6)
+                        time.sleep(0.3)
                         break
                     except Exception:
                         pass
@@ -1048,14 +1045,14 @@ class SheinPublisher:
 
         # 展开后做一次滚动触发懒加载，再回到属性区域
         try:
-            for _ in range(4):
-                driver.execute_script("window.scrollBy(0, 700);")
-                time.sleep(0.25)
-            driver.execute_script("window.scrollBy(0, -2800);")
-            time.sleep(0.35)
             for _ in range(2):
                 driver.execute_script("window.scrollBy(0, 700);")
-                time.sleep(0.2)
+                time.sleep(0.15)
+            driver.execute_script("window.scrollBy(0, -2800);")
+            time.sleep(0.15)
+            for _ in range(1):
+                driver.execute_script("window.scrollBy(0, 700);")
+                time.sleep(0.1)
         except Exception:
             pass
 
@@ -1123,12 +1120,12 @@ class SheinPublisher:
                     continue
 
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", select_inner)
-                time.sleep(0.2)
+                time.sleep(0.1)
                 try:
                     select_inner.click()
                 except Exception:
                     driver.execute_script("arguments[0].click();", select_inner)
-                time.sleep(0.4)
+                time.sleep(0.25)
 
                 preferred_option = None
                 if "电源" in label or "Power Supply" in label:
@@ -1139,7 +1136,7 @@ class SheinPublisher:
                     ]
                     for px in preferred_xpaths:
                         try:
-                            cand = WebDriverWait(driver, 2).until(
+                            cand = WebDriverWait(driver, 1).until(
                                 EC.presence_of_element_located((By.XPATH, px)))
                             if cand.is_displayed():
                                 preferred_option = cand
@@ -1155,7 +1152,7 @@ class SheinPublisher:
                 ]
                 for ox in option_xpaths:
                     try:
-                        opt = WebDriverWait(driver, 2).until(
+                        opt = WebDriverWait(driver, 1).until(
                             EC.presence_of_element_located((By.XPATH, ox)))
                         if opt.is_displayed():
                             first_option = opt
@@ -1175,7 +1172,7 @@ class SheinPublisher:
                         self.log("[OK] 必填属性已选择 No: {}".format(label or "(未识别标签)"))
                     else:
                         self.log("[OK] 必填属性已默认选择首项: {}".format(label or "(未识别标签)"))
-                    time.sleep(0.25)
+                    time.sleep(0.1)
                 else:
                     try:
                         driver.execute_script("document.body.click();")
