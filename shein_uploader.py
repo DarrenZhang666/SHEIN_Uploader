@@ -1795,9 +1795,13 @@ class SheinPublisher:
                             pass
                         time.sleep(0.25)
                     return False
-                def _attempt_once(one_kw):
+                def _attempt_once(one_kw, skip_open=False):
                     self.log("[DEBUG] {} 尝试输入: {}".format(label, one_kw))
-                    _open_dropdown(inner)
+                    if not skip_open:
+                        _open_dropdown(inner)
+                    else:
+                        # 错误弹窗后不重新点击，确保下拉框已开着
+                        time.sleep(0.1)
                     time.sleep(0.25)
                     input_el = None
                     candidates = []
@@ -1959,9 +1963,9 @@ class SheinPublisher:
                         hint_target = None
                         try:
                             hint_modal_xpaths = [
-                                "//div[contains(@class,'soui-modal') and .//*[contains(normalize-space(text()),'提示']]]",
-                                "//div[contains(@class,'so-modal-panel') and .//*[contains(normalize-space(text()),'提示']]]",
-                                "//div[contains(@class,'so-modal') and .//*[contains(normalize-space(text()),'提示']]]",
+                                "//div[contains(@class,'soui-modal-panel')]",
+                                "//div[contains(@class,'so-modal-panel')]",
+                                "//div[contains(@class,'soui-modal') and not(contains(@class,'soui-modal-panel'))]",
                             ]
                             modal_found = False
                             for xp in hint_modal_xpaths:
@@ -2015,12 +2019,16 @@ class SheinPublisher:
                         return None, True
                     self.log("[OK] {} 输入'{}' 后已选择: {}".format(label, one_kw, picked or "(空文本)"))
                     return picked, False
+                _skip_open = False
                 for kw in keywords:
-                    picked, got_error_modal = _attempt_once(kw)
+                    picked, got_error_modal = _attempt_once(kw, skip_open=_skip_open)
                     if picked:
+                        _skip_open = False
                         return picked
                     if got_error_modal:
-                        self.log("[DEBUG] {} 将继续尝试下一个关键词".format(label))
+                        # SHEIN 不支持该颜色词，直接跳过尝试下一个关键词
+                        self.log("[DEBUG] {} SHEIN不支持'{}', 跳过".format(label, kw))
+                        _skip_open = True
                         continue
                 self.log("[WARN] {} 所有关键词尝试后仍未成功".format(label))
                 return None
