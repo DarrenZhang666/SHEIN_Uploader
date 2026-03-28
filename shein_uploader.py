@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """SHEIN 上品自动化模块。"""
 
 import os
@@ -983,10 +983,11 @@ class SheinPublisher:
         driver = self.driver
 
         try:
-            attr_title = WebDriverWait(driver, 3).until(
+            attr_title = WebDriverWait(driver, 8).until(
                 EC.presence_of_element_located((By.XPATH,
                     "//div[contains(@class,'so-form-label')]//span[normalize-space(text())='商品属性']")))
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", attr_title)
+            time.sleep(0.5)
         except Exception:
             self.log("[DEBUG] 未明确定位到商品属性标题，继续尝试填写")
 
@@ -999,12 +1000,13 @@ class SheinPublisher:
             ]
             for xp in model_xpaths:
                 try:
-                    inp = WebDriverWait(driver, 2).until(
+                    inp = WebDriverWait(driver, 3).until(
                         EC.presence_of_element_located((By.XPATH, xp)))
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
                     self._js_input(inp, asin)
                     self.log("[OK] 产品型号已填写: {}".format(asin))
                     model_filled = True
+                    time.sleep(0.3)
                     break
                 except Exception:
                     pass
@@ -1028,13 +1030,14 @@ class SheinPublisher:
                             expanded = True
                             break
                         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                        time.sleep(0.2)
                         try:
                             el.click()
                         except Exception:
                             driver.execute_script("arguments[0].click();", el)
                         self.log("[OK] 已展开所有属性")
                         expanded = True
-                        time.sleep(0.3)
+                        time.sleep(0.6)
                         break
                     except Exception:
                         pass
@@ -1045,14 +1048,14 @@ class SheinPublisher:
 
         # 展开后做一次滚动触发懒加载，再回到属性区域
         try:
+            for _ in range(4):
+                driver.execute_script("window.scrollBy(0, 700);")
+                time.sleep(0.25)
+            driver.execute_script("window.scrollBy(0, -2800);")
+            time.sleep(0.35)
             for _ in range(2):
                 driver.execute_script("window.scrollBy(0, 700);")
-                time.sleep(0.15)
-            driver.execute_script("window.scrollBy(0, -2800);")
-            time.sleep(0.15)
-            for _ in range(1):
-                driver.execute_script("window.scrollBy(0, 700);")
-                time.sleep(0.1)
+                time.sleep(0.2)
         except Exception:
             pass
 
@@ -1120,12 +1123,12 @@ class SheinPublisher:
                     continue
 
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", select_inner)
-                time.sleep(0.1)
+                time.sleep(0.2)
                 try:
                     select_inner.click()
                 except Exception:
                     driver.execute_script("arguments[0].click();", select_inner)
-                time.sleep(0.25)
+                time.sleep(0.4)
 
                 preferred_option = None
                 if "电源" in label or "Power Supply" in label:
@@ -1136,7 +1139,7 @@ class SheinPublisher:
                     ]
                     for px in preferred_xpaths:
                         try:
-                            cand = WebDriverWait(driver, 1).until(
+                            cand = WebDriverWait(driver, 2).until(
                                 EC.presence_of_element_located((By.XPATH, px)))
                             if cand.is_displayed():
                                 preferred_option = cand
@@ -1152,7 +1155,7 @@ class SheinPublisher:
                 ]
                 for ox in option_xpaths:
                     try:
-                        opt = WebDriverWait(driver, 1).until(
+                        opt = WebDriverWait(driver, 2).until(
                             EC.presence_of_element_located((By.XPATH, ox)))
                         if opt.is_displayed():
                             first_option = opt
@@ -1172,7 +1175,7 @@ class SheinPublisher:
                         self.log("[OK] 必填属性已选择 No: {}".format(label or "(未识别标签)"))
                     else:
                         self.log("[OK] 必填属性已默认选择首项: {}".format(label or "(未识别标签)"))
-                    time.sleep(0.1)
+                    time.sleep(0.25)
                 else:
                     try:
                         driver.execute_script("document.body.click();")
@@ -2019,8 +2022,14 @@ class SheinPublisher:
                         self.log("[WARN] {} 输入失败: {}".format(label, one_kw))
                         return None, False
 
-                    time.sleep(0.55)
-                    options = _collect_options(data_id)
+                    # [PATCHED] wait loop below
+                    options = []
+                    for _wr in range(6):
+                        time.sleep(0.5)
+                        options = _collect_options(data_id)
+                        if options:
+                            self.log("[DEBUG] {} found {} opts round {}".format(label, len(options), _wr+1))
+                            break
                     if not options:
                         try:
                             options = [el for el in driver.find_elements(By.XPATH,
@@ -2119,78 +2128,20 @@ class SheinPublisher:
                 self.log("[WARN] 未找到第2个下拉框(主规格值)")
                 return
 
-            # 从 sku_list 提取所有不重复的规格属性値，逐个填入
-            all_spec_vals = []
-            if isinstance(product_info, dict):
-                for _sku in product_info.get("sku_list", []) or []:
-                    _sku = _sku or {}
-                    _val = _extract_target_spec_value(picked_attr, _sku)
-                    if not _val:
-                        _sa = str(_sku.get("sku_attributes") or "").strip()
-                        if _sa and _sa != "默认规格":
-                            _val = _sa.split("/")[0].strip()
-                    if _val and _val not in all_spec_vals:
-                        all_spec_vals.append(_val)
-            if not all_spec_vals:
-                _v0 = _extract_target_spec_value(picked_attr)
-                if _v0:
-                    all_spec_vals.append(_v0)
-            self.log("[DEBUG] 规格属性値列表: {}".format(all_spec_vals))
-
-            if not all_spec_vals:
-                self.log("[DEBUG] 未提取到规格属性値，回退首项选择")
-                picked_val = _pick_first(value_inner, "主规格属性値")
+            target_spec_value = _extract_target_spec_value(picked_attr)
+            if target_spec_value:
+                picked_val = _type_and_pick_first(value_inner, "主规格值", target_spec_value)
                 if not picked_val:
-                    self.log("[WARN] 第2个下拉框未成功选择")
-                    return
+                    self.log("[WARN] 第2个下拉框输入匹配失败，回退首项选择")
+                    picked_val = _pick_first(value_inner, "主规格值")
             else:
-                picked_val = None
-                for _idx, _spec_val in enumerate(all_spec_vals):
-                    _cur_inner = None
-                    if _idx == 0:
-                        _cur_inner = value_inner
-                    else:
-                        time.sleep(0.6)
-                        _all_inners = []
-                        for _xp in [
-                            ".//div[contains(@class,'specValues') or contains(@class,'spmp_style__specValues')]"
-                            "//div[contains(@class,'so-select-inner') and @data-id]",
-                        ]:
-                            try:
-                                _all_inners = [el for el in spec_content.find_elements(By.XPATH, _xp) if el.is_displayed()]
-                                if _all_inners: break
-                            except Exception: pass
-                        if len(_all_inners) > _idx:
-                            _cur_inner = _all_inners[_idx]
-                        else:
-                            self.log("[WARN] 第{}个规格属性値输入框未出现，跳过".format(_idx + 1))
-                            continue
+                self.log("[DEBUG] 未提取到主规格值，回退首项选择")
+                picked_val = _pick_first(value_inner, "主规格值")
+            if not picked_val:
+                self.log("[WARN] 第2个下拉框未成功选择")
+                return
 
-                    if _cur_inner is None:
-                        continue
-
-                    _pv = _type_and_pick_first(_cur_inner, "主规格属性値[{}]".format(_idx + 1), _spec_val)
-                    if not _pv:
-                        _pv = _pick_first(_cur_inner, "主规格属性値[{}]".format(_idx + 1))
-                    if _pv:
-                        if picked_val is None: picked_val = _pv
-                        self.log("[OK] 规格属性値[{}] 已填: {}".format(_idx + 1, _pv))
-                    else:
-                        self.log("[WARN] 规格属性値[{}] 填写失败: {}".format(_idx + 1, _spec_val))
-                        if _idx == 0:
-                            self.log("[WARN] 第一个规格値就失败，终止")
-                            return
-
-                if not picked_val:
-                    self.log("[WARN] 规格属性値全部填写失败")
-                    return
-
-            self.log("[OK] 主规格填写完成: 属性={}，共{}个属性値".format(picked_attr, len(all_spec_vals) if all_spec_vals else 1))
-            time.sleep(0.5)
-            self._dismiss_switch_confirm_modal()
-            # 主规格填写完成后，检测并取消可能弹出的"切换清空"确认弹窗
-            time.sleep(0.5)
-            self._dismiss_switch_confirm_modal()
+            self.log("[OK] 主规格填写完成: 属性={}，值={}".format(picked_attr, picked_val))
 
         except Exception as e:
             self.log("[WARN] 主规格处理失败: {}".format(str(e)[:100]))
@@ -2264,146 +2215,62 @@ class SheinPublisher:
         self.log("[ERROR] 细节图 input 经10次重试仍未找到")
         return None
 
-    def _upload_images_to_row_input(self, row_fi, imgs_to_upload, row_idx=1):
-        """对单行细节图 input 上传多张图片。"""
-        driver = self.driver
-        for idx, img_url in enumerate(imgs_to_upload):
-            try:
-                self._ensure_not_stopped()
-                self.log("[DEBUG] SKC行[{}] 上传细节图 {}/{}".format(row_idx, idx+1, len(imgs_to_upload)))
-                img_path = self._save_img_temp(img_url)
-                if not img_path:
-                    self.log("[ERROR] SKC行[{}] 第{}张下载失败".format(row_idx, idx+1))
-                    continue
-                self._dismiss_switch_confirm_modal()
-                try:
-                    driver.execute_script(
-                        "arguments[0].style.display='block';"
-                        "arguments[0].style.visibility='visible';"
-                        "arguments[0].style.opacity='1';", row_fi)
-                    row_fi.send_keys(img_path)
-                    self.log("[OK] SKC行[{}] 第{}张细节图已送入上传".format(row_idx, idx+1))
-                    self._dismiss_switch_confirm_modal()
-                    self._handle_crop_dialog()
-                    time.sleep(1.5)
-                except Exception as e:
-                    self.log("[ERROR] SKC行[{}] 第{}张 send_keys 失败: {}".format(row_idx, idx+1, str(e)[:60]))
-                try:
-                    import os as _os; _os.remove(img_path)
-                except Exception:
-                    pass
-            except Exception as e:
-                self.log("[ERROR] SKC行[{}] 第{}张上传失败: {}".format(row_idx, idx+1, str(e)[:60]))
-                continue
-
     def _upload_product_images(self, product_info):
-        """按 SKC 行逐行为每个颜色上传对应的细节图，每个 SKC 最多 5 张。"""
+        "连续上传5张图片到细节图列，每张裁剪后重复。"
         try:
             self._ensure_not_stopped()
-            driver = self.driver
-            main_images = product_info.get("main_images", []) if isinstance(product_info, dict) else []
-            if not main_images and isinstance(product_info, dict) and product_info.get("image_url"):
+            main_images = product_info.get("main_images", [])
+            if not main_images and product_info.get("image_url"):
                 main_images = [product_info["image_url"]]
             if not main_images:
                 self.log("[ERROR] 没有主页图可以上传")
                 return
-            # 滚动到细节图表格区域
-            try:
-                driver.execute_script(
-                    "var el=document.querySelector('#userguide_commodities_info_skc_title_table,div.detail_img_container');"
-                    "if(el)el.scrollIntoView({block:'center',behavior:'smooth'});"
-                    "else window.scrollTo(0,document.body.scrollHeight*0.6);")
-                time.sleep(1.5)
-            except Exception:
-                pass
-            # 找到主规格表格内所有行
-            rows = []
-            for xp in [
-                "//div[@id='userguide_commodities_info_skc_title_table']//tbody/tr",
-                "//div[contains(@class,'detail_img_container')]//tbody/tr",
-            ]:
-                try:
-                    rows = [r for r in driver.find_elements(By.XPATH, xp) if r.is_displayed()]
-                    if rows: break
-                except Exception:
-                    pass
-            if not rows:
-                self.log("[WARN] 未找到 SKC 表格行，回退全图上传第一行")
-                fi = self._get_detail_img_input()
-                if fi:
-                    self._upload_images_to_row_input(fi, main_images[:5], 1)
-                return
-            self.log("[DEBUG] 找到 {} 行 SKC".format(len(rows)))
-            # 构建 颜色小写 -> SKU图片列表 映射
-            sku_list = product_info.get("sku_list", []) if isinstance(product_info, dict) else []
-            color_images = {}
-            for _sku in sku_list:
-                _sku = _sku or {}
-                _attrs = str(_sku.get("sku_attributes") or "").strip()
-                _imgs = _sku.get("images") or _sku.get("main_images") or []
-                if not _imgs and _sku.get("image_url"):
-                    _imgs = [_sku["image_url"]]
-                if not _attrs or _attrs == "默认规格":
-                    continue
-                _key = _attrs.split("/")[0].strip().lower()
-                if _key and _imgs and _key not in color_images:
-                    color_images[_key] = _imgs
-            self.log("[DEBUG] 颜色->图片映射: {}".format(list(color_images.keys())))
-            for row_idx, row in enumerate(rows):
+            images_to_upload = main_images[:6]  # 最多上传6张细节图
+            self.log("开始上传细节图...")
+            self.log("[DEBUG] 准备上传 {} 张图片到细节图".format(len(images_to_upload)))
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1.5)
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.5);")
+            time.sleep(1.5)
+            for idx, img_url in enumerate(images_to_upload):
                 try:
                     self._ensure_not_stopped()
-                    # 读取该行第1列(颜色)
-                    row_color = ""
+                    self.log("[DEBUG] 上传细节图第 {} 张...".format(idx + 1))
+                    img_path = self._save_img_temp(img_url)
+                    if not img_path:
+                        self.log("[ERROR] 第 {} 张下载失败".format(idx + 1))
+                        continue
+                    # 获取细节图 input 前，先检查并取消可能残留的"切换清空"弹窗
+                    self._dismiss_switch_confirm_modal()
+                    fi = self._get_detail_img_input()
+                    if fi is None:
+                        self.log("[ERROR] 第 {} 张：未找到细节图 input".format(idx + 1))
+                        try:
+                            import os as _os; _os.remove(img_path)
+                        except Exception:
+                            pass
+                        continue
                     try:
-                        tds = row.find_elements(By.XPATH, "./td")
-                        if tds:
-                            row_color = (tds[0].text or "").strip().split("\n")[0].strip().lower()
+                        self.driver.execute_script(
+                            "arguments[0].style.display='block';"
+                            "arguments[0].style.visibility='visible';"
+                            "arguments[0].style.opacity='1';", fi)
+                        fi.send_keys(img_path)
+                        self.log("[OK] 第 {} 张细节图已送入上传".format(idx + 1))
+                        # 上传后检查并取消可能弹出的"切换清空"确认弹窗
+                        self._dismiss_switch_confirm_modal()
+                        self._handle_crop_dialog()
+                        time.sleep(1.5)
+                    except Exception as e:
+                        self.log("[ERROR] 第 {} 张 send_keys 失败: {}".format(idx + 1, str(e)[:60]))
+                    try:
+                        import os as _os; _os.remove(img_path)
                     except Exception:
                         pass
-                    self.log("[DEBUG] SKC行[{}] 颜色: {}".format(row_idx+1, row_color))
-                    # 匹配图片
-                    imgs_for_row = []
-                    if row_color and color_images:
-                        if row_color in color_images:
-                            imgs_for_row = color_images[row_color]
-                        else:
-                            for k, v in color_images.items():
-                                if k in row_color or row_color in k:
-                                    imgs_for_row = v
-                                    break
-                    if not imgs_for_row:
-                        # 按索引回退
-                        if row_idx < len(sku_list):
-                            _fallback_sku = sku_list[row_idx] or {}
-                            imgs_for_row = (_fallback_sku.get("images") or [])[:5]
-                        if not imgs_for_row:
-                            imgs_for_row = main_images
-                            self.log("[WARN] SKC行[{}] 匹配不到颜色图片，使用主图".format(row_idx+1))
-                    imgs_to_upload = imgs_for_row[:5]
-                    self.log("[DEBUG] SKC行[{}] 准备上传 {} 张细节图".format(row_idx+1, len(imgs_to_upload)))
-                    # 找该行第3列(细节图列)的 file input
-                    row_fi = None
-                    try:
-                        tds = row.find_elements(By.XPATH, "./td")
-                        if len(tds) > 2:
-                            detail_td = tds[2]
-                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", detail_td)
-                            time.sleep(0.3)
-                            fi_list = detail_td.find_elements(By.XPATH, ".//input[@type='file'][@multiple]")
-                            if not fi_list:
-                                fi_list = detail_td.find_elements(By.XPATH, ".//input[@type='file']")
-                            if fi_list:
-                                row_fi = fi_list[0]
-                    except Exception as e:
-                        self.log("[WARN] SKC行[{}] 找 input 失败: {}".format(row_idx+1, str(e)[:50]))
-                    if row_fi is None:
-                        self.log("[WARN] SKC行[{}] 未找到细节图 input，跳过".format(row_idx+1))
-                        continue
-                    self._upload_images_to_row_input(row_fi, imgs_to_upload, row_idx+1)
                 except Exception as e:
-                    self.log("[WARN] SKC行[{}] 处理异常: {}".format(row_idx+1, str(e)[:60]))
+                    self.log("[ERROR] 第 {} 张上传失败: {}".format(idx + 1, str(e)[:60]))
                     continue
-            self.log("[OK] 所有 SKC 细节图上传完成")
+            self.log("[OK] 细节图上传完成")
         except Exception as e:
             self.log("[ERROR] 上传细节图异常: {}".format(str(e)[:60]))
 
