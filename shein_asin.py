@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 SHEIN ASIN 模块
 通过 ASIN 从亚马逊爬取商品信息
@@ -7,9 +7,17 @@ import re
 import random
 import io
 import json
+import time
+import os
 import requests
+try:
+    import cloudscraper
+    _CLOUDSCRAPER_OK = True
+except ImportError:
+    _CLOUDSCRAPER_OK = False
 from bs4 import BeautifulSoup
 from PIL import Image
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from shein_sensitive_clean import SENSITIVE_WORDS, _filter_sensitive, _filter_title
 
 AMAZON_PRODUCT_URL = "https://www.amazon.com/dp/{asin}"
@@ -17,7 +25,7 @@ AMAZON_PRODUCT_URL = "https://www.amazon.com/dp/{asin}"
 HEADERS_POOL = [
     {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
         "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
@@ -29,6 +37,7 @@ HEADERS_POOL = [
         "sec-fetch-user": "?1",
         "upgrade-insecure-requests": "1",
         "Connection": "keep-alive",
+        "Cache-Control": "max-age=0",
     },
     {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
@@ -44,6 +53,7 @@ HEADERS_POOL = [
         "sec-fetch-user": "?1",
         "upgrade-insecure-requests": "1",
         "Connection": "keep-alive",
+        "Cache-Control": "max-age=0",
     },
     {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -59,6 +69,7 @@ HEADERS_POOL = [
         "sec-fetch-user": "?1",
         "upgrade-insecure-requests": "1",
         "Connection": "keep-alive",
+        "Cache-Control": "max-age=0",
     },
     {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
@@ -73,7 +84,129 @@ HEADERS_POOL = [
         "Connection": "keep-alive",
         "TE": "trailers",
     },
+    {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "Connection": "keep-alive",
+        "upgrade-insecure-requests": "1",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Linux"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
+        "Connection": "keep-alive",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "sec-ch-ua": '"Google Chrome";v="129", "Chromium";v="129", "Not_A Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
+        "Connection": "keep-alive",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 OPR/116.0.0.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24", "Opera";v="116"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
+        "Connection": "keep-alive",
+    },
 ]
+
+# 可选代理池（留空则不使用，格式: ["http://user:pass@host:port"]）
+PROXY_POOL = []
+
+
+def _get_proxy():
+    """随机返回代理配置字典，PROXY_POOL 为空时返回 None。"""
+    if not PROXY_POOL:
+        return None
+    proxy = random.choice(PROXY_POOL)
+    return {"http": proxy, "https": proxy}
+
+
+def _make_browser_cookies(domain):
+    """生成模拟浏览器的基础 Cookie。"""
+    session_id = "".join(random.choices("0123456789abcdefghijklmnopqrstuvwxyz", k=15))
+    ubid = "{}-{}-{}".format(
+        random.randint(100, 999),
+        random.randint(1000000, 9999999),
+        random.randint(1000000, 9999999),
+    )
+    return {
+        "i18n-prefs": "USD",
+        "lc-main": "en_US",
+        "session-id": session_id,
+        "ubid-main": ubid,
+    }
+
+
+def _is_blocked(status_code, text):
+    """判断响应是否被反爬拦截。"""
+    tl = text.lower()
+    return (
+        status_code == 503
+        or (status_code == 404 and "automated" in tl)
+        or "captcha" in tl
+        or ("sorry" in tl and "automated" in tl)
+        or "robot check" in tl
+        or "api-services-support@amazon.com" in tl
+    )
+
+
+def _get_with_retry(session, url, max_attempts=3, base_timeout=12):
+    """
+    带指数退避 + 抖动的请求重试，每次随机换 UA 和代理。
+    返回 (response, headers_used) 或 (None, None)。
+    """
+    shuffled = random.sample(HEADERS_POOL, len(HEADERS_POOL))
+    attempts = min(max_attempts, len(shuffled))
+    for attempt in range(attempts):
+        hdrs = shuffled[attempt].copy()
+        hdrs["Referer"] = "https://{}/".format(url.split("/")[2])
+        proxies = _get_proxy()
+        if attempt > 0:
+            # 短暂退避：避免超长等待
+            wait = min(2 ** attempt + random.uniform(0.3, 1.0), 8.0)
+            time.sleep(wait)
+        try:
+            r = session.get(url, headers=hdrs, proxies=proxies, timeout=base_timeout)
+            if not _is_blocked(r.status_code, r.text):
+                return r, hdrs
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            continue
+        except Exception:
+            continue
+    return None, None
 
 
 def _to_sx1500(img_src):
@@ -371,16 +504,104 @@ def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=5):
     return []
 
 
+def _fetch_page_with_selenium(url, timeout=20):
+    """
+    使用 Selenium 无头 Chrome 抓取页面 HTML，绕过亚马逊反爬。
+    返回页面 HTML 字符串，失败返回 None。
+    """
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        opts = Options()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        opts.add_experimental_option("useAutomationExtension", False)
+        ua = random.choice(HEADERS_POOL)["User-Agent"]
+        opts.add_argument("--user-agent={}".format(ua))
+        opts.add_argument("--lang=en-US")
+        opts.add_argument("--window-size=1280,800")
+
+        # 优先使用已知的 chromedriver 路径
+        _base = os.path.dirname(os.path.abspath(__file__))
+        _known = os.path.join(_base, ".wdm", "drivers", "chromedriver", "win64", "146.0.7680.80", "chromedriver-win32", "chromedriver.exe")
+        if os.path.exists(_known):
+            driver_path = _known
+        else:
+            driver_path = None
+            for _root, _dirs, _files in os.walk(_base):
+                _dirs[:] = [d for d in _dirs if d != "__pycache__"]
+                if "chromedriver.exe" in _files:
+                    driver_path = os.path.join(_root, "chromedriver.exe")
+                    break
+        if driver_path:
+            driver = webdriver.Chrome(service=Service(driver_path), options=opts)
+        else:
+            driver = webdriver.Chrome(options=opts)
+
+        try:
+            driver.set_page_load_timeout(timeout)
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
+                {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"})
+            driver.get(url)
+            time.sleep(3)  # 等待 JS 渲染
+            html = driver.page_source
+            return html
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+    except Exception:
+        return None
+
+
 def _fetch_sku_images(session, domain, sku_asin, headers):
+    """拉取单个 SKU 页面的主图，失败时返回空列表。"""
     try:
         sku_url = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, sku_asin)
-        r = session.get(sku_url, headers=headers, timeout=15)
-        if r.status_code != 200:
+        # 优先用传入的 session（可能是 cloudscraper），直接单次请求
+        try:
+            _hdrs = random.choice(HEADERS_POOL).copy()
+            _hdrs["Referer"] = "https://{}/".format(domain)
+            r = session.get(sku_url, headers=_hdrs, timeout=10)
+            if r and not _is_blocked(r.status_code, r.text):
+                sku_soup = BeautifulSoup(r.text, "html.parser")
+                imgs = _collect_main_images_from_soup(sku_soup, max_count=5)
+                if imgs:
+                    return imgs
+        except Exception:
+            pass
+        # 回退：用 _get_with_retry
+        r2, _ = _get_with_retry(session, sku_url, max_attempts=1, base_timeout=8)
+        if r2 is None:
             return []
-        sku_soup = BeautifulSoup(r.text, "html.parser")
+        sku_soup = BeautifulSoup(r2.text, "html.parser")
         return _collect_main_images_from_soup(sku_soup, max_count=5)
     except Exception:
         return []
+
+
+def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_workers=6):
+    """并发拉取多个 SKU 的图片，返回 {sku_asin: [img_url, ...]} 字典。"""
+    results = {}
+    if not sku_asins:
+        return results
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_asin = {
+            executor.submit(_fetch_sku_images, session, domain, asin, hdrs): asin
+            for asin in sku_asins
+        }
+        for future in as_completed(future_to_asin):
+            asin = future_to_asin[future]
+            try:
+                results[asin] = future.result()
+            except Exception:
+                results[asin] = []
+    return results
 
 
 def fetch_amazon_product(asin, region="美国"):
@@ -403,42 +624,51 @@ def fetch_amazon_product(asin, region="美国"):
            "description": "", "features": [], "url": url,
            "description_images": [], "main_images": [], "sku_list": []}
     try:
-        sess = requests.Session()
-        sess.cookies.set("i18n-prefs", "USD", domain=domain)
-        sess.cookies.set("lc-main", "en_US", domain=domain)
-        sess.cookies.set("x-main", "1", domain=domain)
-        # 尝试每个 headers 直到取到有效页面（最多重试 len(HEADERS_POOL) 次）
-        import time as _time
-        r = None
-        hdrs = random.choice(HEADERS_POOL).copy()
-        _headers_order = random.sample(HEADERS_POOL, len(HEADERS_POOL))
-        for _attempt, _hdrs in enumerate(_headers_order):
-            _hdrs = _hdrs.copy()
-            _hdrs["Referer"] = "https://{}/".format(domain)
-            try:
-                if _attempt > 0:
-                    _time.sleep(random.uniform(1.5, 3.0))
-                r = sess.get(url, headers=_hdrs, timeout=20)
-                _tl = r.text.lower()
-                _blocked = (
-                    r.status_code == 503 or
-                    (r.status_code == 404 and "automated" in _tl) or
-                    "captcha" in _tl or
-                    ("sorry" in _tl and "automated" in _tl)
-                )
-                if not _blocked:
-                    hdrs = _hdrs
-                    break
-            except Exception:
-                continue
-        if r is None or r.status_code not in (200, 301, 302):
-            res["title"] = "HTTP {}".format(r.status_code if r else "无响应")
-            return res
-        _tl = r.text.lower()
-        if "captcha" in _tl or ("sorry" in _tl and "automated" in _tl):
+        # 三层抓取策略：cloudscraper > requests > Selenium
+        # 第1层：cloudscraper（内置 JS 挑战绕过）
+        if _CLOUDSCRAPER_OK:
+            sess = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "windows", "mobile": False},
+                delay=3,
+            )
+        else:
+            sess = requests.Session()
+        # 注入模拟浏览器 Cookie
+        for k, v in _make_browser_cookies(domain).items():
+            sess.cookies.set(k, v, domain=domain)
+
+        # 主页面请求：cloudscraper/requests 带重试
+        r, hdrs = _get_with_retry(sess, url, max_attempts=3, base_timeout=15)
+        page_html = None
+        if r is not None and r.status_code in (200, 301, 302) and not _is_blocked(r.status_code, r.text):
+            page_html = r.text
+        else:
+            # 第2层：cloudscraper 直接单次请求（不经过重试，换新 scraper 实例）
+            if _CLOUDSCRAPER_OK:
+                try:
+                    _scraper2 = cloudscraper.create_scraper(
+                        browser={"browser": "firefox", "platform": "windows", "mobile": False},
+                    )
+                    for k, v in _make_browser_cookies(domain).items():
+                        _scraper2.cookies.set(k, v, domain=domain)
+                    _hdrs2 = random.choice(HEADERS_POOL).copy()
+                    _r2 = _scraper2.get(url, headers=_hdrs2, timeout=15)
+                    if not _is_blocked(_r2.status_code, _r2.text):
+                        page_html = _r2.text
+                        hdrs = _hdrs2
+                except Exception:
+                    pass
+
+            # 第3层：Selenium 无头浏览器（最终保底）
+            if not page_html:
+                page_html = _fetch_page_with_selenium(url, timeout=25)
+                hdrs = random.choice(HEADERS_POOL).copy()
+                r = None
+
+        if not page_html:
             res["title"] = "被亚马逊反爬拦截，请稍后重试"
             return res
-        s = BeautifulSoup(r.text, "html.parser")
+        s = BeautifulSoup(page_html, "html.parser")
 
         t = s.select_one("#productTitle")
         if t:
@@ -533,12 +763,13 @@ def fetch_amazon_product(asin, region="美国"):
 
         sku_list = []
         sku_seen = set()
-        sku_image_cache = {}
-        dimension_map = _extract_json_object_by_key(r.text, "dimensionToAsinMap")
-        color_image_map = _extract_color_images_map(r.text)
-        dimension_names, value_display_map = _build_variation_value_maps(r.text)
+        dimension_map = _extract_json_object_by_key(page_html, "dimensionToAsinMap")
+        color_image_map = _extract_color_images_map(page_html)
+        dimension_names, value_display_map = _build_variation_value_maps(page_html)
         fallback_images = main_images[:5] if main_images else ([res["image_url"]] if res.get("image_url") else [])
 
+        # 先收集所有需要拉图的非主 ASIN
+        sku_asin_list = []
         if isinstance(dimension_map, dict):
             for dim_key, sku_asin in dimension_map.items():
                 if not sku_asin:
@@ -547,17 +778,29 @@ def fetch_amazon_product(asin, region="美国"):
                 if not sku_asin or sku_asin in sku_seen:
                     continue
                 sku_seen.add(sku_asin)
+                if sku_asin != asin:
+                    sku_asin_list.append(sku_asin)
 
-                if sku_asin == asin:
-                    sku_images = fallback_images[:]
-                else:
-                    if sku_asin not in sku_image_cache:
-                        sku_image_cache[sku_asin] = _fetch_sku_images(sess, domain, sku_asin, hdrs)
-                    sku_images = sku_image_cache.get(sku_asin, [])
+        # 并发拉取所有 SKU 图片
+        sku_image_cache = _fetch_all_sku_images_concurrently(
+            sess, domain, sku_asin_list, hdrs, max_workers=4
+        )
+        sku_image_cache[asin] = fallback_images[:]
 
+        # 重新遍历组装 sku_list
+        sku_seen2 = set()
+        if isinstance(dimension_map, dict):
+            for dim_key, sku_asin in dimension_map.items():
+                if not sku_asin:
+                    continue
+                sku_asin = str(sku_asin).strip()
+                if not sku_asin or sku_asin in sku_seen2:
+                    continue
+                sku_seen2.add(sku_asin)
+
+                sku_images = sku_image_cache.get(sku_asin, [])
                 if not sku_images:
                     sku_images = _pick_images_from_color_map(color_image_map, dim_key, sku_asin, max_count=5)
-
                 if not sku_images:
                     sku_images = fallback_images[:]
 
