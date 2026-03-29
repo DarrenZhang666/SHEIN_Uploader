@@ -171,17 +171,29 @@ def _make_browser_cookies(domain):
 
 
 def _is_blocked(status_code, text):
-    """判断响应是否被反爬拦截。"""
+    """判断响应是否被反爬拦截。
+    仅在页面确实是拦截页（无商品内容）时返回 True。
+    """
+    if status_code == 503:
+        return True
+    if status_code == 404 and "automated" in text.lower():
+        return True
     tl = text.lower()
-    return (
-        status_code == 503
-        or (status_code == 404 and "automated" in tl)
-        or "captcha" in tl
-        or ("sorry" in tl and "automated" in tl)
-        or "robot check" in tl
-        or "api-services-support@amazon.com" in tl
-    )
-
+    # 如果页面有正常商品内容，直接认为未被拦截
+    if "productTitle" in text or "acrCustomerReviewText" in text:
+        return False
+    # 没有商品内容时，检查拦截特征
+    if "captcha" in tl:
+        return True
+    if "robot check" in tl:
+        return True
+    if "api-services-support@amazon.com" in tl:
+        return True
+    if "sorry, we just need to make sure" in tl:
+        return True
+    if "automated access" in tl:
+        return True
+    return False
 
 def _get_with_retry(session, url, max_attempts=3, base_timeout=12):
     """
@@ -495,29 +507,144 @@ def _build_variation_value_maps(page_text):
     return dimension_names, value_display_map
 
 
-def _extract_color_images_map(page_text):
-    color_images = _extract_json_object_by_key(page_text, "colorImages")
-    if not isinstance(color_images, dict):
-        return {}
+def _extract_color_initial_images(page_text, max_count=8):
+    """
+    从亚马逊页面的单引号JS格式中提取 colorImages.initial 数组，
+    即当前颜色的所有角度图片（MAIN/PT01/PT02...）。
+    返回 [url, ...] 列表。
+    """
+    idx = page_text.find("colorImages'")
+    if idx < 0:
+        return []
+    init_idx = page_text.find("'initial'", idx)
+    if init_idx < 0 or init_idx - idx > 500:
+        return []
+    arr_start = page_text.find('[', init_idx)
+    if arr_start < 0:
+        return []
+    depth = 0
+    in_str = False
+    esc = False
+    str_char = None
+    end = -1
+    for i in range(arr_start, min(arr_start + 200000, len(page_text))):
+        ch = page_text[i]
+        if esc:
+            esc = False
+            continue
+        if ch == '\\':
+            esc = True
+            continue
+        if not in_str and ch in ('"', "'"):
+            in_str = True
+            str_char = ch
+            continue
+        if in_str and ch == str_char:
+            in_str = False
+            continue
+        if in_str:
+            continue
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end < 0:
+        return []
+    try:
+        items = json.loads(page_text[arr_start:end + 1])
+    except Exception:
+        return []
+    urls = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        u = it.get("hiRes") or it.get("large") or it.get("mainUrl")
+        if isinstance(u, str) and u and u not in urls:
+            urls.append(_to_sx1500(u))
+            if len(urls) >= max_count:
+                break
+    return urls
 
+
+def _extract_color_images_map(page_text):
+    """
+    从页面中提取按颜色分组的图片映射。
+    解析双引号JSON格式的 colorImages 块（key 格式为 'Color Size'，如 'Black 65L'），
+    将颜色部分（去掉尺码后缀）作为 key 存入结果。
+    返回 {color_name: [url, ...]} 字典，每色至少1张 hiRes 主图。
+    """
     result = {}
-    for color_key, items in color_images.items():
-        urls = []
-        if isinstance(items, list):
+    for m in re.finditer(r'colorImages"\s*:\s*\{', page_text):
+        brace_start = page_text.find('{', m.start())
+        depth = 0
+        in_str = False
+        esc = False
+        str_char = None
+        end = -1
+        for i in range(brace_start, min(brace_start + 500000, len(page_text))):
+            ch = page_text[i]
+            if esc:
+                esc = False
+                continue
+            if ch == '\\':
+                esc = True
+                continue
+            if not in_str and ch in ('"', "'"):
+                in_str = True
+                str_char = ch
+                continue
+            if in_str and ch == str_char:
+                in_str = False
+                continue
+            if in_str:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end < 0:
+            continue
+        try:
+            color_map = json.loads(page_text[brace_start:end + 1])
+        except Exception:
+            continue
+        for full_key, items in color_map.items():
+            # full_key 形如 "Black 65L" 或 "Jute&Black 96L"
+            # 提取颜色部分：去掉末尾的尺码（数字+字母，如 65L/96L 或 S/M/XL）
+            color_key = re.sub(
+                r'\s+\d+[A-Za-z]+$|\s+(XS|S|M|L|XL|XXL|3XL)$',
+                '',
+                full_key.strip()
+            ).strip()
+            if not color_key:
+                color_key = full_key.strip()
+            if not isinstance(items, list):
+                continue
             for it in items:
                 if not isinstance(it, dict):
                     continue
-                u = (it.get("hiRes") or it.get("large") or it.get("mainUrl")
-                     or it.get("thumb") or it.get("variant"))
+                u = it.get("hiRes") or it.get("large") or it.get("mainUrl")
                 if isinstance(u, str) and u:
-                    uu = _to_sx1500(u) if "images/I/" in u else u
-                    if uu not in urls:
-                        urls.append(uu)
-        if urls:
-            result[str(color_key).strip()] = urls
+                    uu = _to_sx1500(u)
+                    # 以颜色名存储（去重）
+                    if color_key not in result:
+                        result[color_key] = []
+                    if uu not in result[color_key]:
+                        result[color_key].append(uu)
+                    # 同时以完整 key 存储，便于精确匹配
+                    fk = full_key.strip()
+                    if fk not in result:
+                        result[fk] = []
+                    if uu not in result[fk]:
+                        result[fk].append(uu)
+        break  # 只需解析第一个双引号JSON格式的 colorImages
     return result
-
-
 
 def _extract_non_color_specs(soup):
     """
@@ -657,7 +784,7 @@ def _fetch_page_with_selenium(url, timeout=20):
 
 
 def _fetch_sku_images(session, domain, sku_asin, headers):
-    """拉取单个 SKU 页面的主图，失败时返回空列表。"""
+    """拉取单个 SKU 页面的主图，优先从 colorImages.initial 提取全部角度图，失败时返回空列表。"""
     try:
         sku_url = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, sku_asin)
         # 优先用传入的 session（可能是 cloudscraper），直接单次请求
@@ -666,8 +793,13 @@ def _fetch_sku_images(session, domain, sku_asin, headers):
             _hdrs["Referer"] = "https://{}/".format(domain)
             r = session.get(sku_url, headers=_hdrs, timeout=10)
             if r and not _is_blocked(r.status_code, r.text):
+                # 优先：从 colorImages.initial 提取当前颜色的完整多图
+                imgs = _extract_color_initial_images(r.text, max_count=8)
+                if imgs:
+                    return imgs
+                # 兜底：从 #altImages 等DOM结构提取
                 sku_soup = BeautifulSoup(r.text, "html.parser")
-                imgs = _collect_main_images_from_soup(sku_soup, max_count=5)
+                imgs = _collect_main_images_from_soup(sku_soup, max_count=8)
                 if imgs:
                     return imgs
         except Exception:
@@ -676,11 +808,13 @@ def _fetch_sku_images(session, domain, sku_asin, headers):
         r2, _ = _get_with_retry(session, sku_url, max_attempts=1, base_timeout=8)
         if r2 is None:
             return []
+        imgs2 = _extract_color_initial_images(r2.text, max_count=8)
+        if imgs2:
+            return imgs2
         sku_soup = BeautifulSoup(r2.text, "html.parser")
-        return _collect_main_images_from_soup(sku_soup, max_count=5)
+        return _collect_main_images_from_soup(sku_soup, max_count=8)
     except Exception:
         return []
-
 
 def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_workers=6):
     """并发拉取多个 SKU 的图片，返回 {sku_asin: [img_url, ...]} 字典。"""
@@ -796,7 +930,9 @@ def fetch_amazon_product(asin, region="美国"):
         if br:
             res["brand"] = br.get_text(strip=True)
 
-        main_images = _collect_main_images_from_soup(s)
+        main_images = _extract_color_initial_images(page_html, max_count=8)
+        if not main_images:
+            main_images = _collect_main_images_from_soup(s)
         res["main_images"] = main_images
         if main_images:
             res["image_url"] = main_images[0]
@@ -888,7 +1024,8 @@ def fetch_amazon_product(asin, region="美国"):
             sku_image_cache = _fetch_all_sku_images_concurrently(
                 sess, domain, sku_asin_list, hdrs, max_workers=4
             )
-            sku_image_cache[asin] = fallback_images[:]
+            _cur_initial = _extract_color_initial_images(page_html, max_count=8)
+            sku_image_cache[asin] = _cur_initial if _cur_initial else fallback_images[:]
 
             for ca, color_name in _color_asins_from_html:
                 if not ca or ca in sku_seen:
@@ -906,7 +1043,7 @@ def fetch_amazon_product(asin, region="美国"):
                     "sku_asin": ca,
                     "sku_attributes": attr_text,
                     "dimension_basis": ["color"],
-                    "images": sku_images[:5]
+                    "images": sku_images[:8]
                 })
         else:
             # 路径 B：从 dimensionToAsinMap 构建 SKU 列表
@@ -930,7 +1067,8 @@ def fetch_amazon_product(asin, region="美国"):
             sku_image_cache = _fetch_all_sku_images_concurrently(
                 sess, domain, sku_asin_list, hdrs, max_workers=4
             )
-            sku_image_cache[asin] = fallback_images[:]
+            _cur_initial = _extract_color_initial_images(page_html, max_count=8)
+            sku_image_cache[asin] = _cur_initial if _cur_initial else fallback_images[:]
 
             sku_seen2 = set()
             if isinstance(dimension_map, dict):
@@ -963,7 +1101,7 @@ def fetch_amazon_product(asin, region="美国"):
                         "sku_asin": sku_asin,
                         "sku_attributes": sku_attr_text,
                         "dimension_basis": basis,
-                        "images": sku_images[:5]
+                        "images": sku_images[:8]
                     })
 
         if not sku_list:
