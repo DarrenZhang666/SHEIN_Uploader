@@ -375,32 +375,59 @@ def _clean_dimension_name(name):
 
 
 def _split_dimension_parts(raw_dimension_key):
-    txt = str(raw_dimension_key or "").replace(";", ",").replace("|", ",")
-    return [p.strip() for p in txt.split(",") if p.strip()]
+    """
+    分割维度键。
+    支持格式：
+    - "0_0" -> ['0', '0']（数字索引）
+    - "size=M_color=Red" -> ['size=M', 'color=Red']（键值对）
+    - "M,Red" -> ['M', 'Red']（逗号分隔）
+    """
+    txt = str(raw_dimension_key or "").strip()
+    
+    # 如果包含 = 或 :，则按 ; | , 分隔
+    if "=" in txt or ":" in txt:
+        parts = txt.replace(";", ",").replace("|", ",").split(",")
+        return [p.strip() for p in parts if p.strip()]
+    
+    # 否则按 _ 分隔（用于纯数字索引如 0_0）
+    parts = txt.replace(";", "_").replace("|", "_").split("_")
+    return [p.strip() for p in parts if p.strip()]
 
 
 def _normalize_sku_attrs(raw_dimension_key, dimension_names=None, value_display_map=None):
+    """
+    将原始维度键转换为可读的规格文本。
+    例如：0_0 -> "Size M / Color Red"
+    """
     parts = _split_dimension_parts(raw_dimension_key)
     if not parts:
         return ""
 
     value_display_map = value_display_map or {}
+    dimension_names = dimension_names or []
     values = []
+    
     for idx, p in enumerate(parts):
         dim_name = ""
         raw_val = p
 
+        # 尝试从键值对中提取
         if "=" in p:
             key, raw_val = p.split("=", 1)
             dim_name = _clean_dimension_name(key)
         elif ":" in p:
             key, raw_val = p.split(":", 1)
             dim_name = _clean_dimension_name(key)
-        elif isinstance(dimension_names, list) and idx < len(dimension_names):
-            dim_name = _clean_dimension_name(dimension_names[idx])
+        else:
+            # 纯数字索引：使用 dimension_names 和 value_display_map
+            raw_val = str(p).strip()
+            if idx < len(dimension_names):
+                dim_name = _clean_dimension_name(dimension_names[idx])
 
         raw_val = str(raw_val).strip()
         display_val = raw_val
+        
+        # 查找显示值
         if dim_name and dim_name in value_display_map:
             display_val = value_display_map[dim_name].get(raw_val, raw_val)
         elif "_index_" in value_display_map:
@@ -408,9 +435,13 @@ def _normalize_sku_attrs(raw_dimension_key, dimension_names=None, value_display_
 
         display_val = str(display_val).strip()
         if display_val:
-            values.append(display_val)
+            # 如果有维度名，则格式为 "DimName: Value"，否则只显示值
+            if dim_name:
+                values.append("{}: {}".format(dim_name.capitalize(), display_val))
+            else:
+                values.append(display_val)
 
-    return " / ".join(values)
+    return " / ".join(values) if values else ""
 
 
 def _extract_dimension_basis(raw_dimension_key, dimension_names=None):
@@ -796,6 +827,8 @@ def fetch_amazon_product(asin, region="美国"):
                 sku_asin = str(sku_asin).strip()
                 if not sku_asin or sku_asin in sku_seen2:
                     continue
+                
+                basis = _extract_dimension_basis(dim_key, dimension_names=dimension_names)
                 sku_seen2.add(sku_asin)
 
                 sku_images = sku_image_cache.get(sku_asin, [])
@@ -804,19 +837,13 @@ def fetch_amazon_product(asin, region="美国"):
                 if not sku_images:
                     sku_images = fallback_images[:]
 
-                basis = _extract_dimension_basis(dim_key, dimension_names=dimension_names)
                 sku_attr_text = _normalize_sku_attrs(dim_key, dimension_names=dimension_names, value_display_map=value_display_map) or "默认规格"
 
                 sku_list.append({
                     "sku_asin": sku_asin,
                     "sku_attributes": sku_attr_text,
                     "dimension_basis": basis,
-                    "images": sku_images[:5],
-                    "debug_variation": {
-                        "raw_dimension_key": str(dim_key),
-                        "dimension_names": list(dimension_names),
-                        "resolved_attributes": sku_attr_text
-                    }
+                    "images": sku_images[:5]
                 })
 
         if not sku_list:
