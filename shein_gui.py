@@ -837,6 +837,27 @@ class SheinApp(tk.Tk):
         if not sel: messagebox.showinfo("提示","请先勾选要抓取的 ASIN"); return
         if self._fetch_thread and self._fetch_thread.is_alive():
             messagebox.showinfo("提示","正在抓取中，请稍候..."); return
+        
+        # 分离已缓存和未缓存的 ASIN
+        need_fetch = []
+        already_cached = []
+        for asin in sel:
+            if asin in self.product_cache:
+                cached_info = self.product_cache[asin]
+                # 检查缓存是否有效（有标题且不是失败状态）
+                title = str(cached_info.get("title", ""))
+                if title and not title.startswith("获取失败") and not title.startswith("HTTP "):
+                    already_cached.append(asin)
+                else:
+                    need_fetch.append(asin)
+            else:
+                need_fetch.append(asin)
+        
+        # 如果没有需要抓取的商品，直接返回
+        if not need_fetch:
+            self.status_lbl.config(text="所有选中商品都已成功抓取过，无需重复抓取")
+            return
+        
         try:
             max_workers = int(self.fetch_workers.get())
         except Exception:
@@ -844,11 +865,18 @@ class SheinApp(tk.Tk):
         max_workers = max(1, min(20, max_workers))
         self.fetch_workers.set(str(max_workers))
         self.progress.start(12)
-        self.status_lbl.config(text="正在抓取 {} 个商品（{}线程）...".format(len(sel), max_workers))
-        self._fetch_thread=threading.Thread(target=self._worker,args=(sel,max_workers),daemon=True)
+        # 直接开始抓取，自动跳过已缓存的商品
+        if already_cached:
+            self.status_lbl.config(text="正在抓取 {} 个商品（{}线程，自动跳过 {} 个已缓存）...".format(
+                len(need_fetch), max_workers, len(already_cached)))
+        else:
+            self.status_lbl.config(text="正在抓取 {} 个商品（{}线程）...".format(len(need_fetch), max_workers))
+        self._fetch_thread=threading.Thread(target=self._worker,args=(need_fetch,max_workers,already_cached),daemon=True)
         self._fetch_thread.start()
 
-    def _worker(self,asins,max_workers=5):
+    def _worker(self,asins,max_workers=5,already_cached=None):
+        if already_cached is None:
+            already_cached = []
         total = len(asins)
         region = self.amazon_region.get()
         for asin in asins:
@@ -879,11 +907,18 @@ class SheinApp(tk.Tk):
                     self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_success"))
                 if self.current_asin == asin:
                     self.after(0, lambda inf=info: self._show(inf))
-        self.after(0,self._done)
+        self.after(0, lambda ac=already_cached: self._done(ac))
 
-    def _done(self):
+    def _done(self, already_cached=None):
+        if already_cached is None:
+            already_cached = []
         self.progress.stop()
-        self.status_lbl.config(text="抓取完成，共缓存 {} 个商品".format(len(self.product_cache)))
+        cached_count = len(already_cached)
+        total_cached = len(self.product_cache)
+        msg = "抓取完成，共缓存 {} 个商品".format(total_cached)
+        if cached_count > 0:
+            msg += "（其中 {} 个为已缓存）".format(cached_count)
+        self.status_lbl.config(text=msg)
         if self.current_asin and self.current_asin in self.product_cache:
             self._show(self.product_cache[self.current_asin])
 

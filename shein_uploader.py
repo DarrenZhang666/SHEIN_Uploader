@@ -2412,7 +2412,7 @@ class SheinPublisher:
                 # Cleanup temp files
                 for p in img_paths:
                     try:
-                        import os as _os; _os.remove(p)
+                        os.remove(p)
                     except Exception:
                         pass
             self.log("[OK] 细节图上传完成")
@@ -2440,7 +2440,7 @@ class SheinPublisher:
                 if fi is None:
                     self.log("[ERROR] 第 {} 张：未找到细节图 input".format(idx + 1))
                     try:
-                        import os as _os; _os.remove(img_path)
+                        os.remove(img_path)
                     except Exception:
                         pass
                     continue
@@ -2457,7 +2457,7 @@ class SheinPublisher:
                 except Exception as e:
                     self.log("[ERROR] 第 {} 张 send_keys 失败: {}".format(idx + 1, str(e)[:60]))
                 try:
-                    import os as _os; _os.remove(img_path)
+                    os.remove(img_path)
                 except Exception:
                     pass
             except Exception as e:
@@ -2671,7 +2671,6 @@ class SheinPublisher:
                 elapsed = timeout - (deadline - time.time())
                 if 1.5 < elapsed < 3.5:
                     try:
-                        import os as _os
                         driver.save_screenshot(_os.path.join(_os.path.expanduser("~"), "Desktop", "shein_after_upload.png"))
                         # 保存此时 HTML 中所有 span 的信息
                         info_txt = driver.execute_script("""
@@ -2966,8 +2965,30 @@ class SheinPublisher:
                     pass
             return False
         def _goto_publish():
-            # 确保先到达首页
-            self.log("导航到首页...")
+            """
+            导航到商品发布页面。
+            优先检查是否已在发布页面，避免重复导航。
+            """
+            current_url = driver.current_url
+            # 检查是否已在发布页面
+            if "spmc" in current_url and "followsales" in current_url and "commodities" in current_url:
+                self.log("已在商品发布页面，跳过导航")
+                return True
+            
+            # 直接导航到发布页面
+            self.log("直接导航到商品发布页面...")
+            try:
+                driver.get(self.PUBLISH_URL)
+                time.sleep(3)
+                cur = driver.current_url
+                if "spmc" in cur and "followsales" in cur:
+                    self.log("已直接打开商品发布页")
+                    return True
+            except Exception as e:
+                self.log("直接导航失败: {}".format(e))
+            
+            # 备用方案：从首页导航
+            self.log("尝试从首页导航...")
             driver.get("https://www.geiwohuo.com/#/oversea-home")
             time.sleep(4)
             original_handles = set(driver.window_handles)
@@ -3013,6 +3034,7 @@ class SheinPublisher:
                     continue
             self.log("未找到「商品发布」子菜单")
             return False
+        
         if not _goto_publish():
             raise Exception(
                 "无法导航到商品发布页面。\n"
@@ -3371,7 +3393,6 @@ class SheinPublisher:
                     if not file_inputs:
                         self.log("第 {} 张：未找到 file input，跳过".format(idx + 1))
                         try:
-                            import os as _os
                             _os.remove(img_path)
                         except Exception:
                             pass
@@ -3399,7 +3420,6 @@ class SheinPublisher:
                         self._handle_crop_dialog()
                         time.sleep(1.5)
                     try:
-                        import os as _os
                         _os.remove(img_path)
                     except Exception:
                         pass
