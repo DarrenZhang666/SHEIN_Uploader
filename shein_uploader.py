@@ -677,6 +677,7 @@ class SheinPublisher:
             self.log("[DEBUG] 开始填写商品基础信息...")
             # 1. 填写商品标题(英语)
             self.log("[DEBUG] 填写商品标题(英语)...")
+            time.sleep(3)  # 等待页面完全加载
             title = product_info.get("title", "")
             if title:
                 # 查找"商品标题(英语)"对应的输入框
@@ -775,6 +776,7 @@ class SheinPublisher:
                     self.log("[DEBUG] 填写链接失败: {}".format(str(e)[:40]))
             # 5. 填写货号（XYZ-{ASIN}）
             self.log("[DEBUG] 填写货号...")
+            time.sleep(3)  # 等待页面完全加载
             asin = product_info.get("asin", "")
             if asin:
                 model_number = "XYZ-{}".format(asin)
