@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """GUI layer for SHEIN app."""
 
 from shein_main import *
@@ -925,7 +925,7 @@ class SheinApp(tk.Tk):
                 wraplength=700,justify="left",anchor="w").pack(fill="x",padx=24,pady=4)
         tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=10)
         self._btn(self.df,"发布此商品到 SHEIN",ACCENT,
-            lambda i=info:self._publish(i)).pack(anchor="w",padx=20,pady=(0,16))
+            lambda i=info:self._publish_direct(i)).pack(anchor="w",padx=20,pady=(0,16))
         if info.get("image_url"):
             threading.Thread(target=self._load_img,args=(info["image_url"],),daemon=True).start()
         
@@ -1084,6 +1084,54 @@ class SheinApp(tk.Tk):
 
 
 
+
+    def _publish_direct(self, product_info):
+        """点击'发布此商品'按钮后，直接跳转到发布页面并开始发布流程。"""
+        if product_info is None or not product_info.get('image_url'):
+            messagebox.showwarning('提示', '商品信息不完整，请重新抓取')
+            return
+        
+        self.current_asin = product_info.get('asin')
+        self._publish_session_id += 1
+        current_session_id = self._publish_session_id
+        self._stop_publish = False
+        try:
+            if self._shein_publisher is not None:
+                setattr(self._shein_publisher, '_stop_publish', False)
+        except Exception:
+            pass
+        
+        self.status_lbl.config(text='准备打开商品发布页...')
+        
+        def _init_and_publish():
+            try:
+                if self._shein_publisher is not None and self._shein_publisher.is_alive():
+                    self.status_lbl.config(text='复用当前浏览器，跳转到发布页...')
+                    publish_url = "https://sso.geiwohuo.com/#/spmc/commodities-category/followsales-pro/list?auth_login_token=994120f4fc4b4be5af3917e601a648e7&externalSystem=spmp"
+                    self._shein_publisher.driver.get(publish_url)
+                    time.sleep(3)
+                    self.status_lbl.config(text='✓ 已跳转到发布页面，开始上传商品...')
+                    threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
+                    return
+                
+                pub = SheinPublisher(log_cb=self._pub_log)
+                self.status_lbl.config(text='正在连接或启动浏览器...')
+                pub.start_browser()
+                self._shein_publisher = pub
+                self.status_lbl.config(text='浏览器已就绪，跳转到发布页...')
+                
+                publish_url = "https://sso.geiwohuo.com/#/spmc/commodities-category/followsales-pro/list?auth_login_token=994120f4fc4b4be5af3917e601a648e7&externalSystem=spmp"
+                pub.driver.get(publish_url)
+                time.sleep(3)
+                self.status_lbl.config(text='✓ 已跳转到发布页面，开始上传商品...')
+                threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
+            except Exception as e:
+                self.status_lbl.config(text='操作失败: ' + str(e)[:40])
+                self._pub_log('操作失败: ' + str(e))
+                self.after(0, lambda err=str(e): messagebox.showerror('失败', err[:100]))
+        
+        threading.Thread(target=_init_and_publish, daemon=True).start()
+
 # ── 品类选择对话框 ──────────────────────────
 class CategoryDialog(tk.Toplevel):
     def __init__(self, parent):
@@ -1155,6 +1203,7 @@ class CategoryDialog(tk.Toplevel):
 if __name__ == '__main__':
     app = SheinApp()
     app.mainloop()
+
 
 
 
