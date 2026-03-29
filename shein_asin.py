@@ -518,6 +518,31 @@ def _extract_color_images_map(page_text):
     return result
 
 
+def _extract_color_only_asins(soup):
+    """
+    从亚马逊商品页面直接解析 Color 维度的 SKU ASIN 列表。
+    查找 id='inline-twister-row-color_name' 下所有 <li data-asin> 元素。
+    返回有序的 [(asin, color_name), ...] 列表，找不到则返回空列表。
+    """
+    result = []
+    seen = set()
+    color_row = soup.select_one(
+        "#inline-twister-row-color_name, "
+        "[id*='twister'][id*='color']"
+    )
+    if color_row:
+        for li in color_row.select("li[data-asin]"):
+            asin_val = li.get("data-asin", "").strip()
+            if not asin_val or asin_val in seen:
+                continue
+            seen.add(asin_val)
+            # 尝试获取颜色名称（img alt 属性）
+            img = li.select_one("img[alt]")
+            color_name = img["alt"].strip() if img and img.get("alt") else ""
+            result.append((asin_val, color_name))
+    return result
+
+
 def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=5):
     if not color_image_map:
         return []
@@ -799,52 +824,99 @@ def fetch_amazon_product(asin, region="美国"):
         dimension_names, value_display_map = _build_variation_value_maps(page_html)
         fallback_images = main_images[:5] if main_images else ([res["image_url"]] if res.get("image_url") else [])
 
-        # 先收集所有需要拉图的非主 ASIN
-        sku_asin_list = []
-        if isinstance(dimension_map, dict):
-            for dim_key, sku_asin in dimension_map.items():
-                if not sku_asin:
-                    continue
-                sku_asin = str(sku_asin).strip()
-                if not sku_asin or sku_asin in sku_seen:
-                    continue
-                sku_seen.add(sku_asin)
-                if sku_asin != asin:
-                    sku_asin_list.append(sku_asin)
+        # 检测是否同时存在 color 和 size 两个维度
+        # 若同时存在，则只爬取 color 维度下的 SKU，忽略 size
+        _all_dim_names_lower = [str(d).lower() for d in dimension_names]
+        _has_color = any("color" in d or "colour" in d for d in _all_dim_names_lower)
+        _has_size  = any("size" in d for d in _all_dim_names_lower)
+        _color_only_mode = _has_color and _has_size
 
-        # 并发拉取所有 SKU 图片
-        sku_image_cache = _fetch_all_sku_images_concurrently(
-            sess, domain, sku_asin_list, hdrs, max_workers=4
-        )
-        sku_image_cache[asin] = fallback_images[:]
+        # 优先从 HTML 直接解析 color 维度的 ASIN（#inline-twister-row-color_name）
+        _color_asins_from_html = _extract_color_only_asins(s) if _color_only_mode else []
 
-        # 重新遍历组装 sku_list
-        sku_seen2 = set()
-        if isinstance(dimension_map, dict):
-            for dim_key, sku_asin in dimension_map.items():
-                if not sku_asin:
-                    continue
-                sku_asin = str(sku_asin).strip()
-                if not sku_asin or sku_asin in sku_seen2:
-                    continue
-                
-                basis = _extract_dimension_basis(dim_key, dimension_names=dimension_names)
-                sku_seen2.add(sku_asin)
+        if _color_only_mode and _color_asins_from_html:
+            # 路径 A：HTML 解析到 color ASIN 列表，直接使用
+            sku_asin_list = [a for a, _ in _color_asins_from_html if a and a != asin]
+            sku_image_cache = _fetch_all_sku_images_concurrently(
+                sess, domain, sku_asin_list, hdrs, max_workers=4
+            )
+            sku_image_cache[asin] = fallback_images[:]
 
-                sku_images = sku_image_cache.get(sku_asin, [])
+            for ca, color_name in _color_asins_from_html:
+                if not ca or ca in sku_seen:
+                    continue
+                sku_seen.add(ca)
+                sku_images = sku_image_cache.get(ca, [])
                 if not sku_images:
-                    sku_images = _pick_images_from_color_map(color_image_map, dim_key, sku_asin, max_count=5)
+                    sku_images = _pick_images_from_color_map(
+                        color_image_map, color_name, ca, max_count=5
+                    )
                 if not sku_images:
                     sku_images = fallback_images[:]
-
-                sku_attr_text = _normalize_sku_attrs(dim_key, dimension_names=dimension_names, value_display_map=value_display_map) or "默认规格"
-
+                attr_text = "Color: {}".format(color_name) if color_name else "默认规格"
                 sku_list.append({
-                    "sku_asin": sku_asin,
-                    "sku_attributes": sku_attr_text,
-                    "dimension_basis": basis,
+                    "sku_asin": ca,
+                    "sku_attributes": attr_text,
+                    "dimension_basis": ["color"],
                     "images": sku_images[:5]
                 })
+        else:
+            # 路径 B：从 dimensionToAsinMap 构建 SKU 列表
+            # color_only_mode 时只保留含 color 维度的条目
+            sku_asin_list = []
+            if isinstance(dimension_map, dict):
+                for dim_key, sku_asin in dimension_map.items():
+                    if not sku_asin:
+                        continue
+                    sku_asin = str(sku_asin).strip()
+                    if not sku_asin or sku_asin in sku_seen:
+                        continue
+                    if _color_only_mode:
+                        basis = _extract_dimension_basis(dim_key, dimension_names=dimension_names)
+                        if not any("color" in b or "colour" in b for b in basis):
+                            continue
+                    sku_seen.add(sku_asin)
+                    if sku_asin != asin:
+                        sku_asin_list.append(sku_asin)
+
+            sku_image_cache = _fetch_all_sku_images_concurrently(
+                sess, domain, sku_asin_list, hdrs, max_workers=4
+            )
+            sku_image_cache[asin] = fallback_images[:]
+
+            sku_seen2 = set()
+            if isinstance(dimension_map, dict):
+                for dim_key, sku_asin in dimension_map.items():
+                    if not sku_asin:
+                        continue
+                    sku_asin = str(sku_asin).strip()
+                    if not sku_asin or sku_asin in sku_seen2:
+                        continue
+                    basis = _extract_dimension_basis(dim_key, dimension_names=dimension_names)
+                    if _color_only_mode:
+                        if not any("color" in b or "colour" in b for b in basis):
+                            continue
+                    sku_seen2.add(sku_asin)
+
+                    sku_images = sku_image_cache.get(sku_asin, [])
+                    if not sku_images:
+                        sku_images = _pick_images_from_color_map(
+                            color_image_map, dim_key, sku_asin, max_count=5
+                        )
+                    if not sku_images:
+                        sku_images = fallback_images[:]
+
+                    sku_attr_text = _normalize_sku_attrs(
+                        dim_key, dimension_names=dimension_names,
+                        value_display_map=value_display_map
+                    ) or "默认规格"
+
+                    sku_list.append({
+                        "sku_asin": sku_asin,
+                        "sku_attributes": sku_attr_text,
+                        "dimension_basis": basis,
+                        "images": sku_images[:5]
+                    })
 
         if not sku_list:
             sku_list.append({
