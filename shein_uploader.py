@@ -1230,7 +1230,7 @@ class SheinPublisher:
                 time.sleep(0.3)
             except Exception as _we:
                 self.log("[DEBUG] 含包装重量填写失败: {}".format(str(_we)[:60]))
-            # 步骤2: 点击“编辑库存”，在表格行的「请输入」库存 input 中填200，确定
+            # 步骤2: 点击"编辑库存"，批量填写库存200，确认
             try:
                 self.log("[DEBUG] 处理库存...")
                 edit_stock_btn = None
@@ -1260,42 +1260,81 @@ class SheinPublisher:
                     except Exception:
                         self.log("[DEBUG] 库存维护对话框等待超时")
                     time.sleep(0.5)
-                    stock_filled = False
+                    # 在批量填写区域的库存输入框填入200
+                    batch_filled = False
+                    # 在批量填写区域的库存输入框填入200
+                    batch_filled = False
                     try:
-                        # 精确定位: class 含 stockInfo_ 的库存 input
-                        row_inps = driver.find_elements(By.XPATH,
-                            "//*[contains(@class,'stockInfo_')]//input[@type='text']")
-                        if not row_inps:
-                            row_inps = driver.find_elements(By.XPATH,
-                                "//*[contains(@class,'warehouseListBox')]//input[@type='text']")
-                        self.log("[DEBUG] 找到库存行 input 数量: {}".format(len(row_inps)))
-                        for row_inp in row_inps:
-                            try:
-                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row_inp)
-                                driver.execute_script("arguments[0].focus();", row_inp)
-                                time.sleep(0.2)
-                                # 使用 React 原生 setter 设定并触发事件
-                                driver.execute_script("""
-                                    var inp = arguments[0];
-                                    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                                    setter.call(inp, '200');
-                                    inp.dispatchEvent(new Event('input', {bubbles:true}));
-                                    inp.dispatchEvent(new Event('change', {bubbles:true}));
-                                    inp.dispatchEvent(new Event('blur', {bubbles:true}));
-                                """, row_inp)
-                                time.sleep(0.8)
-                                # 验证小: 读回属性确认填入成功
-                                val = driver.execute_script("return arguments[0].value;", row_inp)
-                                self.log("[DEBUG] 库存 input 当前値: {}".format(val))
-                                stock_filled = True
-                            except Exception as e:
-                                self.log("[DEBUG] 行 input 填写失败: {}".format(str(e)[:40]))
+                        # 优先找弈窗顶部的批量操作行（通常在表格上方）
+                        batch_inps = driver.find_elements(By.XPATH,
+                            "//div[contains(@class,'so-modal')]//div[contains(@class,'batch') or contains(@class,'Batch') or contains(@class,'bulkFill') or contains(@class,'batchFill') or contains(@class,'header')]//input[@type='text']")
+                        if not batch_inps:
+                            # 备用：找弈窗内所有 input，但排除表格数据行（通常在 tr 内）
+                            batch_inps = driver.find_elements(By.XPATH,
+                                "//div[contains(@class,'so-modal')]//input[@type='text'][not(ancestor::tr)]")
+                        self.log("[DEBUG] 批量填写 input 数量: {}".format(len(batch_inps)))
+                        if batch_inps:
+                            batch_inp = batch_inps[0]
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", batch_inp)
+                            time.sleep(0.2)
+                            # 先清空再填入
+                            driver.execute_script("""
+                                var inp = arguments[0];
+                                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                setter.call(inp, '');
+                                inp.dispatchEvent(new Event('input', {bubbles:true}));
+                                inp.dispatchEvent(new Event('change', {bubbles:true}));
+                            """, batch_inp)
+                            time.sleep(0.2)
+                            # 再填入 200
+                            driver.execute_script("""
+                                var inp = arguments[0];
+                                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                setter.call(inp, '200');
+                                inp.dispatchEvent(new Event('input', {bubbles:true}));
+                                inp.dispatchEvent(new Event('change', {bubbles:true}));
+                            """, batch_inp)
+                            time.sleep(0.3)
+                            val = driver.execute_script("return arguments[0].value;", batch_inp)
+                            self.log("[DEBUG] 批量填写 input 当前値: {}".format(val))
+                            batch_filled = True
                     except Exception as e:
-                        self.log("[DEBUG] 库存 input 定位失败: {}".format(str(e)[:50]))
-                    if not stock_filled:
-                        self.log("[WARN] 库存 input 未找到")
+                        self.log("[DEBUG] 批量填写 input 定位失败: {}".format(str(e)[:60]))
+                    # 点击「批量填写」按鈕
+                    if batch_filled:
+                        try:
+                            batch_btn = None
+                            # 精确定位：弈窗内含「批量填写」文本的按鈕
+                            for _b in driver.find_elements(By.XPATH,
+                                    "//div[contains(@class,'so-modal')]//button"):
+                                _text = (_b.text or '').strip()
+                                if '批量填写' in _text or _text == '批量填写':
+                                    if _b.is_displayed():
+                                        batch_btn = _b
+                                        break
+                            if batch_btn:
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", batch_btn)
+                                time.sleep(0.2)
+                                driver.execute_script("arguments[0].click();", batch_btn)
+                                self.log("[OK] 已点击「批量填写」")
+                                time.sleep(1)
+                            else:
+                                self.log("[WARN] 未找到「批量填写」按鈕，尝试备用 XPath")
+                                # 备用 XPath
+                                try:
+                                    batch_btn2 = driver.find_element(By.XPATH,
+                                        "//div[contains(@class,'so-modal')]//button[contains(., '批量填写')]")
+                                    driver.execute_script("arguments[0].click();", batch_btn2)
+                                    self.log("[OK] 已点击「批量填写」(备用)")
+                                    time.sleep(1)
+                                except Exception:
+                                    self.log("[WARN] 备用 XPath 也未找到「批量填写」按鈕")
+                        except Exception as e:
+                            self.log("[WARN] 点击批量填写失败: {}".format(str(e)[:60]))
+                    else:
+                        self.log("[WARN] 批量填写 input 未找到，跳过批量填写")
                     time.sleep(0.5)
-                    # 点击确定按鈕关闭对话框
+                    # 点击确认按鈕关闭对话框
                     try:
                         confirm_btn = driver.find_element(By.XPATH,
                             "//div[contains(@class,'so-modal-footer') or contains(@class,'so-card-footer')]"
