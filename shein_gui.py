@@ -994,6 +994,10 @@ class SheinApp(tk.Tk):
         sku_list = info.get("sku_list", [])
         tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=10)
         tk.Label(self.df,text="商品详情页 · SKU 信息（每个SKU图片前5张，Ctrl+点击打开）",font=("Segoe UI",11,"bold"),fg=ACCENT2,bg=BG_PANEL).pack(anchor="w",padx=20)
+        other_specs = info.get("other_specs", {})
+        if other_specs:
+            parts = ["{}：{}".format(k, "，".join(str(v) for v in vals)) for k, vals in other_specs.items()]
+            tk.Label(self.df,text="其他规格：" + "  /  ".join(parts),font=("Segoe UI",10),fg=TEXT_SUB,bg=BG_PANEL,anchor="w",wraplength=700,justify="left").pack(anchor="w",padx=24,pady=(0,6))
         if sku_list:
             for idx, sku in enumerate(sku_list):
                 sku_asin = sku.get("sku_asin", "")

@@ -518,6 +518,47 @@ def _extract_color_images_map(page_text):
     return result
 
 
+
+def _extract_non_color_specs(soup):
+    """
+    从亚马逊商品页面提取非 color 维度的所有规格选项。
+    返回 {"size": ["65L", "96L"], ...} 格式的字典。
+    """
+    result = {}
+    # 查找所有 inline-twister-row-XXX_name 区块，排除 color
+    for row in soup.select("[id^='inline-twister-row-']"):
+        row_id = row.get("id", "")
+        if "color" in row_id.lower() or "colour" in row_id.lower():
+            continue
+        # 提取维度名称
+        dim_label_el = row.select_one(".a-color-secondary")
+        if dim_label_el:
+            dim_name = dim_label_el.get_text(strip=True).rstrip(":：").strip()
+        else:
+            # 从 id 推断：inline-twister-row-size_name -> size
+            dim_name = row_id.replace("inline-twister-row-", "").replace("_name", "").capitalize()
+        if not dim_name:
+            continue
+        # 收集文字选项值
+        values = []
+        for li in row.select("li[data-asin]"):
+            # 文字型 swatch
+            txt_el = li.select_one(".swatch-title-text-display")
+            if txt_el:
+                v = txt_el.get_text(strip=True)
+                if v and v not in values:
+                    values.append(v)
+                continue
+            # 图片型 swatch（img alt）
+            img_el = li.select_one("img[alt]")
+            if img_el:
+                v = img_el.get("alt", "").strip()
+                if v and v not in values:
+                    values.append(v)
+        if values:
+            result[dim_name] = values
+    return result
+
 def _extract_color_only_asins(soup):
     """
     从亚马逊商品页面直接解析 Color 维度的 SKU ASIN 列表。
@@ -678,7 +719,7 @@ def fetch_amazon_product(asin, region="美国"):
     res = {"asin": asin, "title": "获取失败", "price": "N/A", "rating": "N/A",
            "reviews": "N/A", "brand": "N/A", "image_url": "",
            "description": "", "features": [], "url": url,
-           "description_images": [], "main_images": [], "sku_list": []}
+           "description_images": [], "main_images": [], "sku_list": [], "other_specs": {}}
     try:
         # 三层抓取策略：cloudscraper > requests > Selenium
         # 第1层：cloudscraper（内置 JS 挑战绕过）
@@ -830,6 +871,13 @@ def fetch_amazon_product(asin, region="美国"):
         _has_color = any("color" in d or "colour" in d for d in _all_dim_names_lower)
         _has_size  = any("size" in d for d in _all_dim_names_lower)
         _color_only_mode = _has_color and _has_size
+
+        # 提取「其他规格」：color_only_mode 下，收集非 color 维度的所有选项值
+        # 格式：{"size": ["65L", "96L"], ...}
+        other_specs = {}
+        if _color_only_mode:
+            other_specs = _extract_non_color_specs(s)
+        res["other_specs"] = other_specs
 
         # 优先从 HTML 直接解析 color 维度的 ASIN（#inline-twister-row-color_name）
         _color_asins_from_html = _extract_color_only_asins(s) if _color_only_mode else []
