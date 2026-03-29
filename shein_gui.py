@@ -509,7 +509,7 @@ class SheinApp(tk.Tk):
             self._pub_log('[STOP] 检测到新上品会话，旧线程退出')
             return True
         if self._is_publish_stopped():
-            self._pub_log('[STOP] 用户点击停止，上品已中断')
+            self._pub_log('[STOP] 用户点击停止，抓取已中断')
             self.after(0, lambda s=status: self.status_lbl.config(text=s))
             return True
         return False
@@ -838,6 +838,9 @@ class SheinApp(tk.Tk):
         if self._fetch_thread and self._fetch_thread.is_alive():
             messagebox.showinfo("提示","正在抓取中，请稍候..."); return
         
+        # 重置停止标志，允许新的抓取任务开始
+        self._stop_publish = False
+        
         # 分离已缓存和未缓存的 ASIN
         need_fetch = []
         already_cached = []
@@ -881,7 +884,10 @@ class SheinApp(tk.Tk):
         region = self.amazon_region.get()
         for asin in asins:
             # 抓取进行中：黄色
-            self.after(0, lambda a=asin: self._set_asin_status(a, "fetching"))
+            try:
+                self.after(0, lambda a=asin: self._set_asin_status(a, "fetching"))
+            except RuntimeError:
+                pass  # 主线程已退出
 
         def _fetch_one(asin):
             try:
@@ -897,22 +903,42 @@ class SheinApp(tk.Tk):
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_fetch_one, asin) for asin in asins]
             for fut in as_completed(futures):
-                asin, info, is_fail = fut.result()
-                self.product_cache[asin] = info
-                done += 1
-                self.after(0, lambda d=done, t=total, a=asin: self.status_lbl.config(text="抓取完成 {}/{}：{}".format(d, t, a)))
-                if is_fail:
-                    self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_fail"))
-                else:
-                    self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_success"))
-                if self.current_asin == asin:
-                    self.after(0, lambda inf=info: self._show(inf))
-        self.after(0, lambda ac=already_cached: self._done(ac))
+                try:
+                    asin, info, is_fail = fut.result()
+                    self.product_cache[asin] = info
+                    done += 1
+                    try:
+                        self.after(0, lambda d=done, t=total, a=asin: self.status_lbl.config(text="抓取完成 {}/{}：{}".format(d, t, a)))
+                    except RuntimeError:
+                        pass
+                    if is_fail:
+                        try:
+                            self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_fail"))
+                        except RuntimeError:
+                            pass
+                    else:
+                        try:
+                            self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_success"))
+                        except RuntimeError:
+                            pass
+                    if self.current_asin == asin:
+                        try:
+                            self.after(0, lambda inf=info: self._show(inf))
+                        except RuntimeError:
+                            pass
+                except Exception:
+                    pass
+        try:
+            self.after(0, lambda ac=already_cached: self._done(ac))
+        except RuntimeError:
+            pass  # 主线程已退出
 
     def _done(self, already_cached=None):
         if already_cached is None:
             already_cached = []
         self.progress.stop()
+        # 清理线程对象，允许下次抓取
+        self._fetch_thread = None
         cached_count = len(already_cached)
         total_cached = len(self.product_cache)
         msg = "抓取完成，共缓存 {} 个商品".format(total_cached)
@@ -1085,8 +1111,10 @@ class SheinApp(tk.Tk):
                     setattr(stopped_pub, '_stop_publish', True)
             except Exception:
                 pass
+            # 同时清理抓取线程
+            self._fetch_thread = None
             self.progress.stop()
-            self.status_lbl.config(text="正在停止上品，等待当前步骤结束...")
+            self.status_lbl.config(text="停止抓取信息...")
 
             def _go_home_after_stop():
                 time.sleep(1.0)
@@ -1109,7 +1137,7 @@ class SheinApp(tk.Tk):
                     if stop_session_id != (self._publish_session_id - 1):
                         return
                     pub.driver.get("https://www.geiwohuo.com/#/oversea-home")
-                    self.after(0, lambda: self.status_lbl.config(text="已停止上品，已清理弹窗并返回主页"))
+                    self.after(0, lambda: self.status_lbl.config(text="已停止抓取信息，已清理弹窗并返回主页"))
                 except Exception as e:
                     self._pub_log("[STOP] 返回主页失败: {}".format(str(e)[:60]))
 
