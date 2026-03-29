@@ -897,6 +897,12 @@ class SheinPublisher:
                 self._handle_main_spec_if_needed(product_info)
             except Exception as e:
                 self.log("[DEBUG] 主规格处理步骤异常，继续后续流程: {}".format(str(e)[:60]))
+            # 6.5 处理其他规格（如 size）
+            self.log("[DEBUG] 处理其他规格...")
+            try:
+                self._handle_other_specs(product_info)
+            except Exception as e:
+                self.log("[DEBUG] 其他规格处理步骤异常，继续后续流程: {}".format(str(e)[:60]))
             # 7. 上传主规格图和细节图（非阻塞：失败不影响后续“规格及供应信息”流程）
             self.log("[DEBUG] 上传商品图片...")
             try:
@@ -2133,6 +2139,9 @@ class SheinPublisher:
                         attrs = str(sku.get("sku_attributes") or "").strip()
                         if attrs and attrs != "默认规格":
                             first_part = attrs.split("/")[0].strip()
+                            # Strip leading "Key: " prefix (e.g. "Color: black" -> "black")
+                            if ":" in first_part:
+                                first_part = first_part.split(":", 1)[1].strip()
                             if first_part and first_part.lower() not in seen:
                                 seen.add(first_part.lower())
                                 values.append(first_part)
@@ -2211,6 +2220,343 @@ class SheinPublisher:
                 self.log("[WARN] 主规格値全部填写失败")
         except Exception as e:
             self.log("[WARN] 主规格处理失败: {}".format(str(e)[:100]))
+
+    def _handle_other_specs(self, product_info=None):
+        """处理其他规格：选规格类型，依次填入规格值。"""
+        driver = self.driver
+        try:
+            if not isinstance(product_info, dict):
+                return
+            other_specs = product_info.get("other_specs") or {}
+            if not other_specs:
+                self.log("[DEBUG] 其他规格：无数据，跳过")
+                return
+            self.log("[DEBUG] 其他规格数据: {}".format(other_specs))
+            other_spec_box = None
+            for xp in [
+                "//div[contains(@class,'so-form-item') and contains(@class,'other_spec')]",
+                "//div[contains(@class,'other_spec')]",
+            ]:
+                try:
+                    for box in driver.find_elements(By.XPATH, xp):
+                        if box.is_displayed():
+                            other_spec_box = box
+                            break
+                except Exception:
+                    pass
+                if other_spec_box:
+                    break
+            if other_spec_box is None:
+                self.log("[WARN] 其他规格：未找到区域，跳过")
+                return
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", other_spec_box)
+                time.sleep(0.3)
+            except Exception:
+                pass
+            spec_content = None
+            try:
+                for c in other_spec_box.find_elements(By.XPATH,
+                        ".//div[contains(@class,'specContent') or contains(@class,'spmp_style__specContent')]"):
+                    if c.is_displayed():
+                        spec_content = c
+                        break
+            except Exception:
+                pass
+            if spec_content is None:
+                spec_content = other_spec_box
+            def _osp_open(inner):
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inner)
+                except Exception:
+                    pass
+                time.sleep(0.2)
+                for _ in range(2):
+                    try:
+                        inner.click()
+                        break
+                    except Exception:
+                        try:
+                            driver.execute_script("arguments[0].click();", inner)
+                            break
+                        except Exception:
+                            pass
+                time.sleep(0.3)
+            def _osp_opts(data_id):
+                if not data_id:
+                    return []
+                try:
+                    boxes = driver.find_elements(By.XPATH,
+                        "//div[contains(@class,'so-list') and @data-id='{0}' and "
+                        "(contains(@class,'so-hidable-show') or not(contains(@style,'display: none')))]".format(data_id))
+                    if not boxes:
+                        boxes = driver.find_elements(By.XPATH,
+                            "//div[contains(@class,'so-list') and @data-id='{0}']".format(data_id))
+                    cands = []
+                    for b in boxes:
+                        try:
+                            els = b.find_elements(By.XPATH,
+                                ".//label[contains(@class,'so-select-option') or contains(@class,'so-checkinput')]")
+                            if not els:
+                                els = b.find_elements(By.XPATH,
+                                    ".//*[contains(@class,'so-select-option') or contains(@class,'so-option')]")
+                            cands.extend(els)
+                        except Exception:
+                            continue
+                    opts = []
+                    for el in cands:
+                        try:
+                            if not el.is_displayed():
+                                continue
+                            txt = (el.text or "").strip().replace("\n", " ")
+                            if not txt or txt in ("请选择", "请选择或自定义", "无数据") or len(txt) > 80:
+                                continue
+                            opts.append(el)
+                        except Exception:
+                            continue
+                    return opts
+                except Exception:
+                    return []
+            def _osp_click(opt):
+                try:
+                    driver.execute_script("arguments[0].click();", opt)
+                    return True
+                except Exception:
+                    pass
+                try:
+                    opt.click()
+                    return True
+                except Exception:
+                    pass
+                try:
+                    r = opt.find_element(By.XPATH, ".//input[@type='radio' or @type='checkbox']")
+                    driver.execute_script("arguments[0].click();", r)
+                    return True
+                except Exception:
+                    return False
+            def _osp_norm(txt):
+                t = (txt or "").strip().lower().replace(" ", "")
+                t = t.replace("colour", "color").replace("颜色", "color").replace("色彩", "color")
+                t = t.replace("尺寸", "size").replace("大小", "size")
+                return t
+            # Step1: 选规格类型
+            spec_type_key = list(other_specs.keys())[0]
+            spec_values   = list(other_specs.values())[0]
+            self.log("[DEBUG] 其他规格类型={} 值={}".format(spec_type_key, spec_values))
+            attr_inner = None
+            for xp in [
+                ".//div[contains(@class,'specAttrSelect') or contains(@class,'spmp_style__specAttrSelect')]//div[contains(@class,'so-select-inner') and @data-id]",
+                ".//div[contains(@class,'so-select-inner') and @data-id][1]",
+            ]:
+                try:
+                    for el in spec_content.find_elements(By.XPATH, xp):
+                        if el.is_displayed():
+                            attr_inner = el
+                            break
+                except Exception:
+                    pass
+                if attr_inner:
+                    break
+            if attr_inner is None:
+                self.log("[WARN] 其他规格：未找到类型下拉")
+                return
+            already = ""
+            try:
+                sp = attr_inner.find_element(By.XPATH,
+                    ".//span[contains(@class,'so-select-input') or contains(@class,'renderItemEllipsis')]")
+                already = (sp.text or "").strip()
+            except Exception:
+                pass
+            if already and _osp_norm(already) == _osp_norm(spec_type_key):
+                self.log("[OK] 其他规格类型已预选: {}".format(already))
+            else:
+                did = (attr_inner.get_attribute("data-id") or "").strip()
+                opts = []
+                for _ in range(5):
+                    _osp_open(attr_inner)
+                    opts = _osp_opts(did)
+                    if opts:
+                        break
+                    time.sleep(0.35)
+                if not opts:
+                    self.log("[WARN] 其他规格：类型下拉无选项")
+                    return
+                tgt = None
+                for o in opts:
+                    txt = (o.text or "").strip().replace("\n", " ")
+                    if _osp_norm(txt) == _osp_norm(spec_type_key) or _osp_norm(spec_type_key) in _osp_norm(txt):
+                        tgt = o
+                        break
+                if tgt is None:
+                    tgt = opts[0]
+                picked = (tgt.text or "").strip().replace("\n", " ")
+                if _osp_click(tgt):
+                    self.log("[OK] 其他规格类型已选: {}".format(picked))
+                    time.sleep(0.5)
+                else:
+                    self.log("[WARN] 其他规格：类型点击失败")
+                    return
+            # Step2: 依次填入规格值
+            used_dids = set()
+            for val_idx, spec_val in enumerate(spec_values):
+                spec_val = str(spec_val).strip()
+                if not spec_val:
+                    continue
+                self.log("[DEBUG] 其他规格值[{}]: {}".format(val_idx + 1, spec_val))
+                val_inner = None
+                for _retry in range(8):
+                    cands = []
+                    for xp in [
+                        ".//div[contains(@class,'specValues') or contains(@class,'spmp_style__specValues')]//div[contains(@class,'so-select-inner') and @data-id]",
+                        ".//div[contains(@class,'so-select-inner') and @data-id]",
+                    ]:
+                        try:
+                            for el in spec_content.find_elements(By.XPATH, xp):
+                                if el.is_displayed():
+                                    cands.append(el)
+                        except Exception:
+                            pass
+                        if cands:
+                            break
+                    for c in cands:
+                        try:
+                            d = (c.get_attribute("data-id") or "").strip()
+                            if d and d not in used_dids:
+                                val_inner = c
+                                break
+                        except Exception:
+                            continue
+                    if val_inner:
+                        break
+                    time.sleep(0.5)
+                if val_inner is None:
+                    self.log("[WARN] 其他规格：值[{}]未找到输入框，停止".format(val_idx + 1))
+                    break
+                try:
+                    d = (val_inner.get_attribute("data-id") or "").strip()
+                    if d:
+                        used_dids.add(d)
+                except Exception:
+                    pass
+                did_val = (val_inner.get_attribute("data-id") or "").strip()
+                _osp_open(val_inner)
+                time.sleep(0.25)
+                inp_el = None
+                try:
+                    for ip in val_inner.find_elements(By.XPATH,
+                            ".//input[not(@type='hidden') and not(@disabled)]"):
+                        if ip.is_displayed() and ip.is_enabled():
+                            inp_el = ip
+                            break
+                except Exception:
+                    pass
+                if inp_el is None and did_val:
+                    try:
+                        for ip in driver.find_elements(By.XPATH,
+                                "//div[contains(@class,'so-list') and @data-id='{0}']//input[not(@type='hidden')]".format(did_val)):
+                            if ip.is_displayed() and ip.is_enabled():
+                                inp_el = ip
+                                break
+                    except Exception:
+                        pass
+                typed = False
+                if inp_el:
+                    try:
+                        driver.execute_script(
+                            "var e=arguments[0],v=arguments[1];e.focus();e.value='';"
+                            "e.dispatchEvent(new Event('input',{bubbles:true}));e.value=v;"
+                            "e.dispatchEvent(new Event('input',{bubbles:true}));"
+                            "e.dispatchEvent(new Event('change',{bubbles:true}));",
+                            inp_el, spec_val)
+                        typed = True
+                    except Exception:
+                        pass
+                    if not typed:
+                        try:
+                            inp_el.clear()
+                            inp_el.send_keys(spec_val)
+                            typed = True
+                        except Exception:
+                            pass
+                if not typed:
+                    try:
+                        ae = driver.switch_to.active_element
+                        if ae:
+                            ae.send_keys(spec_val)
+                            typed = True
+                    except Exception:
+                        pass
+                if not typed:
+                    self.log("[WARN] 其他规格值[{}] '{}' 输入失败".format(val_idx + 1, spec_val))
+                    continue
+                vopts = []
+                for _wr in range(6):
+                    time.sleep(0.5)
+                    vopts = _osp_opts(did_val)
+                    if vopts:
+                        break
+                if not vopts:
+                    try:
+                        from selenium.webdriver.common.keys import Keys as _Keys
+                        if inp_el:
+                            inp_el.send_keys(_Keys.RETURN)
+                        self.log("[OK] other_spec val[{}] '{}' custom confirmed".format(val_idx+1, spec_val))
+                        # click blank to confirm custom input
+                        try:
+                            clicked_blank = driver.execute_script(
+                                "var c=document.getElementById('spec_info');"+
+                                "if(c){var h=c.querySelector('[class*=card_header]');"+
+                                "if(h){h.click();return true;}c.click();return true;}return false;")
+                            if not clicked_blank:
+                                try:
+                                    from selenium.webdriver.common.action_chains import ActionChains as _AC
+                                    _AC(driver).move_by_offset(10,10).click().perform()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        time.sleep(1.0)
+                        continue
+                    except Exception:
+                        pass
+                    self.log("[WARN] 其他规格值[{}] '{}' 无选项".format(val_idx + 1, spec_val))
+                    continue
+                tgt_v = None
+                low = spec_val.lower().strip()
+                for op in vopts:
+                    try:
+                        txt = (op.text or "").strip().lower()
+                        if low in txt or txt in low:
+                            tgt_v = op
+                            break
+                    except Exception:
+                        continue
+                if tgt_v is None:
+                    tgt_v = vopts[0]
+                pv = (tgt_v.text or "").strip().replace("\n", " ")
+                if _osp_click(tgt_v):
+                    self.log("[OK] 其他规格值[{}] 已选: {}".format(val_idx + 1, pv))
+                    # click blank to confirm input
+                    try:
+                        clicked_blank = driver.execute_script(
+                            "var c=document.getElementById('spec_info');"+
+                            "if(c){var h=c.querySelector('[class*=card_header]');"+
+                            "if(h){h.click();return true;}c.click();return true;}return false;")
+                        if not clicked_blank:
+                            try:
+                                from selenium.webdriver.common.action_chains import ActionChains as _AC
+                                _AC(driver).move_by_offset(10,10).click().perform()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
+                else:
+                    self.log("[WARN] other_spec value click failed idx={}".format(val_idx+1))
+            self.log("[OK] other_spec fill complete")
+        except Exception as e:
+            self.log("[WARN] other_spec failed: {}".format(str(e)[:100]))
+
 
     def _get_detail_img_input(self):
         """精确定位细节图列的 file input。
