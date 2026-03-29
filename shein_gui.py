@@ -841,20 +841,26 @@ class SheinApp(tk.Tk):
         # 重置停止标志，允许新的抓取任务开始
         self._stop_publish = False
         
-        # 分离已缓存和未缓存的 ASIN
+        # 分离已成功缓存 和 需要重新抓取 的 ASIN
         need_fetch = []
         already_cached = []
+        _fail_prefixes = ("获取失败", "HTTP ", "错误:", "被亚马逊反爬", "Error")
         for asin in sel:
             if asin in self.product_cache:
                 cached_info = self.product_cache[asin]
-                # 检查缓存是否有效（有标题且不是失败状态）
                 title = str(cached_info.get("title", ""))
-                if title and not title.startswith("获取失败") and not title.startswith("HTTP "):
+                is_cached_ok = bool(title) and not any(title.startswith(p) for p in _fail_prefixes)
+                if is_cached_ok:
                     already_cached.append(asin)
                 else:
+                    del self.product_cache[asin]
                     need_fetch.append(asin)
             else:
                 need_fetch.append(asin)
+        
+        # 已成功缓存的 ASIN 确保显示绿色圆点
+        for asin in already_cached:
+            self._set_asin_status(asin, "fetch_success")
         
         # 如果没有需要抓取的商品，直接返回
         if not need_fetch:
@@ -893,7 +899,8 @@ class SheinApp(tk.Tk):
             try:
                 info = fetch_amazon_product(asin, region=region)
                 title = str(info.get("title", ""))
-                is_fail = (not info) or title.startswith("获取失败") or title.startswith("HTTP ")
+                _fp = ("获取失败", "HTTP ", "错误:", "被亚马逊反爬", "Error")
+                is_fail = (not info) or any(title.startswith(p) for p in _fp)
                 return asin, info, is_fail
             except Exception as e:
                 info = {"asin": asin, "title": "获取失败: {}".format(str(e)[:30])}
