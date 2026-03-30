@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """SHEIN 上品自动化模块。"""
 import os
 import re
@@ -2024,37 +2024,36 @@ class SheinPublisher:
                                 if modal_found:
                                     break
                             if modal_found:
-                                time.sleep(0.5)
-                                new_options = []
-                                for _wr2 in range(4):
-                                    new_options = _collect_options(data_id)
-                                    if new_options:
-                                        break
+                                # 检测到"提示"弹窗：说明 SHEIN 已通过弹窗处理当前词
+                                # 不在当前框再填任何选项，等待弹窗消失后返回特殊标记
+                                # 让外层等待3秒再寻找下一个新输入框继续后续 SKU
+                                self.log("[INFO] {} '{}' 触发提示弹窗，等待弹窗消失，不覆盖当前框".format(label, one_kw))
+                                for _wait_modal in range(12):
                                     time.sleep(0.5)
-                                if not new_options:
+                                    still_open = False
                                     try:
-                                        new_options = [el for el in driver.find_elements(By.XPATH,
-                                            "//label[contains(@class,'so-select-option') or contains(@class,'so-checkinput')]"
-                                            " | //*[contains(@class,'so-select-option') or contains(@class,'so-option')]"
-                                        ) if el.is_displayed() and (el.text or '').strip() not in ('', '无数据', '请选择')]
+                                        for xp2 in hint_modal_xpaths:
+                                            for m2 in driver.find_elements(By.XPATH, xp2):
+                                                if m2.is_displayed():
+                                                    still_open = True
+                                                    break
+                                            if still_open:
+                                                break
                                     except Exception:
-                                        new_options = []
-                                invalid_opts2 = {'有主规格', '无主规格', '请选择', '请选择或自定义', '无数据'}
-                                valid_new = [o for o in new_options if (o.text or '').strip().replace('\n', ' ') not in invalid_opts2]
-                                if valid_new:
-                                    hint_target = valid_new[0]
-                                    self.log("[DEBUG] {} 提示弹窗后选第一个: {}".format(
-                                        label, (hint_target.text or '').strip()[:30]))
-                                else:
-                                    self.log("[WARN] {} 提示弹窗后仍无可选项".format(label))
-                                    return None, False
+                                        pass
+                                    if not still_open:
+                                        break
+                                return None, 'hint_modal'
                             else:
                                 self.log("[WARN] {} 输入'{}' 后无可选项".format(label, one_kw))
                                 return None, False
                         except Exception as e:
                             self.log("[WARN] {} 空白处点击处理异常: {}".format(label, str(e)[:60]))
                             return None, False
+                        # 不应执行到此处（hint_modal 已提前返回），保留 target 赋值作为防御
                         target = hint_target
+                        if target is None:
+                            return None, False
                     picked = (target.text or "").strip().replace("\n", " ")
                     ok = _click_option(target)
                     if not ok:
@@ -2072,8 +2071,14 @@ class SheinPublisher:
                     if picked:
                         _skip_open = False
                         return picked
+                    if got_error_modal == 'hint_modal':
+                        # 触发了"提示"弹窗：当前框已由 SHEIN 弹窗处理，等南3s渲染下一输入框
+                        # 直接返回原始词视为已填写，不再尝试其他关键词，不调用 _pick_first
+                        self.log("[INFO] {} '{}' 提示弹窗已处理，等南3s后继续下一个SKU".format(label, seed_text))
+                        time.sleep(3.0)
+                        return seed_text
                     if got_error_modal:
-                        # SHEIN 不支持该颜色词，直接跳过尝试下一个关键词
+                        # SHEIN 不支持该颜色词（错误弹窗），直接跳过尝试下一个关键词
                         self.log("[DEBUG] {} SHEIN不支持'{}', 跳过".format(label, kw))
                         _skip_open = True
                         continue
@@ -2204,15 +2209,14 @@ class SheinPublisher:
                 except Exception:
                     pass
                 picked_val = _type_and_pick_first(value_inner, "主规格値", spec_val)
-                if not picked_val:
-                    self.log("[WARN] 第 {} 个规格値 '{}' 输入匹配失败，尝试首项".format(val_idx + 1, spec_val))
-                    picked_val = _pick_first(value_inner, "主规格値")
                 if picked_val:
                     filled_vals.append(picked_val)
                     self.log("[OK] 第 {} 个规格値已填写: {}".format(val_idx + 1, picked_val))
                     time.sleep(1.0)  # wait for SHEIN to append next input box
                 else:
-                    self.log("[WARN] 第 {} 个规格値未能填写，继续下一个".format(val_idx + 1))
+                    # _type_and_pick_first 返回 None 说明输入匹配彻底失败
+                    # 不能调用 _pick_first 去覆盖当前框（可能 hint_modal 已处理过）
+                    self.log("[WARN] 第 {} 个规格値 '{}' 输入匹配失败，跳过（不覆盖已有数据）".format(val_idx + 1, spec_val))
             if filled_vals:
                 self.log("[OK] 主规格填写完成: 属性={}，値=[{}]".format(
                     picked_attr, " | ".join(filled_vals)))
