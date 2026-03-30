@@ -727,10 +727,10 @@ class SheinApp(tk.Tk):
                             self.after(0, lambda a=target_asin: self._set_asin_status(a, "success"))
                         self._pub_log('商品 {} 已提交发布'.format(target_asin))
                     else:
-                        self.after(0, lambda: self.status_lbl.config(text='✓ 发布按鈕已点击（未检测到翻译弹窗）'))
+                        self.after(0, lambda: self.status_lbl.config(text='✗ 发布失败：15秒内未检测到"一键翻译并发布"确认弹窗'))
                         if dot:
-                            self.after(0, lambda a=target_asin: self._set_asin_status(a, "success"))
-                        self._pub_log('[WARN] 未检测到一件翻译并发布弹窗')
+                            self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
+                        self._pub_log('[ERROR] 商品 {} 发布失败：点击发布按鈕后15秒内未出现"一键翻译并发布"确认弹窗，请检查页面状态'.format(target_asin))
                 else:
                     self.after(0, lambda: self.status_lbl.config(text='✗ 未找到发布按鈕，请手动点击发布'))
                     if dot:
