@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """SHEIN 上品自动化模块。"""
 import os
 import re
@@ -2162,8 +2162,9 @@ class SheinPublisher:
                 self.log("[WARN] 未提取到任何主规格値，跳过")
                 return
             filled_vals = []
-            filled_vals = []
             used_data_ids = set()  # track already-processed input boxes by data-id
+            # Build a mapping: spec_val order -> sku_list index, so image upload stays aligned
+            # all_spec_values is already in sku_list order (same as GUI display)
             for val_idx, spec_val in enumerate(all_spec_values):
                 self.log("[DEBUG] 填写第 {} 个规格値: {}".format(val_idx + 1, spec_val))
                 # Find the next NEW empty 'please select or customize' input box
