@@ -2621,6 +2621,54 @@ class SheinPublisher:
                         self.log("[ERROR] SKU行 {} 图{} 上传失败: {}".format(row_idx+1, img_idx+1, str(e)[:60]))
                 self.log("[OK] SKU行 {} 已成功上传 {}/{} 张细节图".format(
                     row_idx + 1, upload_ok_count, len(img_paths)))
+                # 上传色块图：使用该SKU细节图第一张
+                try:
+                    color_img_path = img_paths[0] if img_paths else None
+                    piece_input = None
+                    if color_img_path:
+                        try:
+                            tds_piece = row.find_elements(By.TAG_NAME, "td")
+                            piece_td = tds_piece[4] if len(tds_piece) >= 5 else None  # 第5列=色块图（首选）
+                            if piece_td is not None:
+                                piece_inputs = piece_td.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                                if piece_inputs:
+                                    piece_input = piece_inputs[0]
+
+                            # 兜底1：行内圆角上传容器（色块图常见样式）
+                            if piece_input is None:
+                                round_inputs = row.find_elements(By.CSS_SELECTOR,
+                                    "div[style*='border-radius: 50'] input[type='file'],"
+                                    "div[style*='border-radius:50'] input[type='file']")
+                                if round_inputs:
+                                    piece_input = round_inputs[0]
+
+                            # 兜底2：最后一列 input（通常是色块图列）
+                            if piece_input is None and len(tds_piece) >= 1:
+                                last_td_inputs = tds_piece[-1].find_elements(By.CSS_SELECTOR, "input[type='file']")
+                                if last_td_inputs:
+                                    piece_input = last_td_inputs[0]
+                        except Exception as e:
+                            self.log("[WARN] 行 {} 定位色块图 input 失败: {}".format(row_idx + 1, str(e)[:60]))
+
+                    if piece_input is not None and color_img_path:
+                        try:
+                            self._dismiss_switch_confirm_modal()
+                            driver.execute_script(
+                                "arguments[0].style.display='block';"
+                                "arguments[0].style.visibility='visible';"
+                                "arguments[0].style.opacity='1';", piece_input)
+                            piece_input.send_keys(color_img_path)
+                            self.log("[OK] SKU行 {} 色块图已提交（取细节图第1张）".format(row_idx + 1))
+                            self._dismiss_switch_confirm_modal()
+                            self._handle_crop_dialog()
+                            time.sleep(1.2)
+                        except Exception as e:
+                            self.log("[WARN] SKU行 {} 色块图上传失败: {}".format(row_idx + 1, str(e)[:60]))
+                    else:
+                        self.log("[WARN] SKU行 {} 未找到色块图 input，跳过色块图上传".format(row_idx + 1))
+                except Exception as e:
+                    self.log("[WARN] SKU行 {} 色块图流程异常: {}".format(row_idx + 1, str(e)[:60]))
+
                 # Cleanup temp files
                 for p in img_paths:
                     try:
