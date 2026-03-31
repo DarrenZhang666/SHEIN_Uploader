@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """GUI layer for SHEIN app."""
 
 from shein_main import *
@@ -90,7 +90,7 @@ class SheinApp(tk.Tk):
         self._btn(bf,"导入 ASIN 文本",ACCENT,self._import_txt).pack(side="left",padx=5)
         self._btn(bf,"抓取选中商品","#2563eb",self._fetch_sel).pack(side="left",padx=5)
         self._btn(bf,"开始上品","#7c3aed",self._open_publish_page).pack(side="left",padx=5)
-        self._btn(bf,"抓取页面信息","#8b5cf6",self._dump_page_info_btn).pack(side="left",padx=5)
+        
         self._btn(bf,"停止","#dc2626",self._stop_publish_action).pack(side="left",padx=5)
         self._shein_login_btn = self._btn(bf,"登录 SHEIN","#059669",self._open_shein)
         self._shein_login_btn.pack(side="left",padx=5)
@@ -753,26 +753,6 @@ class SheinApp(tk.Tk):
                 self._pub_log('上传出错: ' + str(e))
         finally:
             self._publish_running = False
-
-    def _dump_page_info_btn(self):
-        """抓取当前浏览器页面的元素信息，帮助定位'识图发品'按钮。"""
-        if self._shein_publisher is None or not self._shein_publisher.is_alive():
-            messagebox.showwarning('提示', '浏览器未打开，请先点击【开始上品】')
-            return
-        
-        self.status_lbl.config(text='正在抓取页面信息...')
-        
-        def _do_dump():
-            try:
-                info = self._shein_publisher.dump_page_elements()
-                self.after(0, lambda: self.status_lbl.config(text='页面信息已抓取，查看日志'))
-                # 显示信息窗口
-                self.after(0, lambda i=info: messagebox.showinfo('页面元素信息', i[:500] + '\n...(更多信息见日志)'))
-            except Exception as e:
-                self.after(0, lambda err=str(e): self.status_lbl.config(text='抓取失败: ' + err[:40]))
-        
-        threading.Thread(target=_do_dump, daemon=True).start()
-
     def _upload_product_image_btn(self):
         """上传商品图片按钮回调。"""
         if self._shein_publisher is None or not self._shein_publisher.is_alive():
