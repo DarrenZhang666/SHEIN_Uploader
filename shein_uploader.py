@@ -31,6 +31,8 @@ class SheinPublisher:
         self.log    = log_cb or print
         self.login_manager = SheinLoginManager(log_cb=self.log)
         self._stop_publish = False
+        # 记录主规格实际成功写入顺序，供后续按行上传图片对齐
+        self._last_main_spec_filled_values = []
 
     def _ensure_not_stopped(self):
         if self._stop_publish:
@@ -1811,17 +1813,68 @@ class SheinPublisher:
                         for op in options:
                             try:
                                 txt = (op.text or "").strip().lower()
-                                if low in txt:
+                                if low == txt:
+                                    target = op
+                                    break
+                            except Exception:
+                                continue
+                    if target is None and options and low:
+                        for op in options:
+                            try:
+                                txt = (op.text or "").strip().lower()
+                                if low in txt or txt in low:
                                     target = op
                                     break
                             except Exception:
                                 continue
                     if target is None and options:
-                        invalid_opts = {"有主规格", "无主规格", "请选择", "请选择或自定义", "无数据"}
-                        valid_opts = [o for o in options if (o.text or "").strip().replace("\n", " ") not in invalid_opts]
-                        target = valid_opts[0] if valid_opts else None
+                        # 已取消默认首项回退，避免顺序错位
+                        # 已取消默认首项回退，避免顺序错位
+                        target = None
                     if target is None:
                         # 无数据时：点击屏幕任意位置确认，然后检测"提示"弹窗
+                        # 先尝试自定义值确认（按 Enter），避免无下拉选项时丢 SKU
+                        custom_ok = False
+                        try:
+                            from selenium.webdriver.common.keys import Keys as _Keys
+                            if input_el is not None and input_el.is_enabled():
+                                try:
+                                    input_el.send_keys(_Keys.RETURN)
+                                    custom_ok = True
+                                except Exception:
+                                    pass
+                            if not custom_ok:
+                                try:
+                                    ae = driver.switch_to.active_element
+                                    if ae is not None:
+                                        ae.send_keys(_Keys.RETURN)
+                                        custom_ok = True
+                                except Exception:
+                                    pass
+                            if custom_ok:
+                                try:
+                                    clicked_blank = driver.execute_script(
+                                        "var c=document.getElementById('spec_info');"
+                                        "if(c){var h=c.querySelector('[class*=card_header]');"
+                                        "if(h){h.click();return true;}c.click();return true;}return false;"
+                                    )
+                                    if not clicked_blank:
+                                        driver.execute_script("document.body.click();")
+                                except Exception:
+                                    pass
+                                time.sleep(0.8)
+                                selected_txt = ""
+                                try:
+                                    selected_txt = (inner.find_element(By.XPATH,
+                                        ".//span[contains(@class,'so-select-input') or contains(@class,'renderItemEllipsis')]")
+                                        .text or "").strip()
+                                except Exception:
+                                    pass
+                                if selected_txt and (low in selected_txt.lower() or selected_txt.lower() in low):
+                                    self.log("[OK] {} 自定义值已确认: {}".format(label, selected_txt))
+                                    return selected_txt, False
+                        except Exception:
+                            pass
                         self.log("[DEBUG] {} 输入'{}' 后无数据，点击空白处等待提示弹窗".format(label, one_kw))
                         try:
                             # 通过 id=spec_info 容器头部点击触发失焦
@@ -2031,7 +2084,8 @@ class SheinPublisher:
                 # Find the next NEW empty 'please select or customize' input box
                 # Key: use data-id to skip boxes we've already filled
                 value_inner = None
-                for _retry in range(8):
+                # 主规格值每填一个，SHEIN 渲染下一行较慢，重试次数提高
+                for _retry in range(20):
                     candidates = []
                     for xp in [
                         ".//div[contains(@class,'specValues') or contains(@class,'spmp_style__specValues')]//div[contains(@class,'so-select-inner') and @data-id]",
@@ -2074,15 +2128,17 @@ class SheinPublisher:
                 if picked_val:
                     filled_vals.append(picked_val)
                     self.log("[OK] 第 {} 个规格値已填写: {}".format(val_idx + 1, picked_val))
-                    time.sleep(1.0)  # wait for SHEIN to append next input box
+                    time.sleep(1.6)  # wait for SHEIN to append next input box
                 else:
                     # _type_and_pick_first 返回 None 说明输入匹配彻底失败
                     # 不能调用 _pick_first 去覆盖当前框（可能 hint_modal 已处理过）
                     self.log("[WARN] 第 {} 个规格値 '{}' 输入匹配失败，跳过（不覆盖已有数据）".format(val_idx + 1, spec_val))
             if filled_vals:
+                self._last_main_spec_filled_values = list(filled_vals)
                 self.log("[OK] 主规格填写完成: 属性={}，値=[{}]".format(
                     picked_attr, " | ".join(filled_vals)))
             else:
+                self._last_main_spec_filled_values = []
                 self.log("[WARN] 主规格値全部填写失败")
         except Exception as e:
             self.log("[WARN] 主规格处理失败: {}".format(str(e)[:100]))
@@ -2534,12 +2590,53 @@ class SheinPublisher:
                 self._upload_images_to_single_input(fallback_images)
                 return
             self.log("[DEBUG] 找到 {} 行 SKU 细节图行".format(len(rows)))
+            # 按“主规格实际成功写入顺序”重排 SKU，避免主规格写入失败/跳过导致图片错位
+            ordered_sku_list = list(sku_list)
+            try:
+                filled_vals = getattr(self, "_last_main_spec_filled_values", []) or []
+                if filled_vals:
+                    def _norm_spec(v):
+                        s = (v or "").strip().lower()
+                        s = re.sub(r"[\s\-_/]+", "", s)
+                        return s
+                    used_idx = set()
+                    matched = []
+                    for v in filled_vals:
+                        nv = _norm_spec(v)
+                        hit_idx = None
+                        for i, sku in enumerate(sku_list):
+                            if i in used_idx:
+                                continue
+                            attrs = str(sku.get("sku_attributes") or "")
+                            left = attrs.split("/")[0].strip() if attrs else ""
+                            if ":" in left:
+                                left = left.split(":", 1)[1].strip()
+                            if _norm_spec(left) == nv:
+                                hit_idx = i
+                                break
+                        if hit_idx is None:
+                            for i, sku in enumerate(sku_list):
+                                if i in used_idx:
+                                    continue
+                                attrs = str(sku.get("sku_attributes") or "")
+                                if nv and nv in _norm_spec(attrs):
+                                    hit_idx = i
+                                    break
+                        if hit_idx is not None:
+                            used_idx.add(hit_idx)
+                            matched.append(sku_list[hit_idx])
+                    if matched:
+                        ordered_sku_list = matched
+                        self.log("[DEBUG] 已按主规格写入顺序重排 SKU：{} 条".format(len(ordered_sku_list)))
+            except Exception as _map_e:
+                self.log("[DEBUG] SKU顺序重排失败，回退原顺序: {}".format(str(_map_e)[:60]))
+
             for row_idx, row in enumerate(rows):
                 self._ensure_not_stopped()
                 # Get images for this SKU row
-                if row_idx < len(sku_list):
-                    sku_imgs = (sku_list[row_idx].get("images") or [])[:5]
-                    sku_attr = sku_list[row_idx].get("sku_attributes", "")
+                if row_idx < len(ordered_sku_list):
+                    sku_imgs = (ordered_sku_list[row_idx].get("images") or [])[:5]
+                    sku_attr = ordered_sku_list[row_idx].get("sku_attributes", "")
                 else:
                     sku_imgs = fallback_images
                     sku_attr = ""
