@@ -73,6 +73,8 @@ class SheinApp(tk.Tk):
         body.columnconfigure(1,weight=1)
         body.rowconfigure(0,weight=1)
         self._build_left(body); self._build_right(body)
+        self._dev_toggle = DevModeToggle(self, bg=BG_DARK)
+        self._dev_toggle.place(relx=0.0, rely=1.0, anchor="sw", x=16, y=-6)
 
     def _build_topbar(self):
         bar=tk.Frame(self,bg=BG_PANEL,height=60)
@@ -103,8 +105,6 @@ class SheinApp(tk.Tk):
         self._acct_combo = ttk.Combobox(acct_frame, textvariable=self.shein_account,
             width=18, font=("Segoe UI",10), values=self._load_account_history())
         self._acct_combo.pack(side="left",padx=(4,0))
-        self._dev_toggle = DevModeToggle(bf, bg=BG_PANEL)
-        self._dev_toggle.pack(side="left", padx=(10, 0))
 
     def _build_left(self,parent):
         f=tk.Frame(parent,bg=BG_PANEL,width=265)
