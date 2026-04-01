@@ -62,10 +62,10 @@ class SheinPublisher:
         self.wait = self.login_manager.wait
         return ok
 
-    def start_browser(self):
+    def start_browser(self, account=""):
         self.login_manager.driver = self.driver
         self.login_manager.wait = self.wait
-        self.login_manager.start_browser()
+        self.login_manager.start_browser(account=account)
         self.driver = self.login_manager.driver
         self.wait = self.login_manager.wait
 

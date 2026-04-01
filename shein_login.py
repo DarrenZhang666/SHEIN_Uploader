@@ -155,83 +155,78 @@ class SheinLoginManager:
         except Exception:
             return False
 
-    def start_browser(self):
-        """启动浏览器。先尝试连接已有实例，失败则自动起动新实例。"""
+    def _get_debug_port(self, account=""):
+        """根据账号生成独立的调试端口号，避免多账号冲突。"""
+        if not account:
+            return self.DEBUG_PORT
+        h = 0
+        for ch in account:
+            h = (h * 31 + ord(ch)) & 0xFFFF
+        return 9300 + (h % 200)
+
+    def start_browser(self, account=""):
+        """启动浏览器。同一账号复用实例，不同账号用独立 profile 和端口。"""
         import threading as _th
-        import shutil as _shutil
+        import re as _re
+        import socket as _socket
         _t0 = time.time()
 
-        # 策略0: 先尝试连接已有 Edge 调试端口（3s超时）
-        _conn_result = [None]
-        def _try_connect_edge():
-            try:
-                _o = EdgeOptions()
-                _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(self.DEBUG_PORT))
-                _d = webdriver.Edge(options=_o)
-                _d.current_url  # 验证连接有效
-                _conn_result[0] = _d
-            except Exception:
-                pass
-        _t = _th.Thread(target=_try_connect_edge, daemon=True)
-        _t.start(); _t.join(timeout=3)
-        if _conn_result[0] is not None:
-            self.driver = _conn_result[0]
-            self.wait = WebDriverWait(self.driver, 20)
-            self.log("[OK] 已连接到现有 Edge ({:.1f}s)".format(time.time() - _t0))
-            return
+        _port = self._get_debug_port(account)
+        self.log("[DEBUG] 账号='{}' 调试端口={}".format(account or "(默认)", _port))
 
-        # 策略1: 先尝试连接已有 Chrome 调试端口（3s超时）
-        _conn_result2 = [None]
-        def _try_connect_chrome():
-            try:
-                _o = Options()
-                _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(self.DEBUG_PORT))
-                _d = webdriver.Chrome(options=_o)
-                _d.current_url
-                _conn_result2[0] = _d
-            except Exception:
-                pass
-        _t2 = _th.Thread(target=_try_connect_chrome, daemon=True)
-        _t2.start(); _t2.join(timeout=3)
-        if _conn_result2[0] is not None:
-            self.driver = _conn_result2[0]
-            self.wait = WebDriverWait(self.driver, 20)
-            self.log("[OK] 已连接到现有 Chrome ({:.1f}s)".format(time.time() - _t0))
-            return
-
-        # 先检测调试端口是否被占用，若占用说明有浏览器在运行但连接失败，再重试
-        import socket as _socket
-        _port_in_use = False
+        # 先快速检测端口是否有浏览器在监听（<0.3s）
+        _port_open = False
         try:
-            _sock = _socket.create_connection(("127.0.0.1", self.DEBUG_PORT), timeout=0.5)
+            _sock = _socket.create_connection(("127.0.0.1", _port), timeout=0.3)
             _sock.close()
-            _port_in_use = True
+            _port_open = True
         except Exception:
             pass
-        if _port_in_use:
-            self.log("[WARN] 调试端口{}已被占用，再次尝试连接现有浏览器...".format(self.DEBUG_PORT))
-            _conn_retry = [None]
-            def _retry_edge():
+
+        if _port_open:
+            # 端口有响应 → 并行尝试连接 Edge 和 Chrome
+            _edge_result = [None]
+            _chrome_result = [None]
+            def _try_edge():
                 try:
                     _o = EdgeOptions()
-                    _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(self.DEBUG_PORT))
+                    _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(_port))
                     _d = webdriver.Edge(options=_o)
                     _d.current_url
-                    _conn_retry[0] = _d
+                    _edge_result[0] = _d
                 except Exception:
                     pass
-            _tr = _th.Thread(target=_retry_edge, daemon=True)
-            _tr.start(); _tr.join(timeout=5)
-            if _conn_retry[0] is not None:
-                self.driver = _conn_retry[0]
+            def _try_chrome():
+                try:
+                    _o = Options()
+                    _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(_port))
+                    _d = webdriver.Chrome(options=_o)
+                    _d.current_url
+                    _chrome_result[0] = _d
+                except Exception:
+                    pass
+            _te = _th.Thread(target=_try_edge, daemon=True)
+            _tc = _th.Thread(target=_try_chrome, daemon=True)
+            _te.start(); _tc.start()
+            _te.join(timeout=3); _tc.join(timeout=3)
+            if _edge_result[0] is not None:
+                self.driver = _edge_result[0]
                 self.wait = WebDriverWait(self.driver, 20)
-                self.log("[OK] 重试连接现有 Edge 成功 ({:.1f}s)".format(time.time() - _t0))
+                self.log("[OK] 已连接到现有 Edge ({:.1f}s)".format(time.time() - _t0))
                 return
+            if _chrome_result[0] is not None:
+                self.driver = _chrome_result[0]
+                self.wait = WebDriverWait(self.driver, 20)
+                self.log("[OK] 已连接到现有 Chrome ({:.1f}s)".format(time.time() - _t0))
+                return
+            self.log("[DEBUG] 端口{}有响应但连接失败，启动新浏览器".format(_port))
 
-        # 策略2: 启动新 Edge（由 Selenium 自动管理驱动）
-        self.log("[DEBUG] 启动新 Edge 浏览器...")
-        _profile = os.path.join(os.path.expanduser("~"), ".shein_browser_profile")
+        # 启动新浏览器 — 每个账号独立的 profile 目录
+        _safe_name = _re.sub(r'[^\w\-.]', '_', account) if account else "default"
+        _profile = os.path.join(
+            os.path.expanduser("~"), ".shein_profiles", _safe_name)
         os.makedirs(_profile, exist_ok=True)
+        self.log("[DEBUG] 启动新浏览器, profile={}".format(_profile))
 
         def _make_opts(opt_class):
             o = opt_class()
@@ -240,7 +235,7 @@ class SheinLoginManager:
             o.add_argument("--disable-dev-shm-usage")
             o.add_argument("--disable-gpu")
             o.add_argument("--disable-infobars")
-            o.add_argument("--remote-debugging-port={}".format(self.DEBUG_PORT))
+            o.add_argument("--remote-debugging-port={}".format(_port))
             o.add_argument("--user-data-dir={}".format(_profile))
             o.add_argument("--profile-directory=Default")
             o.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
@@ -254,7 +249,6 @@ class SheinLoginManager:
             except Exception:
                 pass
 
-        # 尝试 Edge（Selenium 自动匹配驱动）
         try:
             edge_opts = _make_opts(EdgeOptions)
             self.driver = webdriver.Edge(options=edge_opts)
@@ -265,7 +259,6 @@ class SheinLoginManager:
         except Exception as _e:
             self.log("[DEBUG] Edge 失败: {}".format(str(_e)[:80]))
 
-        # 尝试 Chrome（Selenium 自动匹配驱动）
         try:
             chrome_opts = _make_opts(Options)
             self.driver = webdriver.Chrome(options=chrome_opts)

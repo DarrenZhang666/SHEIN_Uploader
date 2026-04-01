@@ -17,9 +17,11 @@ class SheinApp(tk.Tk):
         self.price_multiplier=tk.StringVar(value="3")
         self.fetch_workers=tk.StringVar(value="5")
         self.amazon_region=tk.StringVar(value="美国")
+        self.shein_account=tk.StringVar(value="")
         self._fetch_thread=None; self._photo_ref=None
         self._launching_browser = False  # 防止重复点击登录按钮
         self._shein_publisher=None   # 持久化浏览器实例
+        self._shein_publisher_account = ""  # 当前浏览器实例对应的账号
         self._stop_publish=False      # 停止上品标志
         self._driver_ready=False      # 驱动预热完成标志
         self._publish_running=False   # 当前是否正在执行上品流程
@@ -95,6 +97,12 @@ class SheinApp(tk.Tk):
         self._btn(bf,"停止","#dc2626",self._stop_publish_action).pack(side="left",padx=5)
         self._shein_login_btn = self._btn(bf,"登录 SHEIN","#059669",self._open_shein)
         self._shein_login_btn.pack(side="left",padx=5)
+        acct_frame=tk.Frame(bf,bg=BG_PANEL)
+        acct_frame.pack(side="left",padx=(5,0))
+        tk.Label(acct_frame,text="SHEIN账号:",font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
+        self._acct_combo = ttk.Combobox(acct_frame, textvariable=self.shein_account,
+            width=18, font=("Segoe UI",10), values=self._load_account_history())
+        self._acct_combo.pack(side="left",padx=(4,0))
         self._dev_toggle = DevModeToggle(bf, bg=BG_PANEL)
         self._dev_toggle.pack(side="left", padx=(10, 0))
 
@@ -271,26 +279,73 @@ class SheinApp(tk.Tk):
         if len(self.asin_vars)>0:
             self.select_all_var.set(cnt==len(self.asin_vars))
 
+    _ACCT_HISTORY_FILE = os.path.join(
+        os.path.expanduser("~"), ".shein_profiles", "account_history.txt")
+
+    def _load_account_history(self):
+        """从本地文件加载历史账号列表。"""
+        try:
+            if os.path.isfile(self._ACCT_HISTORY_FILE):
+                with open(self._ACCT_HISTORY_FILE, "r", encoding="utf-8") as f:
+                    return [l.strip() for l in f if l.strip()]
+        except Exception:
+            pass
+        return []
+
+    def _save_account_to_history(self, account):
+        """将登录成功的账号保存到历史记录（去重，最新在前）。"""
+        if not account:
+            return
+        try:
+            history = self._load_account_history()
+            if account in history:
+                history.remove(account)
+            history.insert(0, account)
+            history = history[:20]
+            os.makedirs(os.path.dirname(self._ACCT_HISTORY_FILE), exist_ok=True)
+            with open(self._ACCT_HISTORY_FILE, "w", encoding="utf-8") as f:
+                f.write("\n".join(history))
+            self._acct_combo['values'] = history
+        except Exception:
+            pass
+
     def _open_shein(self):
         """打开 SHEIN 登录页面。"""
-        # 防止重复点击：如果已有线程正在启动，直接返回
+        account = self.shein_account.get().strip()
+        if not account:
+            messagebox.showwarning('提示', '请先在「SHEIN账号」输入框中填写账号')
+            return
+
         if self._launching_browser:
             self.status_lbl.config(text='浏览器正在启动中，请稍候...')
             return
+
+        # 如果已有浏览器实例且账号相同，直接复用
+        if (self._shein_publisher is not None
+                and self._shein_publisher_account == account):
+            try:
+                if self._shein_publisher.is_alive():
+                    self.status_lbl.config(text='复用已有浏览器 (账号: {})'.format(account))
+                    self._shein_publisher.driver.get(SHEIN_LOGIN_URL)
+                    threading.Thread(target=self._watch_login,
+                                     args=(self._shein_publisher,), daemon=True).start()
+                    return
+            except Exception:
+                pass
+
+        # 账号不同或无实例 → 启动新浏览器
         self._launching_browser = True
-        self.status_lbl.config(text='正在启动浏览器...')
+        self.status_lbl.config(text='正在启动浏览器 (账号: {})...'.format(account))
 
         def _launch():
             try:
                 pub = SheinPublisher(log_cb=self._pub_log)
-                # start_browser 内置：先 0.5s 快速连接已有浏览器，失败再启新的
-                pub.start_browser()
+                pub.start_browser(account=account)
                 self._shein_publisher = pub
+                self._shein_publisher_account = account
                 self.status_lbl.config(text='浏览器已就绪，打开登录页...')
                 pub.driver.get(SHEIN_LOGIN_URL)
-                time.sleep(1)
-                self.status_lbl.config(text='已打开 SHEIN 登录页，请手动登录')
-                # 启动后台线程监控登录状态
+                self.status_lbl.config(text='已打开 SHEIN 登录页，请登录')
                 threading.Thread(target=self._watch_login, args=(pub,), daemon=True).start()
             except Exception as e:
                 self.status_lbl.config(text='启动失败: ' + str(e)[:50])
@@ -430,12 +485,17 @@ class SheinApp(tk.Tk):
         except Exception as _de:
             self._pub_log("[ACCT-DEBUG] 失败: {}".format(str(_de)[:80]))
 
+        # 记忆登录成功的账号
+        _login_acct = getattr(self, '_shein_publisher_account', '') or ''
+        if _login_acct:
+            self.after(0, lambda a=_login_acct: self._save_account_to_history(a))
+
         # 更新按钮
-        label = "已登录 SHEIN: {}".format(account) if account else "已登录 SHEIN"
-        self.after(0, lambda lb=label: self._shein_login_btn.config(
-            text=lb, bg="#0d7a4e", font=("Segoe UI", 9, "bold")))
-        self.after(0, lambda: self.status_lbl.config(text="SHEIN 登录成功" + ("  账号: " + account if account else "")))
-        self._pub_log("[OK] SHEIN 登录成功，账号: {}".format(account or "(未获取到)"))
+        self.after(0, lambda: self._shein_login_btn.config(
+            text="已登录", bg="#0d7a4e", font=("Segoe UI", 9, "bold")))
+        self.after(0, lambda: self.status_lbl.config(
+            text="SHEIN 登录成功" + ("  账号: " + _login_acct if _login_acct else "")))
+        self._pub_log("[OK] SHEIN 登录成功，账号: {}".format(_login_acct or "(未获取到)"))
 
     def _open_publish_page(self):
         """打开 SHEIN 商品发布页面，自动上传选中商品的图片。"""
