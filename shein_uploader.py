@@ -1922,10 +1922,67 @@ class SheinPublisher:
                                     break
                             except Exception:
                                 continue
+                    # -- 优先保留原始值：关闭下拉框，尝试让 SHEIN 接受自定义输入 --
+                    if target is None and input_el and low:
+                        _custom_accepted = False
+                        try:
+                            from selenium.webdriver.common.keys import Keys as _KK
+                            input_el.send_keys(_KK.ESCAPE)
+                            time.sleep(0.3)
+                            try:
+                                driver.execute_script(
+                                    "var c=document.getElementById('spec_info');"
+                                    "if(c){var h=c.querySelector('[class*=card_header]');"
+                                    "if(h){h.click();}else{c.click();}}"
+                                    "else{document.body.click();}")
+                            except Exception:
+                                pass
+                            time.sleep(0.6)
+                            _sel_txt = ""
+                            try:
+                                _sel_txt = (inner.find_element(By.XPATH,
+                                    ".//span[contains(@class,'so-select-input') or "
+                                    "contains(@class,'renderItemEllipsis')]"
+                                ).text or "").strip()
+                            except Exception:
+                                pass
+                            if _sel_txt and _sel_txt not in ("请选择", "请选择或自定义", "无数据", "") \
+                                    and (low in _sel_txt.lower() or _sel_txt.lower() in low):
+                                self.log("[OK] {} 保留原始值: {}".format(label, _sel_txt))
+                                return _sel_txt, False
+                            self.log("[DEBUG] {} 自定义值未被接受(got='{}'), 回退模糊匹配".format(
+                                label, _sel_txt))
+                            _open_dropdown(inner)
+                            time.sleep(0.25)
+                            _re_input = None
+                            try:
+                                for _ip2 in inner.find_elements(By.XPATH,
+                                        ".//input[not(@type='hidden') and not(@disabled)]"):
+                                    if _ip2.is_displayed() and _ip2.is_enabled():
+                                        _re_input = _ip2
+                                        break
+                            except Exception:
+                                pass
+                            if _re_input is None:
+                                _re_input = input_el
+                            try:
+                                driver.execute_script(
+                                    "var el=arguments[0],v=arguments[1];"
+                                    "el.focus();el.value='';"
+                                    "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                                    "el.value=v;"
+                                    "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                                    "el.dispatchEvent(new Event('change',{bubbles:true}));",
+                                    _re_input, one_kw)
+                            except Exception:
+                                pass
+                            time.sleep(0.5)
+                            options = _collect_options(data_id)
+                        except Exception:
+                            pass
+
+                    # -- 模糊匹配回退（仅在自定义值未被接受时执行）--
                     if target is None and options and low:
-                        # Pass 2a: extract English-only part from option, exact match
-                        # e.g. "white" matches "白色White" (en="White") but NOT
-                        #      "黑白色Black and White" (en="Black and White")
                         def _extract_en(s):
                             return re.sub(r'[^\x00-\x7f]', '', s).strip().lower()
                         for op in options:
@@ -1938,7 +1995,6 @@ class SheinPublisher:
                             except Exception:
                                 continue
                     if target is None and options and low:
-                        # Pass 2b: word-boundary match
                         _word_pat = re.compile(r'(?<![a-z])' + re.escape(low) + r'(?![a-z])', re.IGNORECASE)
                         for op in options:
                             try:
@@ -1949,7 +2005,6 @@ class SheinPublisher:
                             except Exception:
                                 continue
                     if target is None and options and low:
-                        # Pass 2c: fallback substring containment
                         for op in options:
                             try:
                                 txt = (op.text or "").strip().lower()
@@ -1959,8 +2014,6 @@ class SheinPublisher:
                             except Exception:
                                 continue
                     if target is None and options:
-                        # 已取消默认首项回退，避免顺序错位
-                        # 已取消默认首项回退，避免顺序错位
                         target = None
                     if target is None:
                         # 无数据时：点击屏幕任意位置确认，然后检测"提示"弹窗
