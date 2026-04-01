@@ -1883,6 +1883,33 @@ class SheinPublisher:
                             except Exception:
                                 continue
                     if target is None and options and low:
+                        # Pass 2a: extract English-only part from option, exact match
+                        # e.g. "white" matches "白色White" (en="White") but NOT
+                        #      "黑白色Black and White" (en="Black and White")
+                        def _extract_en(s):
+                            return re.sub(r'[^\x00-\x7f]', '', s).strip().lower()
+                        for op in options:
+                            try:
+                                txt = (op.text or "").strip()
+                                en = _extract_en(txt)
+                                if en and re.sub(r'[\s\-_]+', '', en) == re.sub(r'[\s\-_]+', '', low):
+                                    target = op
+                                    break
+                            except Exception:
+                                continue
+                    if target is None and options and low:
+                        # Pass 2b: word-boundary match
+                        _word_pat = re.compile(r'(?<![a-z])' + re.escape(low) + r'(?![a-z])', re.IGNORECASE)
+                        for op in options:
+                            try:
+                                txt = (op.text or "").strip()
+                                if _word_pat.search(txt):
+                                    target = op
+                                    break
+                            except Exception:
+                                continue
+                    if target is None and options and low:
+                        # Pass 2c: fallback substring containment
                         for op in options:
                             try:
                                 txt = (op.text or "").strip().lower()
@@ -2654,60 +2681,190 @@ class SheinPublisher:
                 self._upload_images_to_single_input(fallback_images)
                 return
             self.log("[DEBUG] 找到 {} 行 SKU 细节图行".format(len(rows)))
-            # 按“主规格实际成功写入顺序”重排 SKU，避免主规格写入失败/跳过导致图片错位
-            ordered_sku_list = list(sku_list)
-            try:
-                filled_vals = getattr(self, "_last_main_spec_filled_values", []) or []
-                if filled_vals:
-                    def _norm_spec(v):
-                        s = (v or "").strip().lower()
-                        s = re.sub(r"[\s\-_/]+", "", s)
-                        return s
-                    used_idx = set()
-                    matched = []
-                    for v in filled_vals:
-                        nv = _norm_spec(v)
-                        hit_idx = None
-                        for i, sku in enumerate(sku_list):
-                            if i in used_idx:
-                                continue
-                            attrs = str(sku.get("sku_attributes") or "")
-                            left = attrs.split("/")[0].strip() if attrs else ""
-                            if ":" in left:
-                                left = left.split(":", 1)[1].strip()
-                            if _norm_spec(left) == nv:
-                                hit_idx = i
-                                break
-                        if hit_idx is None:
-                            for i, sku in enumerate(sku_list):
-                                if i in used_idx:
-                                    continue
-                                attrs = str(sku.get("sku_attributes") or "")
-                                if nv and nv in _norm_spec(attrs):
-                                    hit_idx = i
-                                    break
-                        if hit_idx is not None:
-                            used_idx.add(hit_idx)
-                            matched.append(sku_list[hit_idx])
-                    if matched:
-                        ordered_sku_list = matched
-                        self.log("[DEBUG] 已按主规格写入顺序重排 SKU：{} 条".format(len(ordered_sku_list)))
-            except Exception as _map_e:
-                self.log("[DEBUG] SKU顺序重排失败，回退原顺序: {}".format(str(_map_e)[:60]))
 
-            for row_idx, row in enumerate(rows):
+            # -- 动态检测各列索引（细节图、方形图、色块图）--
+            _col_detail = 2
+            _col_square = -1
+            _col_color_block = -1
+            try:
+                _header_rows = driver.find_elements(By.CSS_SELECTOR,
+                    "#userguide_commodities_info_skc_title_table thead tr,"
+                    "div.detail_img_container thead tr")
+                for _hr in _header_rows:
+                    _ths = _hr.find_elements(By.TAG_NAME, "th")
+                    if not _ths:
+                        _ths = _hr.find_elements(By.TAG_NAME, "td")
+                    _header_texts = []
+                    for _th_idx, _th in enumerate(_ths):
+                        _th_text = (_th.text or "").strip()
+                        _header_texts.append(_th_text)
+                        if "细节" in _th_text:
+                            _col_detail = _th_idx
+                        elif "方形" in _th_text:
+                            _col_square = _th_idx
+                        elif "色块" in _th_text:
+                            _col_color_block = _th_idx
+                    if _header_texts:
+                        self.log("[DEBUG] 表头列: {}".format(_header_texts))
+                        break
+            except Exception:
+                pass
+            if _col_color_block < 0:
+                _col_color_block = _col_detail + 2 if _col_detail >= 0 else 4
+            self.log("[DEBUG] 列索引: 细节图={}, 方形图={}, 色块图={}".format(
+                _col_detail, _col_square, _col_color_block))
+
+            # -- 读取页面每行第1列颜色文本，反查 sku_list 找对应 SKU --
+            _CN_EN = {
+                "黑色": "black", "白色": "white", "灰色": "grey",
+                "红色": "red", "蓝色": "blue", "绿色": "green",
+                "黄色": "yellow", "粉色": "pink", "粉红色": "pink",
+                "紫色": "purple", "棕色": "brown", "褐色": "brown",
+                "橙色": "orange", "金色": "gold", "银色": "silver",
+                "米色": "beige", "米白色": "beige",
+                "酒红色": "wine", "卡其色": "khaki",
+                "深灰色": "darkgrey", "浅灰色": "lightgrey",
+                "深蓝色": "darkblue", "天蓝色": "skyblue",
+                "藏青色": "navy", "咖啡色": "coffee",
+                "墨绿色": "darkgreen", "浅绿色": "lightgreen",
+                "浅蓝色": "lightblue", "深红色": "darkred",
+                "橘色": "orange", "灰白色": "greywhite",
+                "奶白色": "creamwhite", "米黄色": "cream",
+                "原木色": "natural", "驼色": "camel",
+                "透明": "clear", "黑白色": "blackandwhite",
+                "花色": "floral", "多色": "multicolor",
+                "杏色": "apricot",
+            }
+
+            def _norm_color(s):
+                return re.sub(r"[\s\-_&/]+", "", (s or "")).lower()
+
+            def _sku_color_val(sku):
+                attrs = str(sku.get("sku_attributes") or "")
+                cv = attrs.split("/")[0].strip() if attrs else ""
+                if ":" in cv:
+                    cv = cv.split(":", 1)[1].strip()
+                return cv
+
+            def _read_row_color(row_el):
+                try:
+                    tds = row_el.find_elements(By.TAG_NAME, "td")
+                    if tds:
+                        raw = tds[0].text or ""
+                        lns = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+                        if lns:
+                            return lns[0]
+                except Exception:
+                    pass
+                return ""
+
+            def _split_cn_en(text):
+                """Split '白色White' into ('白色', 'White')."""
+                t = (text or "").strip()
+                cn_part = ""
+                en_part = ""
+                for ch in t:
+                    if '\u4e00' <= ch <= '\u9fff':
+                        cn_part += ch
+                    elif ch.isascii() and ch.isalpha():
+                        en_part += ch
+                    elif ch == ' ' and en_part:
+                        en_part += ch
+                return cn_part.strip(), en_part.strip()
+
+            def _match_sku_by_color(page_color, _sku_list, used_indices):
+                nc = _norm_color(page_color)
+                if not nc:
+                    return None, -1
+                # Layer 1: direct normalized match
+                for i, sku in enumerate(_sku_list):
+                    if i in used_indices:
+                        continue
+                    if _norm_color(_sku_color_val(sku)) == nc:
+                        return sku, i
+                # Layer 2: extract Chinese/English parts and match via CN_EN dict
+                cn_part, en_part = _split_cn_en(page_color)
+                # 2a: look up Chinese part in CN_EN
+                for cn_key in [page_color.strip(), cn_part]:
+                    cn_en_hit = _CN_EN.get(cn_key)
+                    if cn_en_hit:
+                        nc_en = _norm_color(cn_en_hit)
+                        for i, sku in enumerate(_sku_list):
+                            if i in used_indices:
+                                continue
+                            if _norm_color(_sku_color_val(sku)) == nc_en:
+                                return sku, i
+                # 2b: use English part directly (e.g. page="白色White" -> en_part="White")
+                if en_part:
+                    nc_en = _norm_color(en_part)
+                    for i, sku in enumerate(_sku_list):
+                        if i in used_indices:
+                            continue
+                        nc_attr = _norm_color(_sku_color_val(sku))
+                        if nc_attr == nc_en:
+                            return sku, i
+                # Layer 3: match via filled_values prefix
+                filled_vals = getattr(self, "_last_main_spec_filled_values", []) or []
+                filled_idxs = getattr(self, "_main_spec_filled_sku_indices", []) or []
+                for fi, fv in enumerate(filled_vals):
+                    nfv = _norm_color(fv)
+                    if nc and nfv and (nfv.startswith(nc) or nc.startswith(nfv) or nc == nfv):
+                        if fi < len(filled_idxs):
+                            si = filled_idxs[fi]
+                            if si not in used_indices and 0 <= si < len(_sku_list):
+                                return _sku_list[si], si
+                # Layer 4: substring containment (fuzzy)
+                for i, sku in enumerate(_sku_list):
+                    if i in used_indices:
+                        continue
+                    nc_attr = _norm_color(_sku_color_val(sku))
+                    if nc_attr and (nc_attr in nc or nc in nc_attr):
+                        return sku, i
+                return None, -1
+
+            row_sku_map = []
+            used_sku_indices = set()
+            for ri, r in enumerate(rows):
+                page_color = _read_row_color(r)
+                matched_sku, matched_idx = _match_sku_by_color(
+                    page_color, sku_list, used_sku_indices)
+                if matched_sku is not None:
+                    used_sku_indices.add(matched_idx)
+                    row_sku_map.append((page_color, matched_sku))
+                    self.log("[MAP] 行{:02d} 页面='{}' -> SKU='{}' | imgs={}".format(
+                        ri + 1, page_color,
+                        matched_sku.get("sku_attributes", ""),
+                        len((matched_sku.get("images") or [])[:5])))
+                else:
+                    row_sku_map.append((page_color, None))
+                    self.log("[MAP] 行{:02d} 页面='{}' -> 未匹配".format(
+                        ri + 1, page_color))
+
+            for row_idx in range(len(row_sku_map)):
                 self._ensure_not_stopped()
-                # Get images for this SKU row
-                if row_idx < len(ordered_sku_list):
-                    sku_imgs = (ordered_sku_list[row_idx].get("images") or [])[:5]
-                    sku_attr = ordered_sku_list[row_idx].get("sku_attributes", "")
+                # Re-find rows each iteration to avoid stale DOM references
+                # (swatch upload / crop dialog may trigger table re-render)
+                try:
+                    rows = driver.find_elements(By.CSS_SELECTOR,
+                        "#userguide_commodities_info_skc_title_table tbody tr,"
+                        "div.detail_img_container tbody tr")
+                except Exception:
+                    pass
+                if row_idx >= len(rows):
+                    self.log("[WARN] 行 {} 超出当前表格行数 {}，跳过".format(row_idx + 1, len(rows)))
+                    break
+                row = rows[row_idx]
+                page_color, matched_sku = row_sku_map[row_idx]
+                if matched_sku is not None:
+                    sku_imgs = (matched_sku.get("images") or [])[:5]
+                    sku_attr = matched_sku.get("sku_attributes", "")
                 else:
                     sku_imgs = fallback_images
-                    sku_attr = ""
+                    sku_attr = page_color or "(未匹配)"
                 if not sku_imgs:
                     sku_imgs = fallback_images
-                self.log("[DEBUG] SKU行 {} ({}): 准备上传 {} 张图片".format(
-                    row_idx + 1, sku_attr, len(sku_imgs)))
+                self.log("[DEBUG] SKU行 {} (页面:{} -> SKU:{}): 准备上传 {} 张图片".format(
+                    row_idx + 1, page_color, sku_attr, len(sku_imgs)))
                 # Scroll row into view
                 try:
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
@@ -2782,53 +2939,299 @@ class SheinPublisher:
                         self.log("[ERROR] SKU行 {} 图{} 上传失败: {}".format(row_idx+1, img_idx+1, str(e)[:60]))
                 self.log("[OK] SKU行 {} 已成功上传 {}/{} 张细节图".format(
                     row_idx + 1, upload_ok_count, len(img_paths)))
-                # 上传色块图：使用该SKU细节图第一张
+
+                # -- 上传后颜色校验：重读当前行颜色，与预期 SKU 比对 --
+                try:
+                    rows = driver.find_elements(By.CSS_SELECTOR,
+                        "#userguide_commodities_info_skc_title_table tbody tr,"
+                        "div.detail_img_container tbody tr")
+                    if row_idx < len(rows):
+                        row = rows[row_idx]
+                    verify_color = _read_row_color(row)
+                    if matched_sku is not None:
+                        expected_attr = _sku_color_val(matched_sku)
+                        vc_norm = _norm_color(verify_color)
+                        ea_norm = _norm_color(expected_attr)
+                        cn_part_v, en_part_v = _split_cn_en(verify_color)
+                        cn_part_e, en_part_e = _split_cn_en(expected_attr)
+                        color_ok = (
+                            vc_norm == ea_norm
+                            or (en_part_v and en_part_e and _norm_color(en_part_v) == _norm_color(en_part_e))
+                            or (cn_part_v and _CN_EN.get(cn_part_v, "") and _norm_color(_CN_EN[cn_part_v]) == ea_norm)
+                            or (ea_norm and ea_norm in vc_norm)
+                            or (vc_norm and vc_norm in ea_norm)
+                        )
+                        if color_ok:
+                            self.log("[CHECK] SKU行 {} 颜色校验通过: 页面='{}' SKU='{}'".format(
+                                row_idx + 1, verify_color, expected_attr))
+                        else:
+                            self.log("[WARN] SKU行 {} 颜色校验不一致! 页面='{}' 预期SKU='{}' — 图片可能传错".format(
+                                row_idx + 1, verify_color, expected_attr))
+                except Exception as _vc_e:
+                    self.log("[DEBUG] SKU行 {} 颜色校验异常: {}".format(row_idx + 1, str(_vc_e)[:60]))
+
+                # -- 方形图检查：动态定位方形图列，检查是否需要补传第1张细节图 --
+                square_uploaded = False
+                try:
+                    try:
+                        rows_sq = driver.find_elements(By.CSS_SELECTOR,
+                            "#userguide_commodities_info_skc_title_table tbody tr,"
+                            "div.detail_img_container tbody tr")
+                        if row_idx < len(rows_sq):
+                            row = rows_sq[row_idx]
+                    except Exception:
+                        pass
+                    tds_sq = row.find_elements(By.TAG_NAME, "td")
+
+                    square_td = None
+                    square_td_idx = -1
+
+                    # 方法1：通过表头文字匹配"方形"定位列索引
+                    try:
+                        header_rows = driver.find_elements(By.CSS_SELECTOR,
+                            "#userguide_commodities_info_skc_title_table thead tr,"
+                            "div.detail_img_container thead tr")
+                        for hr in header_rows:
+                            ths = hr.find_elements(By.TAG_NAME, "th")
+                            if not ths:
+                                ths = hr.find_elements(By.TAG_NAME, "td")
+                            for th_idx, th in enumerate(ths):
+                                th_text = (th.text or "").strip()
+                                if "方形" in th_text:
+                                    square_td_idx = th_idx
+                                    if th_idx < len(tds_sq):
+                                        square_td = tds_sq[th_idx]
+                                    self.log("[DEBUG] 通过表头定位方形图列: 索引 {}".format(th_idx))
+                                    break
+                            if square_td is not None:
+                                break
+                    except Exception:
+                        pass
+
+                    # 方法2：扫描 td 的 innerHTML，方形图为单文件上传框（无 multiple 属性）
+                    if square_td is None:
+                        for chk_idx in [1, 3]:
+                            if chk_idx >= len(tds_sq) or chk_idx == 2:
+                                continue
+                            try:
+                                chk_html = driver.execute_script(
+                                    "return arguments[0].innerHTML;", tds_sq[chk_idx])
+                                has_file = ("type=\"file\"" in chk_html or "type='file'" in chk_html)
+                                is_single = "multiple" not in chk_html
+                                if has_file and is_single:
+                                    square_td = tds_sq[chk_idx]
+                                    square_td_idx = chk_idx
+                                    self.log("[DEBUG] 通过HTML特征定位方形图列: 索引 {}".format(chk_idx))
+                                    break
+                            except Exception:
+                                pass
+
+                    # 方法3：兜底，优先索引 1（方形图在细节图前）再试 3
+                    if square_td is None:
+                        for fb_idx in [1, 3]:
+                            if fb_idx < len(tds_sq):
+                                square_td = tds_sq[fb_idx]
+                                square_td_idx = fb_idx
+                                self.log("[DEBUG] 方形图列兜底定位: 索引 {}".format(fb_idx))
+                                break
+
+                    if square_td is not None:
+                        sq_inner_html = ""
+                        try:
+                            sq_inner_html = driver.execute_script(
+                                "return arguments[0].innerHTML;", square_td)
+                        except Exception:
+                            pass
+
+                        sq_has_upload_btn = False
+                        if "点击上传" in sq_inner_html or "上传图片" in sq_inner_html:
+                            sq_has_upload_btn = True
+                        if not sq_has_upload_btn:
+                            for cls_kw in ['uploadPlus', 'uploadText', 'uploadHandle', 'upload-text']:
+                                if cls_kw in sq_inner_html:
+                                    sq_has_upload_btn = True
+                                    break
+                        if not sq_has_upload_btn:
+                            try:
+                                sq_upload_els = square_td.find_elements(By.XPATH,
+                                    ".//*[contains(@class,'uploadPlus') or contains(@class,'uploadText') "
+                                    "or contains(@class,'uploadHandle') or contains(@class,'upload-text')]")
+                                if not sq_upload_els:
+                                    sq_upload_els = square_td.find_elements(By.XPATH,
+                                        ".//*[contains(text(),'点击上传') or contains(text(),'上传图片')]")
+                                sq_has_upload_btn = len(sq_upload_els) > 0
+                            except Exception:
+                                pass
+
+                        sq_has_img = False
+                        try:
+                            sq_imgs = square_td.find_elements(By.CSS_SELECTOR, "img")
+                            sq_has_img = any(
+                                im.is_displayed() and (im.get_attribute("src") or "").startswith("http")
+                                for im in sq_imgs
+                            )
+                        except Exception:
+                            pass
+
+                        self.log("[DEBUG] SKU行 {} 方形图检查(列{}): 有上传按钮={}, 已有图片={}, HTML: {}".format(
+                            row_idx + 1, square_td_idx, sq_has_upload_btn, sq_has_img,
+                            sq_inner_html[:200] if sq_inner_html else "(empty)"))
+
+                        if (sq_has_upload_btn or not sq_has_img) and img_paths:
+                            sq_input = None
+                            try:
+                                sq_inputs = square_td.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                                if sq_inputs:
+                                    sq_input = sq_inputs[0]
+                            except Exception:
+                                pass
+                            if sq_input is not None:
+                                try:
+                                    self._dismiss_switch_confirm_modal()
+                                    driver.execute_script(
+                                        "arguments[0].style.display='block';"
+                                        "arguments[0].style.visibility='visible';"
+                                        "arguments[0].style.opacity='1';", sq_input)
+                                    sq_input.send_keys(img_paths[0])
+                                    self.log("[OK] SKU行 {} 方形图未自动加载，已补传第1张细节图".format(row_idx + 1))
+                                    self._dismiss_switch_confirm_modal()
+                                    self._handle_crop_dialog()
+                                    time.sleep(1.2)
+                                    square_uploaded = True
+                                except Exception as e:
+                                    self.log("[WARN] SKU行 {} 方形图补传失败: {}".format(row_idx + 1, str(e)[:60]))
+                            else:
+                                self.log("[DEBUG] SKU行 {} 方形图列未找到 file input, HTML: {}".format(
+                                    row_idx + 1, sq_inner_html[:300]))
+                        else:
+                            self.log("[DEBUG] SKU行 {} 方形图已有图片，跳过补传".format(row_idx + 1))
+                    else:
+                        try:
+                            row_html = driver.execute_script("return arguments[0].innerHTML;", row)
+                            self.log("[DEBUG] SKU行 {} 未找到方形图列(共{}列), 行HTML: {}".format(
+                                row_idx + 1, len(tds_sq), row_html[:500]))
+                        except Exception:
+                            self.log("[DEBUG] SKU行 {} 未找到方形图列(共{}列)".format(row_idx + 1, len(tds_sq)))
+                except Exception as e:
+                    self.log("[DEBUG] SKU行 {} 方形图检查异常: {}".format(row_idx + 1, str(e)[:60]))
+
+                # -- 色块图：必须上传，缺失会导致发布失败 --
                 try:
                     color_img_path = img_paths[0] if img_paths else None
-                    piece_input = None
-                    if color_img_path:
-                        try:
-                            tds_piece = row.find_elements(By.TAG_NAME, "td")
-                            piece_td = tds_piece[4] if len(tds_piece) >= 5 else None  # 第5列=色块图（首选）
-                            if piece_td is not None:
-                                piece_inputs = piece_td.find_elements(By.CSS_SELECTOR, "input[type='file']")
-                                if piece_inputs:
-                                    piece_input = piece_inputs[0]
-
-                            # 兜底1：行内圆角上传容器（色块图常见样式）
-                            if piece_input is None:
-                                round_inputs = row.find_elements(By.CSS_SELECTOR,
-                                    "div[style*='border-radius: 50'] input[type='file'],"
-                                    "div[style*='border-radius:50'] input[type='file']")
-                                if round_inputs:
-                                    piece_input = round_inputs[0]
-
-                            # 兜底2：最后一列 input（通常是色块图列）
-                            if piece_input is None and len(tds_piece) >= 1:
-                                last_td_inputs = tds_piece[-1].find_elements(By.CSS_SELECTOR, "input[type='file']")
-                                if last_td_inputs:
-                                    piece_input = last_td_inputs[0]
-                        except Exception as e:
-                            self.log("[WARN] 行 {} 定位色块图 input 失败: {}".format(row_idx + 1, str(e)[:60]))
-
-                    if piece_input is not None and color_img_path:
-                        try:
-                            self._dismiss_switch_confirm_modal()
-                            driver.execute_script(
-                                "arguments[0].style.display='block';"
-                                "arguments[0].style.visibility='visible';"
-                                "arguments[0].style.opacity='1';", piece_input)
-                            piece_input.send_keys(color_img_path)
-                            self.log("[OK] SKU行 {} 色块图已提交（取细节图第1张）".format(row_idx + 1))
-                            self._dismiss_switch_confirm_modal()
-                            self._handle_crop_dialog()
-                            time.sleep(1.2)
-                        except Exception as e:
-                            self.log("[WARN] SKU行 {} 色块图上传失败: {}".format(row_idx + 1, str(e)[:60]))
+                    if not color_img_path:
+                        self.log("[WARN] SKU行 {} 无可用图片，跳过色块图".format(row_idx + 1))
                     else:
-                        self.log("[WARN] SKU行 {} 未找到色块图 input，跳过色块图上传".format(row_idx + 1))
+                        piece_uploaded = False
+                        for _cb_attempt in range(5):
+                            if piece_uploaded:
+                                break
+                            try:
+                                # 每次重试都重新获取行引用
+                                try:
+                                    _rows_cb = driver.find_elements(By.CSS_SELECTOR,
+                                        "#userguide_commodities_info_skc_title_table tbody tr,"
+                                        "div.detail_img_container tbody tr")
+                                    if row_idx < len(_rows_cb):
+                                        row = _rows_cb[row_idx]
+                                except Exception:
+                                    pass
+                                if _cb_attempt > 0:
+                                    self._dismiss_switch_confirm_modal()
+
+                                tds_piece = row.find_elements(By.TAG_NAME, "td")
+                                piece_input = None
+
+                                # 方法1：使用表头检测到的色块图列索引
+                                if piece_input is None and 0 <= _col_color_block < len(tds_piece):
+                                    _pi = tds_piece[_col_color_block].find_elements(
+                                        By.CSS_SELECTOR, "input[type='file']")
+                                    if _pi:
+                                        piece_input = _pi[0]
+                                        self.log("[DEBUG] 色块图 input 定位: 表头列索引 {}".format(
+                                            _col_color_block)) if _cb_attempt == 0 else None
+
+                                # 方法2：旧逻辑兼容，第5列
+                                if piece_input is None and len(tds_piece) >= 5:
+                                    _pi = tds_piece[4].find_elements(
+                                        By.CSS_SELECTOR, "input[type='file']")
+                                    if _pi:
+                                        piece_input = _pi[0]
+
+                                # 方法3：圆角上传容器
+                                if piece_input is None:
+                                    _ri = row.find_elements(By.CSS_SELECTOR,
+                                        "div[style*='border-radius: 50'] input[type='file'],"
+                                        "div[style*='border-radius:50'] input[type='file']")
+                                    if _ri:
+                                        piece_input = _ri[0]
+
+                                # 方法4：最后一列
+                                if piece_input is None and tds_piece:
+                                    _pi = tds_piece[-1].find_elements(
+                                        By.CSS_SELECTOR, "input[type='file']")
+                                    if _pi:
+                                        piece_input = _pi[0]
+
+                                # 方法5：行内所有非 multiple 的 file input（排除细节图列）
+                                if piece_input is None:
+                                    _all_fi = row.find_elements(
+                                        By.CSS_SELECTOR, "input[type='file']")
+                                    for _fi in _all_fi:
+                                        if not _fi.get_attribute("multiple"):
+                                            _fi_parent_td = None
+                                            try:
+                                                _fi_parent_td = driver.execute_script(
+                                                    "return arguments[0].closest('td');", _fi)
+                                            except Exception:
+                                                pass
+                                            td_idx = -1
+                                            if _fi_parent_td:
+                                                for _ti, _td in enumerate(tds_piece):
+                                                    try:
+                                                        if _td == _fi_parent_td:
+                                                            td_idx = _ti
+                                                            break
+                                                    except Exception:
+                                                        pass
+                                            if td_idx != _col_detail:
+                                                piece_input = _fi
+                                                self.log("[DEBUG] 色块图 input 定位: 行内非multiple input (td={})".format(td_idx))
+                                                break
+
+                                if piece_input is None:
+                                    self.log("[DEBUG] SKU行 {} 色块图第{}次尝试未找到 input (共{}列)".format(
+                                        row_idx + 1, _cb_attempt + 1, len(tds_piece)))
+                                    if _cb_attempt < 4:
+                                        time.sleep(1.5)
+                                    continue
+
+                                self._dismiss_switch_confirm_modal()
+                                driver.execute_script(
+                                    "var el=arguments[0];"
+                                    "el.style.display='block';"
+                                    "el.style.visibility='visible';"
+                                    "el.style.opacity='1';"
+                                    "el.style.height='10px';"
+                                    "el.style.width='10px';"
+                                    "el.style.position='relative';"
+                                    "el.style.zIndex='9999';", piece_input)
+                                piece_input.send_keys(color_img_path)
+                                self.log("[OK] SKU行 {} 色块图已提交（第{}次, 取细节图第1张）".format(
+                                    row_idx + 1, _cb_attempt + 1))
+                                self._dismiss_switch_confirm_modal()
+                                self._handle_crop_dialog()
+                                time.sleep(1.2)
+                                piece_uploaded = True
+                            except Exception as e:
+                                self.log("[WARN] SKU行 {} 色块图第{}次尝试异常: {}".format(
+                                    row_idx + 1, _cb_attempt + 1, str(e)[:60]))
+                                if _cb_attempt < 4:
+                                    time.sleep(1.5)
+
+                        if not piece_uploaded:
+                            self.log("[ERROR] SKU行 {} 色块图经5次重试仍未上传!".format(row_idx + 1))
                 except Exception as e:
-                    self.log("[WARN] SKU行 {} 色块图流程异常: {}".format(row_idx + 1, str(e)[:60]))
+                    self.log("[ERROR] SKU行 {} 色块图流程异常: {}".format(row_idx + 1, str(e)[:60]))
 
                 # Cleanup temp files
                 for p in img_paths:
