@@ -1742,29 +1742,69 @@ class SheinPublisher:
                 def _dismiss_error_modal_if_any(wait_rounds=6):
                     for _ in range(wait_rounds):
                         try:
-                            modal = driver.find_elements(By.XPATH,
-                                "//div[contains(@class,'soui-modal-panel') and .//*[contains(normalize-space(.),'错误信息')]]"
-                            )
-                            know_btn = driver.find_elements(By.XPATH,
-                                "//div[contains(@class,'soui-modal-panel')]//button[.//span[normalize-space(text())='我知道了'] or normalize-space(text())='我知道了']"
-                            )
-                            if modal and know_btn:
-                                clicked = False
-                                for b in know_btn:
-                                    try:
-                                        if b.is_displayed():
-                                            try:
-                                                b.click()
-                                            except Exception:
-                                                driver.execute_script("arguments[0].click();", b)
-                                            clicked = True
-                                            break
-                                    except Exception:
-                                        continue
-                                if clicked:
-                                    time.sleep(0.5)
-                                    self.log("[WARN] {} 触发错误弹窗，已点击'我知道了'".format(label))
-                                    return True
+                            clicked = False
+                            # 方法1：多种 modal class 匹配"错误信息"弹窗
+                            modal_xps = [
+                                "//div[contains(@class,'soui-modal-panel') and .//*[contains(normalize-space(.),'错误信息')]]",
+                                "//div[contains(@class,'so-modal') and .//*[contains(normalize-space(.),'错误信息')]]",
+                                "//div[contains(@class,'modal') and .//*[contains(normalize-space(.),'错误信息')]]",
+                                "//div[contains(@class,'so-card') and .//*[contains(normalize-space(.),'错误信息')]]",
+                            ]
+                            btn_xps = [
+                                "//div[contains(@class,'soui-modal-panel')]//button[.//span[normalize-space(text())='我知道了'] or normalize-space(text())='我知道了']",
+                                "//div[contains(@class,'so-modal')]//button[.//span[normalize-space(text())='我知道了'] or normalize-space(text())='我知道了']",
+                                "//div[contains(@class,'modal')]//button[.//span[normalize-space(text())='我知道了'] or normalize-space(text())='我知道了']",
+                                "//div[contains(@class,'so-card')]//button[.//span[normalize-space(text())='我知道了'] or normalize-space(text())='我知道了']",
+                            ]
+                            has_modal = False
+                            for mxp in modal_xps:
+                                if driver.find_elements(By.XPATH, mxp):
+                                    has_modal = True
+                                    break
+                            if has_modal:
+                                for bxp in btn_xps:
+                                    for b in driver.find_elements(By.XPATH, bxp):
+                                        try:
+                                            if b.is_displayed():
+                                                try:
+                                                    b.click()
+                                                except Exception:
+                                                    driver.execute_script("arguments[0].click();", b)
+                                                clicked = True
+                                                break
+                                        except Exception:
+                                            continue
+                                    if clicked:
+                                        break
+                            # 方法2：JS 兜底——页面内任意可见按钮文字为"我知道了"
+                            if not clicked:
+                                try:
+                                    clicked = driver.execute_script("""
+                                        var btns = document.querySelectorAll('button');
+                                        for (var i = 0; i < btns.length; i++) {
+                                            var t = (btns[i].textContent || '').trim();
+                                            if (t === '我知道了' && btns[i].offsetParent !== null) {
+                                                btns[i].click();
+                                                return true;
+                                            }
+                                        }
+                                        var spans = document.querySelectorAll('span');
+                                        for (var j = 0; j < spans.length; j++) {
+                                            var st = (spans[j].textContent || '').trim();
+                                            if (st === '我知道了' && spans[j].offsetParent !== null) {
+                                                var btn = spans[j].closest('button');
+                                                if (btn) { btn.click(); return true; }
+                                                spans[j].click(); return true;
+                                            }
+                                        }
+                                        return false;
+                                    """) or False
+                                except Exception:
+                                    pass
+                            if clicked:
+                                time.sleep(0.5)
+                                self.log("[WARN] {} 触发错误弹窗，已点击'我知道了'".format(label))
+                                return True
                         except Exception:
                             pass
                         time.sleep(0.25)
@@ -3599,11 +3639,12 @@ class SheinPublisher:
         """
         检测页面上是否弹出"切换后，将清空已填写SKC、SKU信息，是否确认切换？"弹窗，
         若存在则点击"取消"按钮，避免误清空已填写数据。
-        返回 True 表示检测到并已点击取消，False 表示未检测到弹窗。
+        同时检测"错误信息"弹窗并点击"我知道了"。
+        返回 True 表示检测到并已处理弹窗，False 表示未检测到弹窗。
         """
         driver = self.driver
         try:
-            # 通过弹窗特征文字定位
+            # A) "切换清空"确认弹窗 → 点击取消
             modal_xpaths = [
                 "//div[contains(@class,'so-modal-confirm') and .//*[contains(text(),'清空已填写')]]//button[contains(@class,'so-button-default')]",
                 "//div[contains(@class,'so-modal-confirm') and .//*[contains(text(),'SKC')]]//button[contains(@class,'so-button-default')]",
@@ -3627,6 +3668,35 @@ class SheinPublisher:
                             return True
                 except Exception:
                     continue
+
+            # B) "错误信息"弹窗 → 点击"我知道了"
+            try:
+                dismissed = driver.execute_script("""
+                    var btns = document.querySelectorAll('button');
+                    for (var i = 0; i < btns.length; i++) {
+                        var t = (btns[i].textContent || '').trim();
+                        if (t === '我知道了' && btns[i].offsetParent !== null) {
+                            btns[i].click();
+                            return true;
+                        }
+                    }
+                    var spans = document.querySelectorAll('span');
+                    for (var j = 0; j < spans.length; j++) {
+                        var st = (spans[j].textContent || '').trim();
+                        if (st === '我知道了' && spans[j].offsetParent !== null) {
+                            var btn = spans[j].closest('button');
+                            if (btn) { btn.click(); return true; }
+                            spans[j].click(); return true;
+                        }
+                    }
+                    return false;
+                """) or False
+                if dismissed:
+                    self.log("[OK] 检测到'错误信息'弹窗，已点击'我知道了'")
+                    time.sleep(0.5)
+                    return True
+            except Exception:
+                pass
         except Exception as e:
             self.log("[DEBUG] _dismiss_switch_confirm_modal 异常: {}".format(str(e)[:60]))
         return False
