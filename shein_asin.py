@@ -711,6 +711,51 @@ def _extract_color_only_asins(soup):
     return result
 
 
+_SHEIN_OFFICIAL_COLORS = {
+    "apricot", "blackandwhite", "burgundy", "ginger", "hotpink",
+    "orange", "royalblue", "armygreen", "blue", "camel", "gold", "khaki",
+    "pink", "silver", "beige", "bronze", "champagne", "black", "brown",
+    "clear", "green", "grey", "gray", "maroon", "multicolor", "purple",
+    "red", "white", "yellow",
+    "coralpink", "darkgrey", "darkgray", "burntorange", "redwood",
+    "lilacpurple", "coffeebrown", "watermelonpink", "violetpurple",
+    "darkgreen", "coralorange", "cadetblue", "mintblue", "babypink",
+    "dustypurple", "mintgreen", "rustyrose", "mustardyellow", "dustypink",
+    "rustbrown", "redviolet", "chocolatebrown", "lightgrey", "lightgray",
+    "rosered", "babyblue", "dustyblue", "tealblue", "mauvepurple",
+    "mochabrown", "limegreen", "redandwhite", "olivegreen", "navyblue",
+    "blueandwhite",
+}
+
+
+def _norm_color_for_match(text):
+    t = re.sub(r"[^a-zA-Z]", "", str(text or "")).lower()
+    t = t.replace("colour", "color")
+    return t
+
+
+def _is_shein_official_color(color_text):
+    """
+    严格白名单：仅整串归一化后命中官方色，或「官方色名的前缀截断」。
+    禁止 n.startswith(短官方色) 误放 White&Grey -> whitegrey 匹配 white。
+    含 & / | 等复合写法时，仅当整串归一化后恰为白名单内一项才通过。
+    """
+    raw = str(color_text or "").strip()
+    if not raw:
+        return False
+    n = _norm_color_for_match(raw)
+    if not n:
+        return False
+    if n in _SHEIN_OFFICIAL_COLORS:
+        return True
+    if re.search(r'[&/|+＆／、，·]', raw):
+        return False
+    for tok in _SHEIN_OFFICIAL_COLORS:
+        if len(n) >= 4 and len(n) < len(tok) and tok.startswith(n):
+            return True
+    return False
+
+
 def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=5):
     if not color_image_map:
         return []
@@ -1007,6 +1052,7 @@ def fetch_amazon_product(asin, region="美国"):
         _has_color = any("color" in d or "colour" in d for d in _all_dim_names_lower)
         _has_size  = any("size" in d for d in _all_dim_names_lower)
         _color_only_mode = _has_color and _has_size
+        _main_spec_is_color = _has_color
 
         # 提取「其他规格」：color_only_mode 下，收集非 color 维度的所有选项值
         # 格式：{"size": ["65L", "96L"], ...}
@@ -1051,6 +1097,8 @@ def fetch_amazon_product(asin, region="美国"):
 
             for ca, color_name in _color_asins_from_html:
                 if not ca or ca in sku_seen:
+                    continue
+                if _main_spec_is_color and not _is_shein_official_color(color_name):
                     continue
                 sku_seen.add(ca)
                 sku_images = sku_image_cache.get(ca, [])
@@ -1119,6 +1167,13 @@ def fetch_amazon_product(asin, region="美国"):
                         value_display_map=value_display_map
                     ) or "默认规格"
 
+                    if _main_spec_is_color and any("color" in b or "colour" in b for b in basis):
+                        _color_val = sku_attr_text.split("/")[0].strip()
+                        if ":" in _color_val:
+                            _color_val = _color_val.split(":", 1)[1].strip()
+                        if not _is_shein_official_color(_color_val):
+                            continue
+
                     sku_list.append({
                         "sku_asin": sku_asin,
                         "sku_attributes": sku_attr_text,
@@ -1126,7 +1181,7 @@ def fetch_amazon_product(asin, region="美国"):
                         "images": sku_images[:8]
                     })
 
-        if not sku_list:
+        if not sku_list and not _main_spec_is_color:
             sku_list.append({
                 "sku_asin": asin,
                 "sku_attributes": "默认规格",
