@@ -1083,11 +1083,26 @@ class SheinPublisher:
                             continue
                 except Exception as _bp_e:
                     self.log("[WARN] 批量填写价格失败: {}".format(str(_bp_e)[:60]))
-            # 步骤2.5: 填写含包装重量(g)
+            # 步骤2.5: 通过批量填写区域填写含包装重量(g)
             try:
-                self.log("[DEBUG] 填写含包装重量...")
-                w_inp = driver.find_element(By.CSS_SELECTOR, ".weightClass_0 input")
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", w_inp)
+                self.log("[DEBUG] 批量填写含包装重量...")
+                batch_w_inp = None
+                for sel in [
+                    ".weightSupplyFillClass_0 input",
+                    ".packageCheckBatchFillError .weightSupplyFillClass_0 input",
+                    ".packageCheckBatchFillError input[placeholder*='\u91cd\u91cf']",
+                ]:
+                    try:
+                        el = driver.find_element(By.CSS_SELECTOR, sel)
+                        if el.is_displayed():
+                            batch_w_inp = el
+                            break
+                    except Exception:
+                        continue
+                if batch_w_inp is None:
+                    raise RuntimeError("batch weight input not found")
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", batch_w_inp)
+                time.sleep(0.3)
                 driver.execute_script(
                     "(function(el,val){"
                     "var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;"
@@ -1096,11 +1111,60 @@ class SheinPublisher:
                     "el.dispatchEvent(new Event('change',{bubbles:true}));"
                     "el.dispatchEvent(new Event('blur',{bubbles:true}));"
                     "})(arguments[0],arguments[1]);",
-                    w_inp, "100")
-                self.log("[OK] 含包装重量已填写100g")
+                    batch_w_inp, "100")
+                self.log("[OK] 批量填写重量输入框已写入100")
                 time.sleep(0.3)
+                batch_fill_btn = None
+                try:
+                    container = batch_w_inp.find_element(By.XPATH,
+                        "ancestor::div[contains(@class,'packageCheckBatchFillError')]")
+                    for btn in container.find_elements(By.CSS_SELECTOR,
+                            "button.so-button-primary"):
+                        try:
+                            txt = (btn.text or "").strip()
+                            if "\u6279\u91cf\u586b\u5199" in txt:
+                                batch_fill_btn = btn
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                if batch_fill_btn is None:
+                    for btn in driver.find_elements(By.XPATH,
+                            "//div[contains(@class,'packageCheckBatchFillError')]"
+                            "//button[.//span[contains(text(),'\u6279\u91cf\u586b\u5199')]]"):
+                        try:
+                            if btn.is_displayed():
+                                batch_fill_btn = btn
+                                break
+                        except Exception:
+                            continue
+                if batch_fill_btn is not None:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", batch_fill_btn)
+                    time.sleep(0.2)
+                    try:
+                        batch_fill_btn.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", batch_fill_btn)
+                    self.log("[OK] \u5df2\u70b9\u51fb\u5305\u88c5\u4fe1\u606f\u300c\u6279\u91cf\u586b\u5199\u300d\u6309\u94ae\uff0c\u6240\u6709SKU\u542b\u5305\u88c5\u91cd\u91cf\u5df2\u8bbe\u4e3a100g")
+                    time.sleep(0.5)
+                else:
+                    self.log("[WARN] \u672a\u627e\u5230\u5305\u88c5\u4fe1\u606f\u300c\u6279\u91cf\u586b\u5199\u300d\u6309\u94ae\uff0c\u56de\u9000\u5355\u884c\u586b\u5199")
+                    w_inp = driver.find_element(By.CSS_SELECTOR, ".weightClass_0 input")
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", w_inp)
+                    driver.execute_script(
+                        "(function(el,val){"
+                        "var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;"
+                        "s.call(el,val);"
+                        "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                        "el.dispatchEvent(new Event('change',{bubbles:true}));"
+                        "el.dispatchEvent(new Event('blur',{bubbles:true}));"
+                        "})(arguments[0],arguments[1]);",
+                        w_inp, "100")
+                    self.log("[OK] \u542b\u5305\u88c5\u91cd\u91cf\u5df2\u586b\u5199100g\uff08\u5355\u884c\uff09")
+                    time.sleep(0.3)
             except Exception as _we:
-                self.log("[DEBUG] 含包装重量填写失败: {}".format(str(_we)[:60]))
+                self.log("[DEBUG] \u542b\u5305\u88c5\u91cd\u91cf\u586b\u5199\u5931\u8d25: {}".format(str(_we)[:60]))
             # 步骤2: 点击"编辑库存"，批量填写库存200，确认
             try:
                 self.log("[DEBUG] 处理库存...")
