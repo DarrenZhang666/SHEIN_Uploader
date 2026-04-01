@@ -189,15 +189,22 @@ class SheinApp(tk.Tk):
         if not dot:
             return
         color_map = {
-            "imported": "#ffffff",      # 导入未抓取
-            "fetching": YELLOW,          # 抓取中
-            "fetch_success": GREEN,      # 抓取成功
-            "fetch_fail": RED,           # 抓取失败
-            "success": GREEN,            # 兼容旧状态（上品成功）
-            "fail": RED,                 # 兼容旧状态（上品失败）
-            "pending": "#ffffff",      # 兼容旧状态
+            "imported": "#ffffff",
+            "fetching": YELLOW,
+            "fetch_success": GREEN,
+            "fetch_fail": RED,
+            "sku_too_many": RED,
+            "success": GREEN,
+            "fail": RED,
+            "pending": "#ffffff",
         }
         dot.config(fg=color_map.get(status, "#ffffff"))
+        hint = getattr(self, "asin_hints", {}).get(asin)
+        if hint:
+            if status == "sku_too_many":
+                hint.config(text="sku\u8fc7\u591a\u4e0d\u722c\u53d6", fg=RED)
+            else:
+                hint.config(text="", fg=dot.cget("bg"))
 
     def _import_txt(self):
         path=filedialog.askopenfilename(title="选择 ASIN 文本文件",
@@ -218,6 +225,7 @@ class SheinApp(tk.Tk):
 
     def _render_list(self):
         for w in self.lf.winfo_children(): w.destroy()
+        self.asin_hints = {}
         for idx,asin in enumerate(self.asin_list):
             var=tk.BooleanVar(value=False)
             self.asin_vars[asin]=var
@@ -231,6 +239,9 @@ class SheinApp(tk.Tk):
             dot.pack(side="left"); self.asin_dots[asin]=dot
             lbl=tk.Label(row,text=asin,font=("Consolas",10),fg=TEXT_MAIN,bg=bg,anchor="w",cursor="hand2")
             lbl.pack(side="left",padx=4,pady=5)
+            hint=tk.Label(row,text="",font=("Segoe UI",8),fg=bg,bg=bg,anchor="w")
+            hint.pack(side="left",padx=(0,4))
+            self.asin_hints[asin]=hint
             lbl.bind("<Button-1>",lambda e,a=asin:self._click(a))
             row.bind("<Button-1>",lambda e,a=asin:self._click(a))
         self.cnt_lbl.config(text="({})".format(len(self.asin_list)))
@@ -898,7 +909,12 @@ class SheinApp(tk.Tk):
                         self.after(0, lambda d=done, t=total, a=asin: self.status_lbl.config(text="抓取完成 {}/{}：{}".format(d, t, a)))
                     except RuntimeError:
                         pass
-                    if is_fail:
+                    if info and info.get("sku_too_many"):
+                        try:
+                            self.after(0, lambda a=asin: self._set_asin_status(a, "sku_too_many"))
+                        except RuntimeError:
+                            pass
+                    elif is_fail:
                         try:
                             self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_fail"))
                         except RuntimeError:

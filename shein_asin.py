@@ -1018,6 +1018,28 @@ def fetch_amazon_product(asin, region="美国"):
         # 优先从 HTML 直接解析 color 维度的 ASIN（#inline-twister-row-color_name）
         _color_asins_from_html = _extract_color_only_asins(s) if _color_only_mode else []
 
+        # SKU 数量预检：超过 10 个直接跳过，避免大量请求
+        _pre_count = 0
+        if _color_only_mode and _color_asins_from_html:
+            _pre_count = len([a for a, _ in _color_asins_from_html if a])
+        elif isinstance(dimension_map, dict):
+            _pre_seen = set()
+            for _dk, _da in dimension_map.items():
+                _da = str(_da or "").strip()
+                if _da and _da not in _pre_seen:
+                    if _color_only_mode:
+                        _b = _extract_dimension_basis(_dk, dimension_names=dimension_names)
+                        if not any("color" in x or "colour" in x for x in _b):
+                            continue
+                    _pre_seen.add(_da)
+            _pre_count = len(_pre_seen)
+        if _pre_count > 10:
+            res["sku_too_many"] = True
+            res["sku_pre_count"] = _pre_count
+            res["title"] = res.get("title") or ""
+            res["sku_list"] = []
+            return res
+
         if _color_only_mode and _color_asins_from_html:
             # 路径 A：HTML 解析到 color ASIN 列表，直接使用
             sku_asin_list = [a for a, _ in _color_asins_from_html if a and a != asin]
