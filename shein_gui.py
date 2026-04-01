@@ -233,8 +233,8 @@ class SheinApp(tk.Tk):
             bg=BG_CARD if idx%2==0 else BG_PANEL
             row=tk.Frame(self.lf,bg=bg,cursor="hand2")
             row.pack(fill="x",pady=1)
-            tk.Checkbutton(row,variable=var,bg=bg,selectcolor=BG_DARK,
-                activebackground=bg,command=self._upd_cnt).pack(side="left",padx=(8,2))
+            tk.Checkbutton(row,variable=var,bg=bg,fg="#ffffff",selectcolor=BG_DARK,
+                activebackground=bg,activeforeground="#ffffff",command=self._upd_cnt).pack(side="left",padx=(8,2))
             dot=tk.Label(row,text="\u25cf",font=("Segoe UI",8),fg="#ffffff",bg=bg)
             dot.pack(side="left"); self.asin_dots[asin]=dot
             lbl=tk.Label(row,text=asin,font=("Consolas",10),fg=TEXT_MAIN,bg=bg,anchor="w",cursor="hand2")
