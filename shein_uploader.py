@@ -783,11 +783,11 @@ class SheinPublisher:
         """填写类目属性中的必填项：产品型号=ASIN，其余必填空项选首个选项。"""
         driver = self.driver
         try:
-            attr_title = WebDriverWait(driver, 8).until(
+            attr_title = WebDriverWait(driver, 3).until(
                 EC.presence_of_element_located((By.XPATH,
                     "//div[contains(@class,'so-form-label')]//span[normalize-space(text())='商品属性']")))
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", attr_title)
-            time.sleep(0.5)
+            time.sleep(0.2)
         except Exception:
             self.log("[DEBUG] 未明确定位到商品属性标题，继续尝试填写")
         if asin:
@@ -799,60 +799,51 @@ class SheinPublisher:
             ]
             for xp in model_xpaths:
                 try:
-                    inp = WebDriverWait(driver, 3).until(
-                        EC.presence_of_element_located((By.XPATH, xp)))
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
-                    self._js_input(inp, asin)
-                    self.log("[OK] 产品型号已填写: {}".format(asin))
-                    model_filled = True
-                    time.sleep(0.3)
-                    break
+                    els = driver.find_elements(By.XPATH, xp)
+                    if els:
+                        inp = els[0]
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                        self._js_input(inp, asin)
+                        self.log("[OK] 产品型号已填写: {}".format(asin))
+                        model_filled = True
+                        break
                 except Exception:
                     pass
             if not model_filled:
                 self.log("[DEBUG] 未找到产品型号输入框")
-        # 展开全部属性（让折叠区的必填项也参与自动填写）
+        # 展开全部属性
         try:
-            expand_xpaths = [
+            for xp in [
                 "//*[contains(@class,'spmp_style__collapsed') and contains(normalize-space(.),'展开所有属性')]",
                 "//*[contains(normalize-space(.),'展开所有属性')]",
-            ]
-            expanded = False
-            for xp in expand_xpaths:
+            ]:
+                _done = False
                 for el in driver.find_elements(By.XPATH, xp):
                     try:
                         if not el.is_displayed():
                             continue
-                        text = (el.text or "").strip()
-                        if "收起" in text:
-                            expanded = True
+                        if "收起" in (el.text or ""):
+                            _done = True
                             break
-                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                        time.sleep(0.2)
-                        try:
-                            el.click()
-                        except Exception:
-                            driver.execute_script("arguments[0].click();", el)
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});"
+                            "arguments[0].click();", el)
                         self.log("[OK] 已展开所有属性")
-                        expanded = True
-                        time.sleep(0.6)
+                        _done = True
+                        time.sleep(0.3)
                         break
                     except Exception:
                         pass
-                if expanded:
+                if _done:
                     break
         except Exception:
             pass
-        # 展开后做一次滚动触发懒加载，再回到属性区域
+        # 快速滚动触发懒加载
         try:
-            for _ in range(4):
-                driver.execute_script("window.scrollBy(0, 700);")
-                time.sleep(0.25)
-            driver.execute_script("window.scrollBy(0, -2800);")
-            time.sleep(0.35)
-            for _ in range(2):
-                driver.execute_script("window.scrollBy(0, 700);")
-                time.sleep(0.2)
+            driver.execute_script(
+                "window.scrollBy(0,1400);setTimeout(function(){"
+                "window.scrollBy(0,-1400);},200);")
+            time.sleep(0.6)
         except Exception:
             pass
         required_items = driver.find_elements(By.XPATH,
@@ -876,21 +867,19 @@ class SheinPublisher:
                     continue
                 has_value = False
                 try:
-                    inputs = item.find_elements(By.XPATH, ".//input[@type='text' or not(@type)]")
-                    for inp in inputs:
-                        val = (inp.get_attribute("value") or "").strip()
-                        if val:
+                    for inp in item.find_elements(By.XPATH, ".//input[@type='text' or not(@type)]"):
+                        if (inp.get_attribute("value") or "").strip():
                             has_value = True
                             break
                 except Exception:
                     pass
                 if not has_value:
                     try:
-                        selected_tags = item.find_elements(By.XPATH,
-                            ".//*[contains(@class,'so-select-item') and not(contains(@class,'compressed'))]")
-                        selected_text = "".join([(t.text or "").strip() for t in selected_tags]).strip()
-                        if selected_text:
-                            has_value = True
+                        for t in item.find_elements(By.XPATH,
+                                ".//*[contains(@class,'so-select-item') and not(contains(@class,'compressed'))]"):
+                            if (t.text or "").strip():
+                                has_value = True
+                                break
                     except Exception:
                         pass
                 if has_value:
@@ -910,45 +899,39 @@ class SheinPublisher:
                         pass
                 if not select_inner:
                     continue
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", select_inner)
-                time.sleep(0.2)
-                try:
-                    select_inner.click()
-                except Exception:
-                    driver.execute_script("arguments[0].click();", select_inner)
-                time.sleep(0.4)
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});"
+                    "arguments[0].click();", select_inner)
+                time.sleep(0.25)
                 preferred_option = None
                 if "电源" in label or "Power Supply" in label:
-                    preferred_xpaths = [
+                    for px in [
                         "//*[contains(@class,'so-select-option') and normalize-space(.)='No']",
                         "//*[contains(@class,'so-option') and normalize-space(.)='No']",
-                        "//li[normalize-space(.)='No']",
-                    ]
-                    for px in preferred_xpaths:
+                    ]:
                         try:
-                            cand = WebDriverWait(driver, 2).until(
-                                EC.presence_of_element_located((By.XPATH, px)))
-                            if cand.is_displayed():
-                                preferred_option = cand
-                                break
+                            for c in driver.find_elements(By.XPATH, px):
+                                if c.is_displayed():
+                                    preferred_option = c
+                                    break
                         except Exception:
                             pass
+                        if preferred_option:
+                            break
                 first_option = None
-                option_xpaths = [
+                for ox in [
                     "(//*[contains(@class,'so-select-option') and not(contains(@class,'disabled')) and normalize-space(.)!=''])[1]",
                     "(//*[contains(@class,'so-option') and not(contains(@class,'disabled')) and normalize-space(.)!=''])[1]",
-                    "(//li[not(contains(@class,'disabled')) and normalize-space(.)!=''])[1]",
-                ]
-                for ox in option_xpaths:
+                ]:
                     try:
-                        opt = WebDriverWait(driver, 2).until(
+                        opt = WebDriverWait(driver, 1).until(
                             EC.presence_of_element_located((By.XPATH, ox)))
                         if opt.is_displayed():
                             first_option = opt
                             break
                     except Exception:
                         pass
-                target_option = preferred_option if preferred_option else first_option
+                target_option = preferred_option or first_option
                 if target_option:
                     try:
                         target_option.click()
@@ -959,7 +942,7 @@ class SheinPublisher:
                         self.log("[OK] 必填属性已选择 No: {}".format(label or "(未识别标签)"))
                     else:
                         self.log("[OK] 必填属性已默认选择首项: {}".format(label or "(未识别标签)"))
-                    time.sleep(0.25)
+                    time.sleep(0.15)
                 else:
                     try:
                         driver.execute_script("document.body.click();")
