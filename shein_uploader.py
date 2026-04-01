@@ -8,6 +8,7 @@ import tempfile
 import requests
 from shein_login import SheinLoginManager
 from shein_asin import HEADERS_POOL
+from shein_developer_mode import is_dev_mode
 try:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
@@ -2734,15 +2735,17 @@ class SheinPublisher:
         return None
 
     def _upload_product_images(self, product_info):
-        """按 SKU 行逐行为各 SKU 的细节图列上传对应图片，每个 SKU 最多5张。"""
+        """按 SKU 行逐行为各 SKU 的细节图列上传对应图片。"""
         try:
             self._ensure_not_stopped()
             driver = self.driver
             sku_list = product_info.get("sku_list", []) or []
+            max_imgs_per_sku = 3 if len(sku_list) >= 5 else 5
+            self.log("[DEBUG] SKU数={}, 每SKU最多上传{}张细节图".format(len(sku_list), max_imgs_per_sku))
             main_images = product_info.get("main_images", [])
             if not main_images and product_info.get("image_url"):
                 main_images = [product_info["image_url"]]
-            fallback_images = main_images[:5]
+            fallback_images = main_images[:max_imgs_per_sku]
             if not sku_list:
                 # No SKU list: fallback to old single-input upload
                 if not fallback_images:
@@ -2927,7 +2930,7 @@ class SheinPublisher:
                     self.log("[MAP] 行{:02d} 页面='{}' -> SKU='{}' | imgs={}".format(
                         ri + 1, page_color,
                         matched_sku.get("sku_attributes", ""),
-                        len((matched_sku.get("images") or [])[:5])))
+                        len((matched_sku.get("images") or [])[:max_imgs_per_sku])))
                 else:
                     row_sku_map.append((page_color, None))
                     self.log("[MAP] 行{:02d} 页面='{}' -> 未匹配".format(
@@ -2949,7 +2952,7 @@ class SheinPublisher:
                 row = rows[row_idx]
                 page_color, matched_sku = row_sku_map[row_idx]
                 if matched_sku is not None:
-                    sku_imgs = (matched_sku.get("images") or [])[:5]
+                    sku_imgs = (matched_sku.get("images") or [])[:max_imgs_per_sku]
                     sku_attr = matched_sku.get("sku_attributes", "")
                 else:
                     sku_imgs = fallback_images
@@ -4310,8 +4313,90 @@ class SheinPublisher:
         if not _confirm_clicked:
             self.log("[WARN] 未找到'一件翻译并发布'按鈕，弹窗可能未出现或已自动关闭")
         time.sleep(3)
-        self.log("商品已提交发布")
-        return True
+
+        # Step9: 检测发布结果——页面是否跳转或仍停留在编辑页(表示失败)
+        publish_ok = False
+        try:
+            cur_url = driver.current_url or ""
+            # 成功后通常跳转到商品列表页或显示成功提示
+            if "followsales-pro/list" in cur_url or "commodities-category" in cur_url:
+                publish_ok = True
+            if not publish_ok:
+                # 检查是否有成功提示 Toast/弹窗
+                try:
+                    success_els = driver.find_elements(By.XPATH,
+                        "//*[contains(text(),'发布成功') or contains(text(),'提交成功') "
+                        "or contains(text(),'操作成功') or contains(text(),'success')]")
+                    for _se in success_els:
+                        try:
+                            if _se.is_displayed():
+                                publish_ok = True
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            if not publish_ok:
+                # 检查是否有错误/失败提示（仍停留在编辑页）
+                has_error = False
+                try:
+                    err_els = driver.find_elements(By.XPATH,
+                        "//*[contains(@class,'error') or contains(@class,'danger') "
+                        "or contains(@class,'warning') or contains(@class,'so-alert')]"
+                        "//*[string-length(normalize-space(text()))>0]")
+                    for _ee in err_els:
+                        try:
+                            if _ee.is_displayed():
+                                err_txt = (_ee.text or "").strip()[:80]
+                                if err_txt:
+                                    self.log("[WARN] 页面错误提示: {}".format(err_txt))
+                                    has_error = True
+                                    break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                # 检查是否还有"发布商品"按钮（说明仍在编辑页，发布未成功）
+                still_on_edit = False
+                try:
+                    for _xp in [
+                        "//button[.//span[normalize-space(text())='发布商品']]",
+                        "//button[@type='submit' and .//span[normalize-space(text())='发布商品']]",
+                    ]:
+                        for _btn in driver.find_elements(By.XPATH, _xp):
+                            if _btn.is_displayed():
+                                still_on_edit = True
+                                break
+                        if still_on_edit:
+                            break
+                except Exception:
+                    pass
+                if has_error or still_on_edit:
+                    self.log("[ERROR] 发布失败，页面仍停留在编辑页")
+                    if is_dev_mode():
+                        self.log("[DEV] 开发者模式：停留在当前页面，不做跳转")
+                    else:
+                        self.log("[INFO] 正在返回商品发布列表页...")
+                        try:
+                            self._dismiss_switch_confirm_modal()
+                            driver.get(self.PUBLISH_URL)
+                            time.sleep(3)
+                            self._dismiss_announcements()
+                            self.log("[OK] 已返回商品发布列表页，等待下一次发布")
+                        except Exception as nav_e:
+                            self.log("[WARN] 返回发布页异常: {}".format(str(nav_e)[:60]))
+                    return False
+                else:
+                    # 既无成功也无明确失败，视为成功
+                    publish_ok = True
+        except Exception as chk_e:
+            self.log("[DEBUG] 发布结果检测异常: {}".format(str(chk_e)[:60]))
+            publish_ok = True
+
+        if publish_ok:
+            self.log("商品已提交发布")
+            return True
+        return False
 
     def _upload_detail_images(self, image_urls):
         """

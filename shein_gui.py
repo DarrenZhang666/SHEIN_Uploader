@@ -3,6 +3,7 @@
 
 from shein_main import *
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from shein_developer_mode import DevModeToggle, is_dev_mode
 
 class SheinApp(tk.Tk):
     def __init__(self):
@@ -94,6 +95,8 @@ class SheinApp(tk.Tk):
         self._btn(bf,"停止","#dc2626",self._stop_publish_action).pack(side="left",padx=5)
         self._shein_login_btn = self._btn(bf,"登录 SHEIN","#059669",self._open_shein)
         self._shein_login_btn.pack(side="left",padx=5)
+        self._dev_toggle = DevModeToggle(bf, bg=BG_PANEL)
+        self._dev_toggle.pack(side="left", padx=(10, 0))
 
     def _build_left(self,parent):
         f=tk.Frame(parent,bg=BG_PANEL,width=265)
@@ -1126,12 +1129,17 @@ class SheinApp(tk.Tk):
             def _go_home_after_stop():
                 time.sleep(1.0)
                 try:
-                    # 若用户已重新开始上品，则不再处理旧会话
                     if stop_session_id != (self._publish_session_id - 1):
                         return
 
                     pub = stopped_pub
                     if pub is None or not pub.is_alive():
+                        return
+
+                    if is_dev_mode():
+                        self._pub_log("[DEV] 开发者模式：停留在当前页面，不做跳转")
+                        self.after(0, lambda: self.status_lbl.config(
+                            text="已停止（开发者模式：保持当前页面）"))
                         return
 
                     self._pub_log("[STOP] 停止后清理弹窗并返回主页...")
@@ -1140,7 +1148,6 @@ class SheinApp(tk.Tk):
                     except Exception as e:
                         self._pub_log("[STOP] 弹窗清理失败: {}".format(str(e)[:60]))
 
-                    # 若用户已重新开始上品，则不再跳回主页
                     if stop_session_id != (self._publish_session_id - 1):
                         return
                     pub.driver.get("https://www.geiwohuo.com/#/oversea-home")
