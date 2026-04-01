@@ -120,4 +120,12 @@ from shein_uploader import SheinPublisher
 if __name__ == '__main__':
     from shein_gui import SheinApp
     app = SheinApp()
-    app.mainloop()
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            app.destroy()
+        except Exception:
+            pass

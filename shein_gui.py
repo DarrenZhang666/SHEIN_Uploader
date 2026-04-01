@@ -1272,7 +1272,15 @@ class CategoryDialog(tk.Toplevel):
 
 if __name__ == '__main__':
     app = SheinApp()
-    app.mainloop()
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            app.destroy()
+        except Exception:
+            pass
 
 
 
