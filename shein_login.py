@@ -6,6 +6,10 @@ SHEIN 登录模块
 import os
 import time
 import threading
+try:
+    import winreg
+except Exception:
+    winreg = None
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -38,6 +42,35 @@ class SheinLoginManager:
         self.driver = None
         self.wait   = None
         self.log    = log_cb or print
+
+    def _disable_ie_esc_notice(self):
+        """禁用 IE 增强安全提示，避免登录后弹窗阻塞。"""
+        if winreg is None:
+            return
+        try:
+            esc_keys = [
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A8-37EF-4b3f-8CFC-4F3A74704073}"),
+            ]
+            for hive, subkey in esc_keys:
+                try:
+                    k = winreg.OpenKey(hive, subkey, 0, winreg.KEY_SET_VALUE)
+                    winreg.SetValueEx(k, "IsInstalled", 0, winreg.REG_DWORD, 0)
+                    winreg.CloseKey(k)
+                except Exception:
+                    pass
+
+            try:
+                sogou_key = winreg.CreateKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains\sogou.com\config\pinyin",
+                )
+                winreg.SetValueEx(sogou_key, "http", 0, winreg.REG_DWORD, 2)
+                winreg.CloseKey(sogou_key)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _connect_chrome_only(self):
         """只尝试连接已打开的 Chrome，不启动新浏览器。"""
@@ -170,6 +203,7 @@ class SheinLoginManager:
         import re as _re
         import socket as _socket
         _t0 = time.time()
+        self._disable_ie_esc_notice()
 
         _port = self._get_debug_port(account)
         self.log("[DEBUG] 账号='{}' 调试端口={}".format(account or "(默认)", _port))
@@ -235,6 +269,8 @@ class SheinLoginManager:
             o.add_argument("--disable-dev-shm-usage")
             o.add_argument("--disable-gpu")
             o.add_argument("--disable-infobars")
+            o.add_argument("--disable-extensions")
+            o.add_argument("--host-rules=MAP config.pinyin.sogou.com 127.0.0.1")
             o.add_argument("--remote-debugging-port={}".format(_port))
             o.add_argument("--user-data-dir={}".format(_profile))
             o.add_argument("--profile-directory=Default")

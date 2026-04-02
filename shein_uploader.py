@@ -1328,90 +1328,123 @@ class SheinPublisher:
                     except Exception:
                         self.log("[DEBUG] 库存维护对话框等待超时")
                     time.sleep(0.5)
-                    # 在批量填写区域的库存输入框填入200
-                    batch_filled = False
-                    # 在批量填写区域的库存输入框填入200
+                    # 在「填写内容」后的「库存」输入框填入 200
                     batch_filled = False
                     try:
-                        # 优先找弈窗顶部的批量操作行（通常在表格上方）
-                        batch_inps = driver.find_elements(By.XPATH,
-                            "//div[contains(@class,'so-modal')]//div[contains(@class,'batch') or contains(@class,'Batch') or contains(@class,'bulkFill') or contains(@class,'batchFill') or contains(@class,'header')]//input[@type='text']")
-                        if not batch_inps:
-                            # 备用：找弈窗内所有 input，但排除表格数据行（通常在 tr 内）
-                            batch_inps = driver.find_elements(By.XPATH,
-                                "//div[contains(@class,'so-modal')]//input[@type='text'][not(ancestor::tr)]")
-                        self.log("[DEBUG] 批量填写 input 数量: {}".format(len(batch_inps)))
-                        if batch_inps:
-                            batch_inp = batch_inps[0]
-                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", batch_inp)
+                        stock_inp = None
+                        stock_xpaths = [
+                            "//div[contains(@class,'so-modal')]//*[contains(text(),'填写内容')]/following::input[1]",
+                            "//div[contains(@class,'so-modal')]//*[contains(text(),'库存')]/following::input[1]",
+                            "//div[contains(@class,'so-modal')]//input[@type='text' or @type='number'][not(ancestor::tr)][1]",
+                        ]
+                        for _xp in stock_xpaths:
+                            try:
+                                for _in in driver.find_elements(By.XPATH, _xp):
+                                    if _in.is_displayed() and _in.is_enabled():
+                                        stock_inp = _in
+                                        break
+                            except Exception:
+                                continue
+                            if stock_inp is not None:
+                                break
+
+                        if stock_inp is not None:
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", stock_inp)
                             time.sleep(0.2)
-                            # 先清空再填入
-                            driver.execute_script("""
-                                var inp = arguments[0];
-                                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                                setter.call(inp, '');
-                                inp.dispatchEvent(new Event('input', {bubbles:true}));
-                                inp.dispatchEvent(new Event('change', {bubbles:true}));
-                            """, batch_inp)
+                            driver.execute_script(
+                                "(function(inp,val){"
+                                "var setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;"
+                                "setter.call(inp,val);"
+                                "inp.dispatchEvent(new Event('input',{bubbles:true}));"
+                                "inp.dispatchEvent(new Event('change',{bubbles:true}));"
+                                "})(arguments[0],arguments[1]);",
+                                stock_inp, "200")
                             time.sleep(0.2)
-                            # 再填入 200
-                            driver.execute_script("""
-                                var inp = arguments[0];
-                                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                                setter.call(inp, '200');
-                                inp.dispatchEvent(new Event('input', {bubbles:true}));
-                                inp.dispatchEvent(new Event('change', {bubbles:true}));
-                            """, batch_inp)
-                            time.sleep(0.3)
-                            val = driver.execute_script("return arguments[0].value;", batch_inp)
-                            self.log("[DEBUG] 批量填写 input 当前値: {}".format(val))
-                            batch_filled = True
+                            val = (stock_inp.get_attribute("value") or "").strip()
+                            self.log("[DEBUG] 库存输入框当前值: {}".format(val))
+                            batch_filled = (val == "200" or val.startswith("200"))
+                        else:
+                            self.log("[WARN] 未找到库存输入框")
                     except Exception as e:
-                        self.log("[DEBUG] 批量填写 input 定位失败: {}".format(str(e)[:60]))
-                    # 点击「批量填写」按鈕
+                        self.log("[DEBUG] 库存输入框定位失败: {}".format(str(e)[:60]))
+
+                    # 点击「批量填写」按钮
                     if batch_filled:
                         try:
                             batch_btn = None
-                            # 精确定位：弈窗内含「批量填写」文本的按鈕
                             for _b in driver.find_elements(By.XPATH,
-                                    "//div[contains(@class,'so-modal')]//button"):
-                                _text = (_b.text or '').strip()
-                                if '批量填写' in _text or _text == '批量填写':
-                                    if _b.is_displayed():
+                                    "//div[contains(@class,'so-modal')]//button[.//span[contains(normalize-space(text()),'批量填写')] or contains(normalize-space(text()),'批量填写')]"):
+                                try:
+                                    if _b.is_displayed() and _b.is_enabled():
                                         batch_btn = _b
                                         break
+                                except Exception:
+                                    continue
                             if batch_btn:
                                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", batch_btn)
                                 time.sleep(0.2)
-                                driver.execute_script("arguments[0].click();", batch_btn)
-                                self.log("[OK] 已点击「批量填写」")
-                                time.sleep(1)
-                            else:
-                                self.log("[WARN] 未找到「批量填写」按鈕，尝试备用 XPath")
-                                # 备用 XPath
                                 try:
-                                    batch_btn2 = driver.find_element(By.XPATH,
-                                        "//div[contains(@class,'so-modal')]//button[contains(., '批量填写')]")
-                                    driver.execute_script("arguments[0].click();", batch_btn2)
-                                    self.log("[OK] 已点击「批量填写」(备用)")
-                                    time.sleep(1)
+                                    batch_btn.click()
                                 except Exception:
-                                    self.log("[WARN] 备用 XPath 也未找到「批量填写」按鈕")
+                                    driver.execute_script("arguments[0].click();", batch_btn)
+                                self.log("[OK] 已点击「批量填写」")
+                                time.sleep(0.8)
+                            else:
+                                self.log("[WARN] 未找到「批量填写」按钮")
                         except Exception as e:
                             self.log("[WARN] 点击批量填写失败: {}".format(str(e)[:60]))
                     else:
-                        self.log("[WARN] 批量填写 input 未找到，跳过批量填写")
+                        self.log("[WARN] 库存值未成功写入200，跳过批量填写")
                     time.sleep(0.5)
-                    # 点击确认按鈕关闭对话框
+                    # 点击「确定」并等待库存维护弹窗关闭
                     try:
-                        confirm_btn = driver.find_element(By.XPATH,
-                            "//div[contains(@class,'so-modal-footer') or contains(@class,'so-card-footer')]"
-                            "//button[contains(@class,'so-button-primary')]")
-                        driver.execute_script("arguments[0].click();", confirm_btn)
-                        self.log("[OK] 库存已确认")
-                        time.sleep(1)
+                        confirm_btn = None
+                        confirm_xpaths = [
+                            "//div[contains(@class,'so-modal-footer')]//button[.//span[normalize-space(text())='确定']]",
+                            "//div[contains(@class,'so-modal-footer')]//button[contains(@class,'so-button-primary')]",
+                        ]
+                        for _xp in confirm_xpaths:
+                            try:
+                                for _b in driver.find_elements(By.XPATH, _xp):
+                                    if _b.is_displayed() and _b.is_enabled():
+                                        confirm_btn = _b
+                                        break
+                            except Exception:
+                                continue
+                            if confirm_btn is not None:
+                                break
+
+                        if confirm_btn is None:
+                            self.log("[WARN] 未找到库存维护「确定」按钮")
+                        else:
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", confirm_btn)
+                            time.sleep(0.2)
+                            try:
+                                confirm_btn.click()
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", confirm_btn)
+                            self.log("[OK] 已点击库存维护「确定」")
+
+                            # 等待弹窗关闭，避免未提交就继续发布
+                            _closed = False
+                            for _ in range(20):
+                                time.sleep(0.2)
+                                try:
+                                    panels = driver.find_elements(By.XPATH,
+                                        "//div[contains(@class,'so-modal-panel') and .//div[contains(@class,'so-modal-title') and contains(.,'库存维护')]]")
+                                    if not any(p.is_displayed() for p in panels):
+                                        _closed = True
+                                        break
+                                except Exception:
+                                    _closed = True
+                                    break
+                            if _closed:
+                                self.log("[OK] 库存维护弹窗已关闭")
+                            else:
+                                self.log("[WARN] 库存维护弹窗未确认关闭，等待额外0.8s")
+                                time.sleep(0.8)
                     except Exception as e:
-                        self.log("[WARN] 确定按鈕失败: {}".format(str(e)[:50]))
+                        self.log("[WARN] 点击库存维护确定失败: {}".format(str(e)[:60]))
             except Exception as e:
                 self.log("[WARN] 库存处理失败: {}".format(str(e)[:60]))
             # [DISABLED] # ── 4. 上传主规格图到细节图/方形图区域（跳过色块图）
@@ -3661,7 +3694,7 @@ class SheinPublisher:
         return None
     # ── 识图选类目
 
-    def select_category_by_image(self, img_url_or_path, timeout=60):
+    def select_category_by_image(self, img_url_or_path, timeout=20):
         """识图自动选类目。返回 True/False。"""
         driver = self.driver
         CATEGORY_URL = ("https://sso.geiwohuo.com/#/spmc/commodities-category"
@@ -3768,7 +3801,8 @@ class SheinPublisher:
                             _f.write(info_txt or "(no spans)")
                         self.log("[识图] 调试信息已保存到桌面")
                     except Exception: pass
-                time.sleep(1.5)
+                # 20s 内每 1s 检查一次，识别到类目立即继续
+                time.sleep(1)
             if not recommend_el:
                 self.log("[识图] 超时，推荐类目未出现")
                 return False
@@ -4128,7 +4162,7 @@ class SheinPublisher:
         if img_url:
             self.log("[Step2] 尝试识图自动选类目...")
             try:
-                cat_selected = self.select_category_by_image(img_url, timeout=60)
+                cat_selected = self.select_category_by_image(img_url, timeout=20)
                 if cat_selected:
                     self.log("[Step2] 识图选类目成功")
                 else:
