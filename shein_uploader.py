@@ -1520,6 +1520,29 @@ class SheinPublisher:
         driver = self.driver
         try:
             self.log("[DEBUG] 检查主规格是否需要填写...")
+
+            # 若仅单SKU，或ASIN规格为“默认规格/未识别”，则保持“无主规格”并跳过本步骤
+            try:
+                sku_list = []
+                if isinstance(product_info, dict):
+                    sku_list = product_info.get("sku_list", []) or []
+                single_sku = len(sku_list) <= 1
+                first_attr = str((sku_list[0] or {}).get("sku_attributes") or "").strip() if sku_list else ""
+                is_default_attr = (first_attr == "默认规格")
+                basis_values = []
+                for _sku in sku_list:
+                    for _b in ((_sku or {}).get("dimension_basis") or []):
+                        _bb = str(_b or "").strip()
+                        if _bb:
+                            basis_values.append(_bb)
+                basis_unrecognized = (len(basis_values) == 0)
+
+                if single_sku or is_default_attr or basis_unrecognized:
+                    self.log("[INFO] 主规格跳过：保持'无主规格'（single_sku={}, 默认规格={}, 分类依据未识别={}）".format(
+                        single_sku, is_default_attr, basis_unrecognized))
+                    return
+            except Exception:
+                pass
             # 1) 先处理“有无主规格”开关（必须在上传细节图前完成）
             # 说明：这里不依赖 main_spec_box，避免因为未定位到主规格区而提前 return
             try:
