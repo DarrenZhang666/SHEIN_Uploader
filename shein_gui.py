@@ -12,6 +12,7 @@ class SheinApp(tk.Tk):
         self.geometry("1280x800"); self.minsize(1000,680)
         self.configure(bg=BG_DARK)
         self.asin_list=[]; self.asin_vars={}; self.asin_dots={}; self.asin_status={}
+        self.asin_row_widgets={}
         self.product_cache={}; self.current_asin=None
         self.select_all_var=tk.BooleanVar(value=False)
         self.price_multiplier=tk.StringVar(value="3")
@@ -227,7 +228,7 @@ class SheinApp(tk.Tk):
             asins=[l for l in lines if re.match(r"^B[A-Z0-9]{9}$",l)]
             if not asins:
                 messagebox.showwarning("提示","未找到有效 ASIN 码"); return
-            self.asin_list=asins; self.asin_vars={}; self.asin_dots={}; self.asin_status={}
+            self.asin_list=asins; self.asin_vars={}; self.asin_dots={}; self.asin_status={}; self.asin_row_widgets={}
             self._render_list()
             self.status_lbl.config(text="已载入 {} 个 ASIN".format(len(asins)))
             self._welcome()
@@ -237,6 +238,7 @@ class SheinApp(tk.Tk):
     def _render_list(self):
         for w in self.lf.winfo_children(): w.destroy()
         self.asin_hints = {}
+        self.asin_row_widgets = {}
         for idx,asin in enumerate(self.asin_list):
             var=tk.BooleanVar(value=False)
             self.asin_vars[asin]=var
@@ -244,8 +246,9 @@ class SheinApp(tk.Tk):
             bg=BG_CARD if idx%2==0 else BG_PANEL
             row=tk.Frame(self.lf,bg=bg,cursor="hand2")
             row.pack(fill="x",pady=1)
-            tk.Checkbutton(row,variable=var,bg=bg,fg="#ffffff",selectcolor=BG_DARK,
-                activebackground=bg,activeforeground="#ffffff",command=self._upd_cnt).pack(side="left",padx=(8,2))
+            cb=tk.Checkbutton(row,variable=var,bg=bg,fg="#ffffff",selectcolor=BG_DARK,
+                activebackground=bg,activeforeground="#ffffff",command=self._upd_cnt)
+            cb.pack(side="left",padx=(8,2))
             dot=tk.Label(row,text="\u25cf",font=("Segoe UI",8),fg="#ffffff",bg=bg)
             dot.pack(side="left"); self.asin_dots[asin]=dot
             lbl=tk.Label(row,text=asin,font=("Consolas",10),fg=TEXT_MAIN,bg=bg,anchor="w",cursor="hand2")
@@ -253,13 +256,40 @@ class SheinApp(tk.Tk):
             hint=tk.Label(row,text="",font=("Segoe UI",8),fg=bg,bg=bg,anchor="w")
             hint.pack(side="left",padx=(0,4))
             self.asin_hints[asin]=hint
+            self.asin_row_widgets[asin] = {
+                "idx": idx,
+                "row": row,
+                "cb": cb,
+                "lbl": lbl,
+                "dot": dot,
+                "hint": hint,
+            }
             lbl.bind("<Button-1>",lambda e,a=asin:self._click(a))
             row.bind("<Button-1>",lambda e,a=asin:self._click(a))
         self.cnt_lbl.config(text="({})".format(len(self.asin_list)))
         self._upd_cnt(); self.select_all_var.set(False)
+        self._update_asin_row_styles()
+
+    def _update_asin_row_styles(self):
+        """高亮当前选中的 ASIN 行，让定位更清晰。"""
+        selected_bg = "#243447"
+        selected_fg = "#EAF3FF"
+        for asin, ws in self.asin_row_widgets.items():
+            idx = ws.get("idx", 0)
+            normal_bg = BG_CARD if idx % 2 == 0 else BG_PANEL
+            is_selected = (asin == self.current_asin)
+            bg = selected_bg if is_selected else normal_bg
+            fg = selected_fg if is_selected else TEXT_MAIN
+
+            ws["row"].config(bg=bg)
+            ws["cb"].config(bg=bg, activebackground=bg)
+            ws["lbl"].config(bg=bg, fg=fg)
+            ws["dot"].config(bg=bg)
+            ws["hint"].config(bg=bg, fg=(TEXT_SUB if is_selected else bg))
 
     def _click(self,asin):
         self.current_asin=asin
+        self._update_asin_row_styles()
         if asin in self.product_cache: self._show(self.product_cache[asin])
         else: self._placeholder(asin)
 
