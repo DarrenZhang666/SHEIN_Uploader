@@ -1008,63 +1008,210 @@ class SheinPublisher:
                         time.sleep(0.5)
                     except Exception as e2:
                         self.log("[WARN] 价格(USD)未能填写: {}".format(str(e2)[:50]))
-            # 步骤1.5: 向“批量填写”区域的「价格」输入框填写价格，并点击「批量填写」按鈕
+            # 步骤1.5: 向“批量填写”区域的「价格」输入框填写价格，选择件数类型首项，并点击「批量填写」
             if price_num:
                 try:
-                    _bp_inp = driver.find_element(By.CSS_SELECTOR, ".supplierPriceSupplyFillClass_0 input")
+                    def _set_react_input_value(_el, _val):
+                        try:
+                            driver.execute_script(
+                                "(function(el,val){"
+                                "var setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;"
+                                "setter.call(el,val);"
+                                "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                                "el.dispatchEvent(new Event('change',{bubbles:true}));"
+                                "el.dispatchEvent(new Event('blur',{bubbles:true}));"
+                                "})(arguments[0],arguments[1]);",
+                                _el, _val
+                            )
+                            return True
+                        except Exception:
+                            pass
+                        try:
+                            self._js_input(_el, _val)
+                            return True
+                        except Exception:
+                            return False
+
+                    def _norm_num_str(_s):
+                        m = re.search(r"\d+\.?\d*", str(_s or "").replace(",", ""))
+                        return m.group() if m else ""
+
+                    def _is_price_match(_a, _b):
+                        a = _norm_num_str(_a)
+                        b = _norm_num_str(_b)
+                        if not a or not b:
+                            return False
+                        try:
+                            return abs(float(a) - float(b)) < 0.0001
+                        except Exception:
+                            return a == b
+
+                    def _read_supply_price_inputs(_max_count=6):
+                        vals = []
+                        xps = [
+                            "//div[contains(@class,'rr-block') and contains(@class,'supplier_priceClass_')]//input",
+                            "//div[contains(@class,'supplier_priceClass_')]//input",
+                        ]
+                        for _xp in xps:
+                            try:
+                                for _in in driver.find_elements(By.XPATH, _xp):
+                                    try:
+                                        if not _in.is_displayed():
+                                            continue
+                                        vals.append((_in.get_attribute("value") or "").strip())
+                                        if len(vals) >= _max_count:
+                                            return vals
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                continue
+                        return vals
+
+                    def _verify_supply_price_filled(_target_price, _wait_rounds=10):
+                        # 小保险：检查前几行价格是否被批量写入
+                        for _ in range(_wait_rounds):
+                            time.sleep(0.4)
+                            _vals = _read_supply_price_inputs(_max_count=6)
+                            _valid = [v for v in _vals if _norm_num_str(v)]
+                            if len(_valid) >= 2 and all(_is_price_match(v, _target_price) for v in _valid[:min(4, len(_valid))]):
+                                self.log("[OK] 价格批量填写校验通过: {}".format(" | ".join(_valid[:4])))
+                                return True
+                        return False
+
+                    def _click_supply_batch_fill_btn(_scope_box=None):
+                        btns = []
+                        if _scope_box is not None:
+                            try:
+                                btns = _scope_box.find_elements(
+                                    By.XPATH,
+                                    ".//button[.//span[contains(normalize-space(text()),'批量填写')]]"
+                                )
+                            except Exception:
+                                btns = []
+                        if not btns:
+                            try:
+                                btns = driver.find_elements(
+                                    By.XPATH,
+                                    "//div[contains(@class,'supplyCheckBatchFillError')]//button[.//span[contains(normalize-space(text()),'批量填写')]]"
+                                )
+                            except Exception:
+                                btns = []
+                        for _btn in btns:
+                            try:
+                                _txt = (_btn.text or "").strip()
+                                if (not _btn.is_displayed()) or (not _btn.is_enabled()) or ("清空" in _txt):
+                                    continue
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _btn)
+                                time.sleep(0.2)
+                                try:
+                                    _btn.click()
+                                except Exception:
+                                    driver.execute_script("arguments[0].click();", _btn)
+                                self.log("[OK] 已点击供应信息批量填写按钮")
+                                return True
+                            except Exception:
+                                continue
+                        return False
+
+                    _batch_supply_box = None
+                    try:
+                        _batch_supply_box = driver.find_element(
+                            By.XPATH,
+                            "//div[contains(@class,'supplyCheckBatchFillError') and .//div[contains(@class,'supplierPriceSupplyFillClass_0')]]"
+                        )
+                    except Exception:
+                        pass
+
+                    _bp_inp = None
+                    if _batch_supply_box is not None:
+                        try:
+                            _bp_inp = _batch_supply_box.find_element(By.CSS_SELECTOR, ".supplierPriceSupplyFillClass_0 input")
+                        except Exception:
+                            _bp_inp = None
+                    if _bp_inp is None:
+                        _bp_inp = driver.find_element(By.CSS_SELECTOR, ".supplierPriceSupplyFillClass_0 input")
+
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _bp_inp)
-                    self._js_input(_bp_inp, price_num)
+                    if not _set_react_input_value(_bp_inp, price_num):
+                        raise RuntimeError("批量填写价格输入失败")
                     self.log("[OK] 批量填写价格已输入: {}".format(price_num))
                     time.sleep(0.3)
-                    # 点击「件数类型」下拉并选择「单品」
+
+                    # 打开「件数类型」下拉并选择首个有效选项
                     try:
-                        _qty_type_sel = driver.find_element(
-                            By.XPATH,
-                            "//div[contains(@class,'supplierPriceSupplyFillClass_0')]"
-                            "/following-sibling::div[contains(@class,'spmp_style__flexColumnCell')]"
-                            "//div[contains(@class,'so-select-inner')]"
-                        )
+                        _qty_type_sel = None
+                        _qty_type_box = None
+                        if _batch_supply_box is not None:
+                            try:
+                                _qty_type_box = _batch_supply_box.find_element(
+                                    By.XPATH,
+                                    ".//div[contains(@class,'spmp_style__flexColumnCell')]"
+                                )
+                            except Exception:
+                                _qty_type_box = None
+                        if _qty_type_box is not None:
+                            try:
+                                _qty_type_sel = _qty_type_box.find_element(
+                                    By.XPATH,
+                                    ".//div[contains(@class,'so-select-inner') and contains(@class,'so-select-drop-down')]"
+                                )
+                            except Exception:
+                                _qty_type_sel = None
+                        if _qty_type_sel is None:
+                            _qty_type_sel = driver.find_element(
+                                By.XPATH,
+                                "//div[contains(@class,'supplierPriceSupplyFillClass_0')]"
+                                "/following-sibling::div[contains(@class,'spmp_style__flexColumnCell')]"
+                                "//div[contains(@class,'so-select-inner') and contains(@class,'so-select-drop-down')][1]"
+                            )
+
                         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _qty_type_sel)
                         time.sleep(0.2)
                         driver.execute_script("arguments[0].click();", _qty_type_sel)
                         self.log("[DEBUG] 已点开件数类型下拉")
                         time.sleep(0.5)
-                        # 在下拉列表中找「单品」选项
-                        _found = False
-                        for _opt in driver.find_elements(By.XPATH,
-                                "//*[contains(@class,'so-select-option') or contains(@class,'so-option')]"
-                                "[normalize-space(text())='单品']"):
-                            if _opt.is_displayed():
+
+                        _data_id = (_qty_type_sel.get_attribute("data-id") or "").strip()
+                        _opts = []
+                        if _data_id:
+                            _opts = driver.find_elements(
+                                By.XPATH,
+                                "//div[contains(@class,'so-list') and @data-id='{}' and (contains(@class,'so-hidable-show') or not(contains(@style,'display: none')))]"
+                                "//*[contains(@class,'so-select-option') or contains(@class,'so-option') or contains(@class,'so-checkinput')]".format(_data_id)
+                            )
+
+                        _picked_first = False
+                        for _opt in _opts:
+                            try:
+                                _txt = (_opt.text or "").strip().replace("\n", " ")
+                                if not _opt.is_displayed() or not _txt or _txt in ("请选择", "无数据", "件数类型"):
+                                    continue
                                 driver.execute_script("arguments[0].click();", _opt)
-                                self.log("[OK] 已选择件数类型:单品")
-                                _found = True
+                                self.log("[OK] 件数类型已选择首项: {}".format(_txt))
+                                _picked_first = True
                                 time.sleep(0.3)
                                 break
-                        if not _found:
-                            # 备用：找包含「单品」文字的任意可见元素
-                            for _li in driver.find_elements(By.XPATH,
-                                    "//*[normalize-space(text())='单品']"):
-                                if _li.is_displayed():
-                                    driver.execute_script("arguments[0].click();", _li)
-                                    self.log("[OK] 已选择件数类型:单品(备用)")
-                                    time.sleep(0.3)
-                                    break
+                            except Exception:
+                                continue
+                        if not _picked_first:
+                            self.log("[WARN] 件数类型首项选择失败")
                     except Exception as _qt_e:
                         self.log("[WARN] 件数类型选择失败: {}".format(str(_qt_e)[:60]))
-                    # 点击「批量填写」按鈕
-                    _batch_btns = driver.find_elements(By.XPATH,
-                        "//button[.//span[normalize-space(text())='批量填写']]")
-                    for _bbtn in _batch_btns:
-                        try:
-                            if _bbtn.is_displayed() and _bbtn.is_enabled():
-                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", _bbtn)
-                                time.sleep(0.2)
-                                driver.execute_script("arguments[0].click();", _bbtn)
-                                self.log("[OK] 已点击批量填写按鈕")
-                                time.sleep(0.5)
-                                break
-                        except Exception:
-                            continue
+
+                    # 点击批量填写，并做一次校验失败重试
+                    _clicked = _click_supply_batch_fill_btn(_batch_supply_box)
+                    if not _clicked:
+                        self.log("[WARN] 未点击到供应信息批量填写按钮")
+                    else:
+                        if not _verify_supply_price_filled(price_num, _wait_rounds=10):
+                            self.log("[WARN] 首次价格批量填写校验失败，执行重试")
+                            _set_react_input_value(_bp_inp, price_num)
+                            time.sleep(0.3)
+                            if _click_supply_batch_fill_btn(_batch_supply_box):
+                                if _verify_supply_price_filled(price_num, _wait_rounds=10):
+                                    self.log("[OK] 价格批量填写重试成功")
+                                else:
+                                    self.log("[WARN] 价格批量填写重试后仍未通过校验")
                 except Exception as _bp_e:
                     self.log("[WARN] 批量填写价格失败: {}".format(str(_bp_e)[:60]))
             # 步骤2.5: 通过批量填写区域填写含包装重量(g)
