@@ -39,6 +39,28 @@ class SheinPublisher:
         if self._stop_publish:
             raise RuntimeError("用户已停止上品")
 
+    def _wait_until(self, check_fn, timeout=10, interval=1, desc="条件"):
+        """轮询等待：在 timeout 内每 interval 秒检查一次。"""
+        end = time.time() + timeout
+        while time.time() < end:
+            self._ensure_not_stopped()
+            try:
+                if check_fn():
+                    return True
+            except Exception:
+                pass
+            time.sleep(interval)
+        self.log("[WARN] 等待{}超时({}s)".format(desc, timeout))
+        return False
+
+    def _wait_ready_state(self, timeout=10):
+        return self._wait_until(
+            lambda: (self.driver.execute_script("return document.readyState") or "") == "complete",
+            timeout=timeout,
+            interval=1,
+            desc="页面加载完成"
+        )
+
     def _connect_chrome_only(self):
         self.login_manager.driver = self.driver
         self.login_manager.wait = self.wait
@@ -86,7 +108,7 @@ class SheinPublisher:
         PUBLISH_URL = "https://sso.geiwohuo.com/#/spmp/commoditiesCategory/followsales-pro/list"
         self.log("导航到首页...")
         driver.get(HOME_URL)
-        time.sleep(5)
+        self._wait_ready_state(timeout=10)
         def _click_text(text, timeout=10):
             """在页面中查找包含指定文字的元素并点击。"""
             tags = ["span", "a", "li", "div", "button", "p"]
@@ -127,7 +149,7 @@ class SheinPublisher:
         self.log("尝试直接导航到商品发布页...")
         try:
             driver.get(PUBLISH_URL)
-            time.sleep(3)
+            self._wait_ready_state(timeout=10)
             cur = driver.current_url
             if "spmc" in cur or "followsales" in cur or "commodities" in cur:
                 self.log("已直接打开商品发布页")
@@ -137,18 +159,18 @@ class SheinPublisher:
         # 策略2：回到首页，点击菜单
         self.log("导航到首页并点击菜单...")
         driver.get(HOME_URL)
-        time.sleep(4)
+        self._wait_ready_state(timeout=10)
         if not _click_text("商品", timeout=10):
             self.log("未找到「商品」菜单")
             # 最后参考：直接打开 URL
             driver.get(PUBLISH_URL)
-            time.sleep(2)
+            self._wait_ready_state(timeout=10)
             return True
-        time.sleep(2)
+        self._wait_ready_state(timeout=10)
         if not _click_text("商品发布", timeout=8):
             self.log("未找到「商品发布」子菜单")
             driver.get(PUBLISH_URL)
-            time.sleep(2)
+            self._wait_ready_state(timeout=10)
             return True
         # 等待新窗口或页面跳转
         for _ in range(20):
@@ -157,7 +179,7 @@ class SheinPublisher:
             if new_handles - original_handles:
                 driver.switch_to.window((new_handles - original_handles).pop())
                 self.log("已切换到商品发布页面")
-                time.sleep(2)
+                self._wait_ready_state(timeout=10)
                 return True
         return True
 
@@ -402,39 +424,30 @@ class SheinPublisher:
                         continue
             return False
         try:
-            # Step0: 等待弹框出现（8秒）
+            # Step0: 等待弹框出现（最多10秒，每1秒检查一次）
             self.log("[DEBUG] 等待图片裁剪弹框...")
-            deadline = time.time() + 8
-            while time.time() < deadline:
-                if _is_crop_dialog_visible():
-                    self.log("[OK] 检测到图片裁剪弹框")
-                    break
-                time.sleep(0.4)
-            else:
+            if not self._wait_until(_is_crop_dialog_visible, timeout=10, interval=1, desc="图片裁剪弹框出现"):
                 self.log("[DEBUG] 未检测到裁剪弹框，跳过")
                 return False
             time.sleep(0.3)
             # Step1: 选择 1:1 裁剪比例
             if _select_ratio_1_1():
                 self.log("[OK] 已选择 1:1 裁剪比例")
-                time.sleep(0.5)
+                time.sleep(0.2)
             else:
                 self.log("[WARN] 未找到 1:1 比例选项，继续点击确认...")
             # Step2: 点击确认裁剪
             if _click_confirm():
                 self.log("[OK] 已点击确认裁剪")
-                time.sleep(2)
             else:
                 self.log("[ERROR] 未能点击确认裁剪按钒")
                 return False
-            # Step3: 等待弹框关闭
+            # Step3: 等待弹框关闭（最多10秒，每1秒检查一次）
             self.log("[DEBUG] 等待裁剪弹框关闭...")
-            deadline2 = time.time() + 10
-            while time.time() < deadline2:
-                if not _is_crop_dialog_visible():
-                    self.log("[OK] 裁剪弹框已关闭")
-                    break
-                time.sleep(0.4)
+            if self._wait_until(lambda: not _is_crop_dialog_visible(), timeout=10, interval=1, desc="图片裁剪弹框关闭"):
+                self.log("[OK] 裁剪弹框已关闭")
+            else:
+                self.log("[WARN] 裁剪弹框关闭超时")
             return True
         except Exception as e:
             self.log("[ERROR] 处理裁剪弹框失败: {}".format(str(e)[:80]))
@@ -3179,7 +3192,7 @@ class SheinPublisher:
                 # Scroll row into view
                 try:
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
-                    time.sleep(0.5)
+                    time.sleep(0.2)
                 except Exception:
                     pass
                 # Find the detail image file input in the 3rd <td> of this row
@@ -3244,7 +3257,7 @@ class SheinPublisher:
                         self.log("[DEBUG] SKU行 {} 图{}已提交".format(row_idx + 1, img_idx + 1))
                         self._dismiss_switch_confirm_modal()
                         self._handle_crop_dialog()
-                        time.sleep(1.5)
+                        time.sleep(0.4)
                         upload_ok_count += 1
                     except Exception as e:
                         self.log("[ERROR] SKU行 {} 图{} 上传失败: {}".format(row_idx+1, img_idx+1, str(e)[:60]))
@@ -3407,7 +3420,7 @@ class SheinPublisher:
                                     self.log("[OK] SKU行 {} 方形图未自动加载，已补传第1张细节图".format(row_idx + 1))
                                     self._dismiss_switch_confirm_modal()
                                     self._handle_crop_dialog()
-                                    time.sleep(1.2)
+                                    time.sleep(0.4)
                                     square_uploaded = True
                                 except Exception as e:
                                     self.log("[WARN] SKU行 {} 方形图补传失败: {}".format(row_idx + 1, str(e)[:60]))
@@ -3513,7 +3526,7 @@ class SheinPublisher:
                                     self.log("[DEBUG] SKU行 {} 色块图第{}次尝试未找到 input (共{}列)".format(
                                         row_idx + 1, _cb_attempt + 1, len(tds_piece)))
                                     if _cb_attempt < 4:
-                                        time.sleep(1.5)
+                                        time.sleep(0.6)
                                     continue
 
                                 self._dismiss_switch_confirm_modal()
@@ -3531,13 +3544,13 @@ class SheinPublisher:
                                     row_idx + 1, _cb_attempt + 1))
                                 self._dismiss_switch_confirm_modal()
                                 self._handle_crop_dialog()
-                                time.sleep(1.2)
+                                time.sleep(0.4)
                                 piece_uploaded = True
                             except Exception as e:
                                 self.log("[WARN] SKU行 {} 色块图第{}次尝试异常: {}".format(
                                     row_idx + 1, _cb_attempt + 1, str(e)[:60]))
                                 if _cb_attempt < 4:
-                                    time.sleep(1.5)
+                                    time.sleep(0.6)
 
                         if not piece_uploaded:
                             self.log("[ERROR] SKU行 {} 色块图经5次重试仍未上传!".format(row_idx + 1))
@@ -3588,7 +3601,7 @@ class SheinPublisher:
                     self.log("[OK] 第 {} 张细节图已提交上传".format(idx + 1))
                     self._dismiss_switch_confirm_modal()
                     self._handle_crop_dialog()
-                    time.sleep(1.5)
+                    time.sleep(0.4)
                 except Exception as e:
                     self.log("[ERROR] 第 {} 张 send_keys 失败: {}".format(idx + 1, str(e)[:60]))
                 try:
