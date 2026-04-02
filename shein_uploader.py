@@ -2247,7 +2247,9 @@ class SheinPublisher:
             used_data_ids = set()  # track already-processed input boxes by data-id
             # Build a mapping: spec_val order -> sku_list index, so image upload stays aligned
             # all_spec_values is already in sku_list order (same as GUI display)
-            for val_idx, spec_val in enumerate(all_spec_values):
+            val_idx = 0
+            while val_idx < len(all_spec_values):
+                spec_val = all_spec_values[val_idx]
                 self.log("[DEBUG] 填写第 {} 个规格値: {}".format(val_idx + 1, spec_val))
                 # Find the next NEW empty 'please select or customize' input box
                 # Key: use data-id to skip boxes we've already filled
@@ -2280,10 +2282,10 @@ class SheinPublisher:
                     if value_inner is not None:
                         break
                     # Not found yet - SHEIN may not have rendered new box yet
-                    self.log("[DEBUG] 第 {} 个规格値：第{}次尝试寻找新输入框...".format(val_idx + 1, _retry + 1))
+                    self.log("[DEBUG] 规格値 '{}'：第{}次尝试寻找新输入框...".format(spec_val, _retry + 1))
                     time.sleep(0.5)
                 if value_inner is None:
-                    self.log("[WARN] 第 {} 个规格値：未找到新的输入框，停止填写".format(val_idx + 1))
+                    self.log("[WARN] 规格値 '{}'：未找到新的输入框，停止填写".format(spec_val))
                     break
                 # Record this box's data-id before filling
                 try:
@@ -2295,12 +2297,37 @@ class SheinPublisher:
                 picked_val = _type_and_pick_first(value_inner, "主规格値", spec_val)
                 if picked_val:
                     filled_vals.append(picked_val)
-                    self.log("[OK] 第 {} 个规格値已填写: {}".format(val_idx + 1, picked_val))
-                    time.sleep(1.6)  # wait for SHEIN to append next input box
+                    self.log("[OK] 规格値已填写: {}".format(picked_val))
+                    val_idx += 1
+                    time.sleep(1.2)  # wait for SHEIN to append next input box
                 else:
-                    # _type_and_pick_first 返回 None 说明输入匹配彻底失败
+                    # 当前值匹配失败：清空当前框并切到下一个输入框重试同一值
+                    try:
+                        input_el = None
+                        for ip in value_inner.find_elements(By.XPATH, ".//input[not(@type='hidden')]"):
+                            if ip.is_displayed() and ip.is_enabled():
+                                input_el = ip
+                                break
+                        if input_el is not None:
+                            driver.execute_script(
+                                "var el=arguments[0];el.focus();el.value='';"
+                                "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                                "el.dispatchEvent(new Event('change',{bubbles:true}));",
+                                input_el
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        driver.execute_script(
+                            "var c=document.getElementById('spec_info');"
+                            "if(c){var h=c.querySelector('[class*=card_header]');if(h){h.click();return true;}c.click();return true;}"
+                            "document.body.click();return true;"
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
                     # 不能调用 _pick_first 去覆盖当前框（可能 hint_modal 已处理过）
-                    self.log("[WARN] 第 {} 个规格値 '{}' 输入匹配失败，跳过（不覆盖已有数据）".format(val_idx + 1, spec_val))
+                    self.log("[WARN] 规格値 '{}' 输入匹配失败，尝试下一个输入框重试".format(spec_val))
             if filled_vals:
                 self._last_main_spec_filled_values = list(filled_vals)
                 self.log("[OK] 主规格填写完成: 属性={}，値=[{}]".format(
