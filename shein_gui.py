@@ -90,7 +90,7 @@ class SheinApp(tk.Tk):
         tk.Entry(pm_frame,textvariable=self.price_multiplier,width=4,font=("Segoe UI",10),bg=BG_CARD,fg=TEXT_MAIN,insertbackground=TEXT_MAIN,relief="flat",bd=2).pack(side="left",padx=(4,0))
         fw_frame=tk.Frame(bf,bg=BG_PANEL)
         fw_frame.pack(side="left",padx=(0,10))
-        tk.Label(fw_frame,text="抓取线程:",font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
+        tk.Label(fw_frame,text="运行线程:",font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         tk.Entry(fw_frame,textvariable=self.fetch_workers,width=4,font=("Segoe UI",10),bg=BG_CARD,fg=TEXT_MAIN,insertbackground=TEXT_MAIN,relief="flat",bd=2).pack(side="left",padx=(4,0))
         self._btn(bf,"导入 ASIN 文本",ACCENT,self._import_txt).pack(side="left",padx=5)
         self._btn(bf,"抓取选中商品","#2563eb",self._fetch_sel).pack(side="left",padx=5)
@@ -326,7 +326,7 @@ class SheinApp(tk.Tk):
             try:
                 if self._shein_publisher.is_alive():
                     self.status_lbl.config(text='复用已有浏览器 (账号: {})'.format(account))
-                    self._shein_publisher.driver.get(SHEIN_LOGIN_URL)
+                    self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
                     threading.Thread(target=self._watch_login,
                                      args=(self._shein_publisher,), daemon=True).start()
                     return
@@ -343,9 +343,9 @@ class SheinApp(tk.Tk):
                 pub.start_browser(account=account)
                 self._shein_publisher = pub
                 self._shein_publisher_account = account
-                self.status_lbl.config(text='浏览器已就绪，打开登录页...')
-                pub.driver.get(SHEIN_LOGIN_URL)
-                self.status_lbl.config(text='已打开 SHEIN 登录页，请登录')
+                self.status_lbl.config(text='浏览器已就绪，打开商品发布页...')
+                pub.driver.get(SHEIN_PUBLISH_URL)
+                self.status_lbl.config(text='已打开商品发布页，请确认登录状态')
                 threading.Thread(target=self._watch_login, args=(pub,), daemon=True).start()
             except Exception as e:
                 self.status_lbl.config(text='启动失败: ' + str(e)[:50])
@@ -375,8 +375,13 @@ class SheinApp(tk.Tk):
         if not logged_in:
             return
 
-        # 已登录，等待页面完全渲染
-        _t.sleep(3)
+        # 已登录，等待页面完全渲染后直达商品发布页
+        _t.sleep(2)
+        try:
+            pub.driver.get(SHEIN_PUBLISH_URL)
+        except Exception:
+            pass
+        _t.sleep(1)
         account = ""
         import re as _re
         try:
@@ -501,6 +506,29 @@ class SheinApp(tk.Tk):
         """打开 SHEIN 商品发布页面，自动上传选中商品的图片。"""
         # 优先使用勾选的 ASIN；未勾选时回退到当前点击项
         selected_asins = [a for a, v in self.asin_vars.items() if v.get()]
+        if len(selected_asins) > 1:
+            valid_asins = []
+            for asin in selected_asins:
+                info = self.product_cache.get(asin)
+                if info and info.get('image_url'):
+                    valid_asins.append(asin)
+            if not valid_asins:
+                messagebox.showwarning('提示', '所选商品都没有图片信息，请先抓取商品')
+                return
+            try:
+                max_workers = int(self.fetch_workers.get())
+            except Exception:
+                max_workers = 5
+            max_workers = max(1, min(3, max_workers))
+            self.fetch_workers.set(str(max_workers))
+            self._publish_session_id += 1
+            current_session_id = self._publish_session_id
+            self._stop_publish = False
+            self.progress.start(12)
+            self.status_lbl.config(text='并发上品中：{} 个商品（{}线程）...'.format(len(valid_asins), min(max_workers, len(valid_asins))))
+            threading.Thread(target=self._publish_worker, args=(valid_asins, max_workers, current_session_id), daemon=True).start()
+            return
+
         target_asin = selected_asins[0] if selected_asins else self.current_asin
         if target_asin is None:
             messagebox.showwarning('提示', '请先勾选一个商品或点击左侧 ASIN')
@@ -1147,45 +1175,209 @@ class SheinApp(tk.Tk):
             self.after(0, lambda m=m: self.status_lbl.config(text=m))
   
 
-    def _publish_worker(self,asins):
-        pub = self._shein_publisher
+    def _publish_worker(self,asins,max_workers=5,session_id=None):
         success_list = []
         fail_list = []
         total = len(asins)
+        done = 0
+        result_lock = threading.Lock()
+        task_lock = threading.Lock()
         self._stop_publish = False  # 确保开始时标志为 False
+
         try:
-            if pub is not None:
-                setattr(pub, '_stop_publish', False)
+            max_workers = int(max_workers)
         except Exception:
-            pass
-        for i,asin in enumerate(asins):
-            # 检查停止标志
-            if self._stop_publish or bool(getattr(pub, '_stop_publish', False)):
-                self._pub_log("上品已停止，共完成 {}/{}".format(i, total))
-                break
-            info = self.product_cache.get(asin,{})
-            cat_result = auto_match_category(info)
-            cat_name = cat_result["name"]
-            cat_path = cat_result["path"]  # e.g. ["女装", "连衣裙", "迷你裙"]
-            self.after(0, lambda m="上品中 {}/{}：{} [{}]".format(
-                i+1, total, asin, " > ".join(cat_path) if cat_path else cat_name): self.status_lbl.config(text=m))
+            max_workers = 5
+        max_workers = max(1, min(20, max_workers, total if total > 0 else 1))
+
+        # 从“登录 SHEIN”已登录实例提取会话（cookies + localStorage），供多线程实例复用
+        source_driver = None
+        login_cookies = []
+        login_storage = {}
+        try:
+            if self._shein_publisher is not None and self._shein_publisher.is_alive():
+                source_driver = self._shein_publisher.driver
+        except Exception:
+            source_driver = None
+        if source_driver is not None:
             try:
-                result = pub.publish_product(info, cat_path if cat_path else [cat_name])
-                if result:
+                login_cookies = source_driver.get_cookies() or []
+            except Exception:
+                login_cookies = []
+            try:
+                login_storage = source_driver.execute_script(
+                    "var r={}; for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i); r[k]=localStorage.getItem(k);} return r;"
+                ) or {}
+            except Exception:
+                login_storage = {}
+
+        base_account = (self.shein_account.get() or '').strip() or 'default'
+        # 同时启动过多浏览器会触发“授权中/网页无法访问”，限制到3更稳
+        max_workers = min(max_workers, 3)
+        next_idx = 0
+
+        def _next_asin():
+            nonlocal next_idx
+            with task_lock:
+                if next_idx >= total:
+                    return None
+                asin = asins[next_idx]
+                next_idx += 1
+                return asin
+
+        def _record_result(asin, ok, err=''):
+            nonlocal done
+            with result_lock:
+                done += 1
+                if ok:
                     success_list.append(asin)
-                    dot = self.asin_dots.get(asin)
-                    if dot: self.after(0, lambda a=asin: self._set_asin_status(a, "success"))
-                    self._pub_log("[OK {}/{}] {} -> {} 上品成功".format(
-                        len(success_list), total, asin, " > ".join(cat_path) if cat_path else cat_name))
                 else:
-                    raise Exception("发布流程未能确认成功")
-            except Exception as e:
-                fail_list.append((asin, str(e)))
-                self._pub_log("[FAIL {}/{}] {} 失败: {}".format(
-                    len(fail_list), total, asin, e))
-                dot = self.asin_dots.get(asin)
+                    fail_list.append((asin, err))
+                d = done
+                s = len(success_list)
+                f = len(fail_list)
+
+            dot = self.asin_dots.get(asin)
+            if ok:
+                if dot: self.after(0, lambda a=asin: self._set_asin_status(a, "success"))
+                self._pub_log("[OK {}/{}] {} 上品成功".format(s, total, asin))
+            else:
                 if dot: self.after(0, lambda a=asin: self._set_asin_status(a, "fail"))
-            time.sleep(random.uniform(2, 4))
+                self._pub_log("[FAIL {}/{}] {} 失败: {}".format(f, total, asin, str(err)[:80]))
+
+            self.after(0, lambda dd=d, tt=total, ss=s, ff=f:
+                self.status_lbl.config(text="并发上品进度 {}/{}（成功{}，失败{}）".format(dd, tt, ss, ff)))
+
+        def _worker_loop(worker_idx):
+            def _worker_log(msg):
+                self._pub_log('[W{}] {}'.format(worker_idx, str(msg)[:80]))
+
+            def _inject_login_session(driver):
+                # 将主登录实例的 localStorage/cookies 注入当前 worker（不做额外页面跳转）
+                try:
+                    pass
+                except Exception:
+                    return
+
+                if login_storage:
+                    try:
+                        driver.execute_script(
+                            "for (var k in arguments[0]) { try { localStorage.setItem(k, arguments[0][k]); } catch(e) {} }",
+                            login_storage,
+                        )
+                    except Exception:
+                        pass
+
+                if login_cookies:
+                    for ck in login_cookies:
+                        try:
+                            c = dict(ck)
+                            if c.get('expiry') is not None:
+                                try:
+                                    c['expiry'] = int(c['expiry'])
+                                except Exception:
+                                    c.pop('expiry', None)
+                            driver.add_cookie(c)
+                        except Exception:
+                            continue
+
+            def _ensure_publish_page(driver):
+                try:
+                    cur = driver.current_url or ""
+                except Exception:
+                    cur = ""
+                if ("followsales-pro/list" in cur
+                        and ("commoditiesCategory" in cur or "commodities-category" in cur)):
+                    return True
+
+                # 快速路径：先直接跳发布页
+                try:
+                    driver.get(SHEIN_PUBLISH_URL)
+                    time.sleep(0.4)
+                    cur = driver.current_url or ""
+                    if ("followsales-pro/list" in cur
+                            and ("commoditiesCategory" in cur or "commodities-category" in cur)):
+                        return True
+                except Exception:
+                    pass
+
+                # 失败再做一次会话注入 + 重试跳转
+                _inject_login_session(driver)
+                try:
+                    driver.get(SHEIN_PUBLISH_URL)
+                    time.sleep(0.8)
+                    cur = driver.current_url or ""
+                except Exception:
+                    cur = ""
+                return ("followsales-pro/list" in cur
+                        and ("commoditiesCategory" in cur or "commodities-category" in cur))
+
+            worker_account = '{}__w{}'.format(base_account, worker_idx)
+            pub = SheinPublisher(log_cb=_worker_log)
+            try:
+                # worker profile 只在首次不存在时复制，后续复用可大幅提速
+                try:
+                    base_profile = os.path.join(os.path.expanduser("~"), ".shein_profiles", base_account)
+                    worker_profile = os.path.join(os.path.expanduser("~"), ".shein_profiles", worker_account)
+                    if os.path.isdir(base_profile) and (not os.path.isdir(worker_profile)):
+                        import shutil
+                        shutil.copytree(base_profile, worker_profile, dirs_exist_ok=True)
+                except Exception as cp_e:
+                    self._pub_log('[W{}] 初始化实例失败: {}'.format(worker_idx, str(cp_e)[:80]))
+
+                # 每个线程只启动一次浏览器
+                pub.start_browser(account=worker_account)
+                if not _ensure_publish_page(pub.driver):
+                    self._pub_log('[W{}] 会话注入后仍未进入发布页'.format(worker_idx))
+                else:
+                    self._pub_log('[W{}] 已进入商品发布页'.format(worker_idx))
+
+                while True:
+                    if self._stop_publish:
+                        return
+                    if session_id is not None and session_id != self._publish_session_id:
+                        return
+
+                    asin = _next_asin()
+                    if asin is None:
+                        return
+
+                    info = self.product_cache.get(asin, {})
+                    if not info or not info.get('image_url'):
+                        _record_result(asin, False, '缺少商品图片')
+                        continue
+
+                    try:
+                        if not _ensure_publish_page(pub.driver):
+                            _record_result(asin, False, '未能进入商品发布页（授权中）')
+                            continue
+                        cat_result = auto_match_category(info)
+                        cat_name = cat_result["name"]
+                        cat_path = cat_result["path"]
+                        result = pub.publish_product(info, cat_path if cat_path else [cat_name])
+                        if result:
+                            _record_result(asin, True)
+                        else:
+                            _record_result(asin, False, '发布流程未能确认成功')
+                    except Exception as e:
+                        _record_result(asin, False, str(e))
+            finally:
+                try:
+                    if pub.driver:
+                        pub.driver.quit()
+                except Exception:
+                    pass
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_worker_loop, i + 1) for i in range(max_workers)]
+            for fut in as_completed(futures):
+                try:
+                    fut.result()
+                except Exception as e:
+                    self._pub_log('并发线程异常: {}'.format(str(e)[:80]))
+
+        if self._stop_publish:
+            self._pub_log("上品已停止，共完成 {}/{}".format(done, total))
         self.after(0, lambda: self._publish_done(success_list, fail_list))
 
     def _publish_done(self, success_list, fail_list):
@@ -1279,7 +1471,7 @@ class SheinApp(tk.Tk):
             try:
                 if self._shein_publisher is not None and self._shein_publisher.is_alive():
                     self.status_lbl.config(text='复用当前浏览器，跳转到发布页...')
-                    publish_url = "https://sso.geiwohuo.com/#/spmc/commodities-category/followsales-pro/list?auth_login_token=994120f4fc4b4be5af3917e601a648e7&externalSystem=spmp"
+                    publish_url = SHEIN_PUBLISH_URL
                     self._shein_publisher.driver.get(publish_url)
                     time.sleep(3)
                     self.status_lbl.config(text='✓ 已跳转到发布页面，开始上传商品...')

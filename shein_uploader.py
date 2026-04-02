@@ -23,7 +23,7 @@ except ImportError:
 class SheinPublisher:
     HOME_URL    = "https://sso.geiwohuo.com/#/home"
     LOGIN_URL   = "https://sso.geiwohuo.com/#/login"
-    PUBLISH_URL = "https://sso.geiwohuo.com/#/spmc/commodities-category/followsales-pro/list?externalSystem=spmp"
+    PUBLISH_URL = "https://sso.geiwohuo.com/#/spmp/commoditiesCategory/followsales-pro/list"
     DEBUG_PORT  = 9222  # Chrome 远程调试端口
 
     def __init__(self, log_cb=None):
@@ -83,7 +83,7 @@ class SheinPublisher:
         """
         driver = self.driver
         HOME_URL = "https://www.geiwohuo.com/#/oversea-home"
-        PUBLISH_URL = "https://sso.geiwohuo.com/#/spmc/commodities-category/followsales-pro/list?externalSystem=spmp"
+        PUBLISH_URL = "https://sso.geiwohuo.com/#/spmp/commoditiesCategory/followsales-pro/list"
         self.log("导航到首页...")
         driver.get(HOME_URL)
         time.sleep(5)
@@ -4076,73 +4076,38 @@ class SheinPublisher:
         def _goto_publish():
             """
             导航到商品发布页面。
-            优先检查是否已在发布页面，避免重复导航。
+            仅直达 URL，不再走首页菜单，减少失败点。
             """
-            current_url = driver.current_url
+            current_url = driver.current_url or ""
             # 检查是否已在发布页面
-            if "spmc" in current_url and "followsales" in current_url and "commodities" in current_url:
+            if "followsales-pro/list" in current_url and ("commoditiesCategory" in current_url or "commodities-category" in current_url):
                 self.log("已在商品发布页面，跳过导航")
                 return True
             
-            # 直接导航到发布页面
+            # 直接导航到发布页面（带重试，处理授权中跳转）
             self.log("直接导航到商品发布页面...")
             try:
-                driver.get(self.PUBLISH_URL)
-                time.sleep(3)
-                cur = driver.current_url
-                if "spmc" in cur and "followsales" in cur:
-                    self.log("已直接打开商品发布页")
-                    return True
+                for attempt in range(1, 4):
+                    driver.get(self.PUBLISH_URL)
+                    time.sleep(2)
+                    cur = driver.current_url or ""
+                    if "followsales-pro/list" in cur and ("commoditiesCategory" in cur or "commodities-category" in cur):
+                        self.log("已直接打开商品发布页")
+                        return True
+                    # 命中授权中页：先到 home 再回发布页
+                    if "/auth/" in cur or "GMPSSO" in cur:
+                        self.log("检测到授权中页面，第{}/3次重试...".format(attempt))
+                        try:
+                            driver.get("https://sso.geiwohuo.com/#/home")
+                            time.sleep(1.2)
+                        except Exception:
+                            pass
+                        continue
+                    self.log("直达后当前URL: {}".format(cur))
+                return False
             except Exception as e:
                 self.log("直接导航失败: {}".format(e))
-            
-            # 备用方案：从首页导航
-            self.log("尝试从首页导航...")
-            driver.get("https://www.geiwohuo.com/#/oversea-home")
-            time.sleep(4)
-            original_handles = set(driver.window_handles)
-            # 点击「商品」span（精确匹配文本）
-            self.log("查找「商品」菜单...")
-            clicked_shp = False
-            for el in driver.find_elements(By.TAG_NAME, "span"):
-                try:
-                    if el.text.strip() == "商品" and el.is_displayed():
-                        driver.execute_script("arguments[0].click();", el)
-                        self.log("已点击「商品」")
-                        time.sleep(2)
-                        clicked_shp = True
-                        break
-                except Exception:
-                    continue
-            if not clicked_shp:
-                self.log("未找到「商品」菜单，终止")
                 return False
-            # 点击「商品发布」span（精确匹配文本）
-            self.log("查找「商品发布」子菜单...")
-            for el in driver.find_elements(By.TAG_NAME, "span"):
-                try:
-                    if el.text.strip() == "商品发布" and el.is_displayed():
-                        driver.execute_script("arguments[0].click();", el)
-                        self.log("已点击「商品发布」，等待新窗口...")
-                        # 等待新窗口出现（最多10秒）
-                        for _ in range(20):
-                            time.sleep(0.5)
-                            new_handles = set(driver.window_handles)
-                            if new_handles - original_handles:
-                                # 切换到新窗口
-                                new_handle = (new_handles - original_handles).pop()
-                                driver.switch_to.window(new_handle)
-                                self.log("已切换到新窗口，URL: {}".format(driver.current_url))
-                                time.sleep(3)
-                                return True
-                        # 没有新窗口，可能在同一窗口跳转
-                        cur = driver.current_url
-                        self.log("无新窗口，当前URL: {}".format(cur))
-                        return True
-                except Exception:
-                    continue
-            self.log("未找到「商品发布」子菜单")
-            return False
         
         if not _goto_publish():
             raise Exception(

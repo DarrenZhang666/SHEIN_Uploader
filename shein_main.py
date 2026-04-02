@@ -44,7 +44,7 @@ except ImportError:
 
 SHEIN_LOGIN_URL = "https://sso.geiwohuo.com/#/login"
 SHEIN_HOME_URL  = "https://sso.geiwohuo.com/#/home"
-SHEIN_PUBLISH_URL = "https://sso.geiwohuo.com/#/spmc/commodities-category/followsales-pro/list?externalSystem=spmp"
+SHEIN_PUBLISH_URL = "https://sso.geiwohuo.com/#/spmp/commoditiesCategory/followsales-pro/list"
 
 # ── 从 shein_categories.json 加载分类树 ──────────────────────────
 def _load_shein_categories():
