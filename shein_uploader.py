@@ -1548,9 +1548,12 @@ class SheinPublisher:
                         _bb = str(_b or "").strip()
                         if _bb:
                             basis_values.append(_bb)
-                basis_unrecognized = (len(basis_values) == 0)
+                basis_norm = [str(x).strip().lower() for x in basis_values if str(x).strip()]
+                basis_unrecognized = (len(basis_norm) == 0 or all(x in ("未识别", "unknown", "unrecognized", "none", "n/a") for x in basis_norm))
 
-                if single_sku or is_default_attr or basis_unrecognized:
+                # 仅在「单SKU」或「默认规格+分类依据未识别」时跳过主规格切换
+                should_skip_main_spec = single_sku or (is_default_attr and basis_unrecognized)
+                if should_skip_main_spec:
                     self.log("[INFO] 主规格跳过：保持'无主规格'（single_sku={}, 默认规格={}, 分类依据未识别={}）".format(
                         single_sku, is_default_attr, basis_unrecognized))
                     return
