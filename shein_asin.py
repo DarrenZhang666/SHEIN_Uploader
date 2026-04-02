@@ -9,6 +9,8 @@ import io
 import json
 import time
 import os
+import difflib
+import threading
 import requests
 try:
     import cloudscraper
@@ -145,6 +147,40 @@ HEADERS_POOL = [
 # 可选代理池（留空则不使用，格式: ["http://user:pass@host:port"]）
 PROXY_POOL = []
 
+# 自适应限流状态（按域名记录）
+_ANTI_BLOCK_LOCK = threading.Lock()
+_ANTI_BLOCK_STATE = {}
+
+
+def _anti_block_state(domain):
+    with _ANTI_BLOCK_LOCK:
+        st = _ANTI_BLOCK_STATE.get(domain)
+        if st is None:
+            st = {"next_allowed": 0.0, "penalty": 0.0, "blocked_streak": 0}
+            _ANTI_BLOCK_STATE[domain] = st
+        return st
+
+
+def _adaptive_sleep_before_request(domain):
+    st = _anti_block_state(domain)
+    now = time.time()
+    wait = max(0.0, float(st.get("next_allowed", 0.0)) - now)
+    if wait > 0:
+        time.sleep(min(wait, 12.0))
+
+
+def _report_request_result(domain, blocked=False):
+    st = _anti_block_state(domain)
+    now = time.time()
+    if blocked:
+        st["blocked_streak"] = int(st.get("blocked_streak", 0)) + 1
+        st["penalty"] = min(18.0, float(st.get("penalty", 0.0)) * 1.6 + 1.2)
+        st["next_allowed"] = now + float(st["penalty"]) + random.uniform(0.4, 1.8)
+    else:
+        st["blocked_streak"] = 0
+        st["penalty"] = max(0.0, float(st.get("penalty", 0.0)) * 0.55 - 0.1)
+        st["next_allowed"] = now + random.uniform(0.05, 0.35)
+
 
 def _get_proxy():
     """随机返回代理配置字典，PROXY_POOL 为空时返回 None。"""
@@ -174,7 +210,7 @@ def _is_blocked(status_code, text):
     """判断响应是否被反爬拦截。
     仅在页面确实是拦截页（无商品内容）时返回 True。
     """
-    if status_code == 503:
+    if status_code in (429, 503):
         return True
     if status_code == 404 and "automated" in text.lower():
         return True
@@ -193,6 +229,8 @@ def _is_blocked(status_code, text):
         return True
     if "automated access" in tl:
         return True
+    if "to discuss automated access" in tl:
+        return True
     return False
 
 def _get_with_retry(session, url, max_attempts=3, base_timeout=12):
@@ -202,21 +240,30 @@ def _get_with_retry(session, url, max_attempts=3, base_timeout=12):
     """
     shuffled = random.sample(HEADERS_POOL, len(HEADERS_POOL))
     attempts = min(max_attempts, len(shuffled))
+    domain = url.split("/")[2]
     for attempt in range(attempts):
         hdrs = shuffled[attempt].copy()
-        hdrs["Referer"] = "https://{}/".format(url.split("/")[2])
+        hdrs["Referer"] = "https://{}/".format(domain)
         proxies = _get_proxy()
+
+        # 自适应限流：先等待到可请求窗口
+        _adaptive_sleep_before_request(domain)
+
         if attempt > 0:
-            # 短暂退避：避免超长等待
-            wait = min(2 ** attempt + random.uniform(0.3, 1.0), 8.0)
+            # 重试退避（失败越多等待越久）
+            wait = min((2 ** attempt) + random.uniform(0.35, 1.2), 12.0)
             time.sleep(wait)
         try:
             r = session.get(url, headers=hdrs, proxies=proxies, timeout=base_timeout)
-            if not _is_blocked(r.status_code, r.text):
+            blocked = _is_blocked(r.status_code, r.text)
+            _report_request_result(domain, blocked=blocked)
+            if not blocked:
                 return r, hdrs
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            _report_request_result(domain, blocked=True)
             continue
         except Exception:
+            _report_request_result(domain, blocked=True)
             continue
     return None, None
 
@@ -775,6 +822,59 @@ def _extract_color_value_from_sku_attrs(sku_attr_text):
     return first
 
 
+def _closest_shein_official_color(color_text):
+    raw = str(color_text or "").strip()
+    if not raw:
+        return "", 0.0
+    n = _norm_color_for_match(raw)
+    if not n:
+        return "", 0.0
+    if n in _SHEIN_OFFICIAL_COLORS:
+        return n, 1.0
+
+    candidates = [n]
+    for seg in re.split(r"[&/|+＆／、，·\s-]+", raw):
+        sn = _norm_color_for_match(seg)
+        if sn and sn not in candidates:
+            candidates.append(sn)
+
+    best = ""
+    best_score = 0.0
+    for c in candidates:
+        for off in _SHEIN_OFFICIAL_COLORS:
+            score = difflib.SequenceMatcher(a=c, b=off).ratio()
+            if c in off or off in c:
+                score = max(score, 0.86 if min(len(c), len(off)) >= 3 else score)
+            if score > best_score:
+                best_score = score
+                best = off
+    if best_score < 0.52:
+        return "", best_score
+    return best, best_score
+
+
+def _replace_color_in_sku_attrs(sku_attr_text, standard_color):
+    txt = str(sku_attr_text or "").strip()
+    std = str(standard_color or "").strip()
+    if not txt:
+        return "Color: {}".format(std) if std else "默认规格"
+    parts = [p.strip() for p in txt.split("/") if str(p).strip()]
+    out = []
+    replaced = False
+    for p in parts:
+        if ":" in p:
+            k, _ = p.split(":", 1)
+            kk = _clean_dimension_name(k)
+            if ("color" in kk or "colour" in kk) and std:
+                out.append("Color: {}".format(std))
+                replaced = True
+                continue
+        out.append(p)
+    if not replaced and std:
+        out.insert(0, "Color: {}".format(std))
+    return " / ".join(out) if out else "默认规格"
+
+
 def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=8):
     if not color_image_map:
         return []
@@ -957,36 +1057,54 @@ def fetch_amazon_product(asin, region="美国"):
         for k, v in _make_browser_cookies(domain).items():
             sess.cookies.set(k, v, domain=domain)
 
-        # 主页面请求：cloudscraper/requests 带重试
-        r, hdrs = _get_with_retry(sess, url, max_attempts=3, base_timeout=15)
+        # 主页面请求：cloudscraper/requests 带重试（多 URL + 多层兜底）
         page_html = None
-        if r is not None and r.status_code in (200, 301, 302) and not _is_blocked(r.status_code, r.text):
-            page_html = r.text
-        else:
-            # 第2层：cloudscraper 直接单次请求（不经过重试，换新 scraper 实例）
-            if _CLOUDSCRAPER_OK:
-                try:
-                    _scraper2 = cloudscraper.create_scraper(
-                        browser={"browser": "firefox", "platform": "windows", "mobile": False},
-                    )
-                    for k, v in _make_browser_cookies(domain).items():
-                        _scraper2.cookies.set(k, v, domain=domain)
-                    _hdrs2 = random.choice(HEADERS_POOL).copy()
-                    _r2 = _scraper2.get(url, headers=_hdrs2, timeout=15)
-                    if not _is_blocked(_r2.status_code, _r2.text):
-                        page_html = _r2.text
-                        hdrs = _hdrs2
-                except Exception:
-                    pass
+        hdrs = random.choice(HEADERS_POOL).copy()
+        r = None
+        candidate_urls = [
+            url,
+            "https://{}/gp/product/{}?language=en_US&currency=USD".format(domain, asin),
+        ]
+        # 先走 requests/cloudscraper 重试（对多个 URL）
+        for _u in candidate_urls:
+            r, hdrs = _get_with_retry(sess, _u, max_attempts=4, base_timeout=18)
+            if r is not None and r.status_code in (200, 301, 302) and not _is_blocked(r.status_code, r.text):
+                page_html = r.text
+                break
 
-            # 第3层：Selenium 无头浏览器（最终保底）
-            if not page_html:
-                page_html = _fetch_page_with_selenium(url, timeout=25)
-                hdrs = random.choice(HEADERS_POOL).copy()
-                r = None
+        # 第2层：cloudscraper 新实例再试一轮
+        if (not page_html) and _CLOUDSCRAPER_OK:
+            try:
+                _scraper2 = cloudscraper.create_scraper(
+                    browser={"browser": "firefox", "platform": "windows", "mobile": False},
+                    delay=2,
+                )
+                for k, v in _make_browser_cookies(domain).items():
+                    _scraper2.cookies.set(k, v, domain=domain)
+                for _u in candidate_urls:
+                    try:
+                        _hdrs2 = random.choice(HEADERS_POOL).copy()
+                        _r2 = _scraper2.get(_u, headers=_hdrs2, timeout=18)
+                        if _r2 is not None and _r2.status_code in (200, 301, 302) and not _is_blocked(_r2.status_code, _r2.text):
+                            page_html = _r2.text
+                            hdrs = _hdrs2
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # 第3层：Selenium 无头浏览器（最终保底，连续两次）
+        if not page_html:
+            for _u in candidate_urls:
+                page_html = _fetch_page_with_selenium(_u, timeout=30)
+                if page_html:
+                    hdrs = random.choice(HEADERS_POOL).copy()
+                    r = None
+                    break
 
         if not page_html:
-            res["title"] = "被亚马逊反爬拦截，请稍后重试"
+            res["title"] = "被亚马逊反爬拦截，请稍后重试（建议更换网络或代理）"
             return res
         s = BeautifulSoup(page_html, "html.parser")
 
@@ -1110,7 +1228,9 @@ def fetch_amazon_product(asin, region="美国"):
 
         # SKU 数量预检：超过 10 个直接跳过，避免大量请求
         _pre_count = 0
+        fallback_non_official = []
         if _color_only_mode and _color_asins_from_html:
+            fallback_non_official = []
             _pre_count = len([a for a, _ in _color_asins_from_html if a])
         elif isinstance(dimension_map, dict):
             _pre_seen = set()
@@ -1130,6 +1250,7 @@ def fetch_amazon_product(asin, region="美国"):
             res["sku_list"] = []
             return res
 
+        fallback_non_official = []
         if _color_only_mode and _color_asins_from_html:
             # 路径 A：HTML 解析到 color ASIN 列表，直接使用
             sku_asin_list = [a for a, _ in _color_asins_from_html if a and a != asin]
@@ -1139,10 +1260,9 @@ def fetch_amazon_product(asin, region="美国"):
             _cur_initial = _extract_color_initial_images(page_html, max_count=8)
             sku_image_cache[asin] = _cur_initial if _cur_initial else fallback_images[:]
 
+            closest_non_official = None
             for ca, color_name in _color_asins_from_html:
                 if not ca or ca in sku_seen:
-                    continue
-                if _main_spec_is_color and not _is_shein_official_color(color_name):
                     continue
                 sku_seen.add(ca)
                 sku_images = sku_image_cache.get(ca, [])
@@ -1153,13 +1273,33 @@ def fetch_amazon_product(asin, region="美国"):
                     sku_images = list(dict.fromkeys(sku_images + map_images))[:8]
                 if not sku_images:
                     sku_images = fallback_images[:]
-                attr_text = "Color: {}".format(color_name) if color_name else "默认规格"
-                sku_list.append({
-                    "sku_asin": ca,
-                    "sku_attributes": attr_text,
-                    "dimension_basis": ["color"],
-                    "images": sku_images[:8]
-                })
+
+                if _is_shein_official_color(color_name):
+                    attr_text = "Color: {}".format(color_name) if color_name else "默认规格"
+                    sku_list.append({
+                        "sku_asin": ca,
+                        "sku_attributes": attr_text,
+                        "dimension_basis": ["color"],
+                        "images": sku_images[:8]
+                    })
+                    continue
+
+                std_color, std_score = _closest_shein_official_color(color_name)
+                if std_color:
+                    cand = {
+                        "sku_asin": ca,
+                        "sku_attributes": "Color: {}".format(std_color),
+                        "dimension_basis": ["color"],
+                        "images": sku_images[:8],
+                        "_score": std_score,
+                    }
+                    if closest_non_official is None or cand["_score"] > closest_non_official["_score"]:
+                        closest_non_official = cand
+                        fallback_non_official.append(dict(cand))
+
+            if _main_spec_is_color and (not sku_list) and closest_non_official is not None:
+                closest_non_official.pop("_score", None)
+                sku_list.append(closest_non_official)
         else:
             # 路径 B：从 dimensionToAsinMap 构建 SKU 列表
             # color_only_mode 时只保留含 color 维度的条目
@@ -1217,8 +1357,24 @@ def fetch_amazon_product(asin, region="美国"):
 
                     if _main_spec_is_color and any("color" in b or "colour" in b for b in basis):
                         _color_val = _extract_color_value_from_sku_attrs(sku_attr_text)
-                        if not _is_shein_official_color(_color_val):
-                            continue
+                        if _is_shein_official_color(_color_val):
+                            sku_list.append({
+                                "sku_asin": sku_asin,
+                                "sku_attributes": sku_attr_text,
+                                "dimension_basis": basis,
+                                "images": sku_images[:8]
+                            })
+                        else:
+                            std_color, std_score = _closest_shein_official_color(_color_val)
+                            if std_color:
+                                fallback_non_official.append({
+                                    "sku_asin": sku_asin,
+                                    "sku_attributes": _replace_color_in_sku_attrs(sku_attr_text, std_color),
+                                    "dimension_basis": basis,
+                                    "images": sku_images[:8],
+                                    "_score": std_score,
+                                })
+                        continue
 
                     sku_list.append({
                         "sku_asin": sku_asin,
@@ -1226,6 +1382,13 @@ def fetch_amazon_product(asin, region="美国"):
                         "dimension_basis": basis,
                         "images": sku_images[:8]
                     })
+
+        if _main_spec_is_color and (not sku_list):
+            if fallback_non_official:
+                fallback_non_official.sort(key=lambda x: x.get('_score', 0.0), reverse=True)
+                chosen = dict(fallback_non_official[0])
+                chosen.pop('_score', None)
+                sku_list.append(chosen)
 
         if not sku_list and not _main_spec_is_color:
             sku_list.append({
