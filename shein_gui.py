@@ -616,15 +616,6 @@ class SheinApp(tk.Tk):
 
             if self._check_stop_or_return(session_id=session_id):
                 return
-            self.after(0, lambda: self.status_lbl.config(text='点击"识图发品"按钮...'))
-            if not self._shein_publisher.click_identify_image_button():
-                self.after(0, lambda: self.status_lbl.config(text='未找到"识图发品"按钮'))
-                if dot:
-                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
-                return
-
-            if self._check_stop_or_return(session_id=session_id):
-                return
             image_url = product_info.get('image_url')
             temp_dir = os.path.join(tempfile.gettempdir(), 'shein_images')
             os.makedirs(temp_dir, exist_ok=True)
@@ -641,26 +632,70 @@ class SheinApp(tk.Tk):
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
-            if self._check_stop_or_return(session_id=session_id):
-                return
-            self.after(0, lambda: self.status_lbl.config(text='上传图片到 SHEIN...'))
-            if not self._shein_publisher.upload_product_image(temp_image):
-                self.after(0, lambda: self.status_lbl.config(text='✗ 图片上传失败'))
-                if dot:
-                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
-                return
-
-            for i in range(5, 0, -1):
+            category_selected = False
+            for attempt in range(1, 4):
                 if self._check_stop_or_return(session_id=session_id):
                     return
-                self.after(0, lambda ii=i: self.status_lbl.config(text='✓ 图片上传成功，等待识别中... {}s'.format(ii)))
-                time.sleep(1)
 
-            if self._check_stop_or_return(session_id=session_id):
-                return
-            self.after(0, lambda: self.status_lbl.config(text='选择第一个推荐类目...'))
-            if not self._shein_publisher.select_first_category():
-                self.after(0, lambda: self.status_lbl.config(text='✗ 选择类目失败'))
+                if attempt > 1:
+                    self.after(0, lambda a=attempt: self.status_lbl.config(text='第{}/3次重试：返回商品发布页...'.format(a)))
+                    self._pub_log('[RETRY] 选择类目失败，开始第{}/3次重试'.format(attempt))
+                    try:
+                        self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
+                        time.sleep(2)
+                    except Exception as nav_e:
+                        self._pub_log('[ERROR] 重试时返回商品发布页失败: {}'.format(str(nav_e)[:80]))
+                        if dot:
+                            self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
+                        return
+
+                try:
+                    self._shein_publisher._dismiss_announcements()
+                except Exception:
+                    pass
+
+                if self._check_stop_or_return(session_id=session_id):
+                    return
+                self.after(0, lambda a=attempt: self.status_lbl.config(text='点击"识图发品"按钮（第{}/3次）...'.format(a)))
+                if not self._shein_publisher.click_identify_image_button():
+                    self.after(0, lambda: self.status_lbl.config(text='未找到"识图发品"按钮'))
+                    if dot:
+                        self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
+                    return
+
+                if self._check_stop_or_return(session_id=session_id):
+                    return
+                self.after(0, lambda a=attempt: self.status_lbl.config(text='上传图片到 SHEIN（第{}/3次）...'.format(a)))
+                if not self._shein_publisher.upload_product_image(temp_image):
+                    self.after(0, lambda: self.status_lbl.config(text='✗ 图片上传失败'))
+                    if dot:
+                        self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
+                    return
+
+                for i in range(5, 0, -1):
+                    if self._check_stop_or_return(session_id=session_id):
+                        return
+                    self.after(0, lambda ii=i, a=attempt: self.status_lbl.config(text='✓ 图片上传成功，等待识别中... {}s（第{}/3次）'.format(ii, a)))
+                    time.sleep(1)
+
+                if self._check_stop_or_return(session_id=session_id):
+                    return
+                self.after(0, lambda a=attempt: self.status_lbl.config(text='选择第一个推荐类目（第{}/3次）...'.format(a)))
+                if self._shein_publisher.select_first_category():
+                    category_selected = True
+                    break
+
+                if attempt < 3:
+                    self.after(0, lambda a=attempt: self.status_lbl.config(text='✗ 选择类目失败，准备第{}/3次重试...'.format(a + 1)))
+                    continue
+
+            if not category_selected:
+                self.after(0, lambda: self.status_lbl.config(text='✗ 选择类目失败：重试3次仍未识别到类目，返回首页'))
+                self._pub_log('[ERROR] 商品 {} 识图发品失败：3次均未识别到类目，返回首页'.format(target_asin))
+                try:
+                    self._shein_publisher.driver.get(SHEIN_HOME_URL)
+                except Exception as home_e:
+                    self._pub_log('[ERROR] 返回首页失败: {}'.format(str(home_e)[:80]))
                 if dot:
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
