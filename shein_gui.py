@@ -320,11 +320,16 @@ class SheinApp(tk.Tk):
             self.status_lbl.config(text='浏览器正在启动中，请稍候...')
             return
 
+        # 如果已有实例但不可复用（例如被手动关窗），先清理引用
+        if self._shein_publisher is not None and (not self._is_publisher_reusable(self._shein_publisher)):
+            self._pub_log('检测到旧浏览器实例已失效，将重新启动')
+            self._shein_publisher = None
+
         # 如果已有浏览器实例且账号相同，直接复用
         if (self._shein_publisher is not None
                 and self._shein_publisher_account == account):
             try:
-                if self._shein_publisher.is_alive():
+                if self._is_publisher_reusable(self._shein_publisher):
                     self.status_lbl.config(text='复用已有浏览器 (账号: {})'.format(account))
                     self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
                     threading.Thread(target=self._watch_login,
@@ -571,8 +576,11 @@ class SheinApp(tk.Tk):
 
         def _init_selenium():
             try:
+                if self._shein_publisher is not None and (not self._is_publisher_reusable(self._shein_publisher)):
+                    self._pub_log('检测到浏览器实例不可复用（可能已被手动关闭），将重新连接')
+                    self._shein_publisher = None
                 # 优先复用已登录的浏览器实例（通常是点击“登录 SHEIN”打开的 Edge）
-                if self._shein_publisher is not None and self._shein_publisher.is_alive():
+                if self._is_publisher_reusable(self._shein_publisher):
                     self.status_lbl.config(text='复用当前浏览器并打开发布页...')
                     self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
                     time.sleep(2)
@@ -1173,6 +1181,22 @@ class SheinApp(tk.Tk):
         # 更新状态栏
         if hasattr(self, "status_lbl"):
             self.after(0, lambda m=m: self.status_lbl.config(text=m))
+
+    def _is_publisher_reusable(self, pub):
+        """检查浏览器实例是否可复用（防止用户手动关窗后复用失败）。"""
+        try:
+            if pub is None:
+                return False
+            if not pub.is_alive():
+                return False
+            drv = getattr(pub, 'driver', None)
+            if drv is None:
+                return False
+            _ = drv.window_handles
+            _ = drv.current_url
+            return True
+        except Exception:
+            return False
   
 
     def _publish_worker(self,asins,max_workers=5,session_id=None):
@@ -1392,7 +1416,6 @@ class SheinApp(tk.Tk):
             self._publish_session_id += 1  # 使当前会话立即失效，强制旧线程退出
             self._stop_publish = True
             stopped_pub = self._shein_publisher
-            self._shein_publisher = None
             try:
                 if stopped_pub is not None:
                     setattr(stopped_pub, '_stop_publish', True)
@@ -1459,7 +1482,7 @@ class SheinApp(tk.Tk):
         
         def _init_and_publish():
             try:
-                if self._shein_publisher is not None and self._shein_publisher.is_alive():
+                if self._is_publisher_reusable(self._shein_publisher):
                     self.status_lbl.config(text='复用当前浏览器，跳转到发布页...')
                     publish_url = SHEIN_PUBLISH_URL
                     self._shein_publisher.driver.get(publish_url)
