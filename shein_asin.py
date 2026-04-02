@@ -756,16 +756,60 @@ def _is_shein_official_color(color_text):
     return False
 
 
-def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=5):
+def _extract_color_value_from_sku_attrs(sku_attr_text):
+    txt = str(sku_attr_text or "").strip()
+    if not txt:
+        return ""
+    for seg in txt.split("/"):
+        s = str(seg).strip()
+        if not s:
+            continue
+        if ":" in s:
+            k, v = s.split(":", 1)
+            kk = _clean_dimension_name(k)
+            if "color" in kk or "colour" in kk:
+                return str(v).strip()
+    first = txt.split("/")[0].strip()
+    if ":" in first:
+        first = first.split(":", 1)[1].strip()
+    return first
+
+
+def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=8):
     if not color_image_map:
         return []
 
-    candidates = [str(x).lower() for x in candidate_texts if x]
+    norm_candidates = []
+    raw_candidates = []
+    for x in candidate_texts:
+        raw = str(x or "").strip()
+        if not raw:
+            continue
+        raw_candidates.append(raw.lower())
+        n = _norm_color_for_match(raw)
+        if n and n not in norm_candidates:
+            norm_candidates.append(n)
+
+    # 1) 先按归一化全等匹配，避免 red 匹配到 redwood 的误配
     for key, imgs in color_image_map.items():
-        k = str(key).lower().strip()
-        for raw in candidates:
-            if k and raw and (k in raw or raw in k):
-                return imgs[:max_count]
+        kn = _norm_color_for_match(key)
+        if kn and kn in norm_candidates:
+            return list(imgs or [])[:max_count]
+
+    # 2) 再按原文全等（忽略大小写）
+    for key, imgs in color_image_map.items():
+        kl = str(key or "").strip().lower()
+        if kl and kl in raw_candidates:
+            return list(imgs or [])[:max_count]
+
+    # 3) 最后才做弱匹配（双向包含），尽量降低误配概率
+    for key, imgs in color_image_map.items():
+        kl = str(key or "").strip().lower()
+        kn = _norm_color_for_match(key)
+        for raw in raw_candidates:
+            rn = _norm_color_for_match(raw)
+            if (kl and raw and (kl in raw or raw in kl)) or (kn and rn and (kn in rn or rn in kn)):
+                return list(imgs or [])[:max_count]
 
     if len(color_image_map) == 1:
         return list(color_image_map.values())[0][:max_count]
@@ -1102,10 +1146,11 @@ def fetch_amazon_product(asin, region="美国"):
                     continue
                 sku_seen.add(ca)
                 sku_images = sku_image_cache.get(ca, [])
-                if not sku_images:
-                    sku_images = _pick_images_from_color_map(
-                        color_image_map, color_name, ca, max_count=5
-                    )
+                map_images = _pick_images_from_color_map(
+                    color_image_map, color_name, ca, max_count=8
+                )
+                if map_images:
+                    sku_images = list(dict.fromkeys(sku_images + map_images))[:8]
                 if not sku_images:
                     sku_images = fallback_images[:]
                 attr_text = "Color: {}".format(color_name) if color_name else "默认规格"
@@ -1155,22 +1200,23 @@ def fetch_amazon_product(asin, region="美国"):
                     sku_seen2.add(sku_asin)
 
                     sku_images = sku_image_cache.get(sku_asin, [])
-                    if not sku_images:
-                        sku_images = _pick_images_from_color_map(
-                            color_image_map, dim_key, sku_asin, max_count=5
-                        )
-                    if not sku_images:
-                        sku_images = fallback_images[:]
 
                     sku_attr_text = _normalize_sku_attrs(
                         dim_key, dimension_names=dimension_names,
                         value_display_map=value_display_map
                     ) or "默认规格"
+                    color_hint = _extract_color_value_from_sku_attrs(sku_attr_text)
+
+                    map_images = _pick_images_from_color_map(
+                        color_image_map, color_hint, dim_key, sku_asin, max_count=8
+                    )
+                    if map_images:
+                        sku_images = list(dict.fromkeys(sku_images + map_images))[:8]
+                    if not sku_images:
+                        sku_images = fallback_images[:]
 
                     if _main_spec_is_color and any("color" in b or "colour" in b for b in basis):
-                        _color_val = sku_attr_text.split("/")[0].strip()
-                        if ":" in _color_val:
-                            _color_val = _color_val.split(":", 1)[1].strip()
+                        _color_val = _extract_color_value_from_sku_attrs(sku_attr_text)
                         if not _is_shein_official_color(_color_val):
                             continue
 
