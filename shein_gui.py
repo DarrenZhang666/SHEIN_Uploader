@@ -1315,17 +1315,7 @@ class SheinApp(tk.Tk):
             worker_account = '{}__w{}'.format(base_account, worker_idx)
             pub = SheinPublisher(log_cb=_worker_log)
             try:
-                # worker profile 只在首次不存在时复制，后续复用可大幅提速
-                try:
-                    base_profile = os.path.join(os.path.expanduser("~"), ".shein_profiles", base_account)
-                    worker_profile = os.path.join(os.path.expanduser("~"), ".shein_profiles", worker_account)
-                    if os.path.isdir(base_profile) and (not os.path.isdir(worker_profile)):
-                        import shutil
-                        shutil.copytree(base_profile, worker_profile, dirs_exist_ok=True)
-                except Exception as cp_e:
-                    self._pub_log('[W{}] 初始化实例失败: {}'.format(worker_idx, str(cp_e)[:80]))
-
-                # 每个线程只启动一次浏览器
+                # 不再复制 profile，直接用会话注入方式提速
                 pub.start_browser(account=worker_account)
                 if not _ensure_publish_page(pub.driver):
                     self._pub_log('[W{}] 会话注入后仍未进入发布页'.format(worker_idx))
