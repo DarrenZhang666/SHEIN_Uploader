@@ -762,11 +762,13 @@ class SheinPublisher:
             except Exception as e:
                 self.log("[DEBUG] 主规格处理步骤异常，继续后续流程: {}".format(str(e)[:60]))
             # 6.5 处理其他规格（如 size）
-            self.log("[DEBUG] 处理其他规格...")
-            try:
-                self._handle_other_specs(product_info)
-            except Exception as e:
-                self.log("[DEBUG] 其他规格处理步骤异常，继续后续流程: {}".format(str(e)[:60]))
+            # [DISABLED] 按需求先停用“其他规格”自动填写。
+            # [DISABLED] 未来需要恢复时，取消以下注释即可。
+            # self.log("[DEBUG] 处理其他规格...")
+            # try:
+            #     self._handle_other_specs(product_info)
+            # except Exception as e:
+            #     self.log("[DEBUG] 其他规格处理步骤异常，继续后续流程: {}".format(str(e)[:60]))
             # 7. 上传主规格图和细节图（非阻塞：失败不影响后续“规格及供应信息”流程）
             self.log("[DEBUG] 上传商品图片...")
             try:
