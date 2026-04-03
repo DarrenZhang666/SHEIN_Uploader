@@ -1273,6 +1273,10 @@ class SheinApp(tk.Tk):
                 login_session_storage = {}
 
         base_account = (self.shein_account.get() or '').strip() or 'default'
+        try:
+            _price_mult = float(self.price_multiplier.get())
+        except Exception:
+            _price_mult = 3.0
         # 同时启动过多浏览器会触发“授权中/网页无法访问”，限制到3更稳
         max_workers = min(max_workers, 3)
         next_idx = 0
@@ -1431,7 +1435,7 @@ class SheinApp(tk.Tk):
                         cat_result = auto_match_category(info)
                         cat_name = cat_result["name"]
                         cat_path = cat_result["path"]
-                        result = pub.publish_product(info, cat_path if cat_path else [cat_name])
+                        result = pub.publish_product(info, cat_path if cat_path else [cat_name], price_multiplier=_price_mult)
                         if result:
                             _record_result(asin, True)
                         else:

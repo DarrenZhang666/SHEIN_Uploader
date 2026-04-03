@@ -4128,26 +4128,15 @@ class SheinPublisher:
                 return
         self.log("[DEBUG] 已处理最大公告数量 ({})".format(max_attempts))
 
-    def publish_product(self, info, category):
+    def publish_product(self, info, category, price_multiplier=1.0):
         """
         category: list of category names from root to leaf, e.g. ["女装", "连衣裙", "迷你裙"]
                   or a plain string for backward compatibility.
+        price_multiplier: 价格倍率，用于将 Amazon 原价转换为 SHEIN 售价。
         """
-        # 兼容旧的字符串格式
         if isinstance(category, str):
             category = [category]
         driver = self.driver
-        title  = (info.get("title") or "")[:60]
-        asin   = info.get("asin", "")
-        brand  = re.sub(r"(Brand:|Visit the|Store)", "",
-                        info.get("brand", ""), flags=re.I).strip()
-        price_raw = info.get("price", "")
-        price_num = re.search(r"[\d.]+", price_raw)
-        price_str = price_num.group() if price_num else ""
-        desc_lines = []
-        if info.get("features"): desc_lines += info["features"]
-        if info.get("description"): desc_lines.append(info["description"])
-        desc_text = "\n".join(desc_lines)[:800]
         # Step1: 导航到商品发布页
         self.log("导航到商品发布页面...")
         def _save_debug_screenshot(tag):
@@ -4268,19 +4257,39 @@ class SheinPublisher:
         self._dismiss_announcements()
         time.sleep(1)
         # Step2: 选择类目（优先识图，其次关键词树，最后列表模式）
+        # 使用与单线程上品完全相同的函数链：
+        #   click_identify_image_button → upload_product_image → select_first_category → click_confirm_button
         img_url = info.get("image_url", "")
         cat_selected = False
-        # 方法A：识图自动分类（最准确，优先使用）
         if img_url:
-            self.log("[Step2] 尝试识图自动选类目...")
+            self.log("[Step2] 尝试识图自动选类目（统一流程）...")
+            _tmp_img = None
             try:
-                cat_selected = self.select_category_by_image(img_url, timeout=20)
-                if cat_selected:
-                    self.log("[Step2] 识图选类目成功")
-                else:
+                img_bytes, img_ext, _ = self._get_image_bytes_cached(img_url)
+                if img_bytes:
+                    _fd, _tmp_img = tempfile.mkstemp(suffix=img_ext)
+                    with os.fdopen(_fd, "wb") as _f:
+                        _f.write(img_bytes)
+
+                if _tmp_img and self.click_identify_image_button():
+                    if self.upload_product_image(_tmp_img):
+                        for _ci in range(5, 0, -1):
+                            self._ensure_not_stopped()
+                            time.sleep(1)
+                        if self.select_first_category():
+                            if self.click_confirm_button():
+                                cat_selected = True
+                                self.log("[Step2] 识图选类目成功")
+                if not cat_selected:
                     self.log("[Step2] 识图未成功，回退到关键词分类树...")
             except Exception as _img_e:
                 self.log("[Step2] 识图异常: {}，回退到关键词分类树...".format(_img_e))
+            finally:
+                if _tmp_img:
+                    try:
+                        os.remove(_tmp_img)
+                    except Exception:
+                        pass
         else:
             self.log("[Step2] 无商品图片，跳过识图，使用关键词分类树...")
         # 方法B：关键词分类树逐级点击
@@ -4420,104 +4429,19 @@ class SheinPublisher:
         if not cat_selected:
             self.log("[Step2] warning: category not selected")
         time.sleep(2)
-        # Step3: 填写基础信息
-        self.log("填写基础信息...")
-        # 商品标题
-        title_sels = [
-            (By.XPATH, "//input[contains(@placeholder,'标题') or contains(@placeholder,'商品名称')]"),
-            (By.XPATH, "//*[contains(text(),'商品标题')]/following::input[1]"),
-            (By.XPATH, "//*[contains(text(),'标题')]/following::input[1]"),
-            (By.CSS_SELECTOR, "input[name='title'], input[name='productName']"),
-        ]
-        for by, sel in title_sels:
-            try:
-                el = WebDriverWait(driver, 6).until(EC.presence_of_element_located((by, sel)))
-                self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                self._js_input(el, title)
-                break
-            except Exception:
-                continue
-        # 货号（ASIN）
-        self._try_input([
-            (By.XPATH, "//input[contains(@placeholder,'货号') or contains(@placeholder,'SKU') or contains(@placeholder,'编号') or contains(@placeholder,'货品编号')]"),
-            (By.XPATH, "//*[contains(text(),'货号')]/following::input[1]"),
-        ], asin)
-        # 产地
-        self._try_input([
-            (By.XPATH, "//input[contains(@placeholder,'产地') or contains(@placeholder,'生产地')]"),
-            (By.XPATH, "//*[contains(text(),'产地')]/following::input[1]"),
-        ], "中国")
-        # 品牌
-        if brand:
-            self._try_input([
-                (By.XPATH, "//input[contains(@placeholder,'品牌')]"),
-                (By.XPATH, "//*[contains(text(),'品牌')]/following::input[1]"),
-            ], brand)
-        time.sleep(1)
-        # Step4: 填写描述
-        self.log("填写商品描述...")
-        desc_sels = [
-            (By.XPATH, "//textarea[contains(@placeholder,'描述') or contains(@placeholder,'详情')]"),
-            (By.XPATH, "//*[contains(text(),'描述')]/following::textarea[1]"),
-            (By.CSS_SELECTOR, ".product-desc textarea, .description textarea"),
-        ]
-        for by, sel in desc_sels:
-            try:
-                el = WebDriverWait(driver, 6).until(EC.presence_of_element_located((by, sel)))
-                self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                self._js_input(el, desc_text)
-                break
-            except Exception:
-                continue
-        # 富文本编辑器
-        try:
-            editor = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR,
-                    ".ql-editor, .ProseMirror, [contenteditable='true']")))
-            self.driver.execute_script(
-                "arguments[0].innerHTML = arguments[1];"
-                "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));",
-                editor, desc_text.replace("\n", "<br>"))
-        except Exception:
-            pass
-        # Step5: 填写价格
-        if price_str:
-            self.log("填写价格...")
-            self._try_input([
-                (By.XPATH, "//input[contains(@placeholder,'价格') or contains(@placeholder,'售价')]"),
-                (By.XPATH, "//*[contains(text(),'价格')]/following::input[1]"),
-                (By.CSS_SELECTOR, "input[name='price'], input[name='salePrice']"),
-            ], price_str)
-        # [DISABLED] # Step6: 上传图片
-        # [DISABLED] img_url = info.get("image_url", "")
-        # [DISABLED] if img_url:
-        # [DISABLED] self.log("上传商品图片...")
-        # [DISABLED] img_path = self._save_img_temp(img_url)
-        # [DISABLED] if img_path:
-        # [DISABLED] try:
-        # [DISABLED] # 找到文件上传 input
-        # [DISABLED] upload_inputs = driver.find_elements(
-        # [DISABLED] By.XPATH, "//input[@type='file']"
-        # [DISABLED] )
-        # [DISABLED] for inp in upload_inputs:
-        # [DISABLED] try:
-        # [DISABLED] driver.execute_script("arguments[0].style.display='block';", inp)
-        # [DISABLED] inp.send_keys(img_path)
-        # [DISABLED] time.sleep(3)
-        # [DISABLED] break
-        # [DISABLED] except Exception:
-        # [DISABLED] continue
-        # [DISABLED] except Exception as e:
-        # [DISABLED] self.log("图片上传失败: {}".format(e))
-        # [DISABLED] finally:
-        # [DISABLED] try: os.remove(img_path)
-        # [DISABLED] except: pass
-        # [DISABLED] time.sleep(2)
-        # [DISABLED] # Step6.5: 自动上传主页图到"细节图"（最多5张）
-        # [DISABLED] main_images = info.get("main_images", [])
-        # [DISABLED] if main_images:
-        # [DISABLED] self.log("自动上传 {} 张主页图到细节图...".format(len(main_images)))
-        # [DISABLED] self._upload_detail_images(main_images)
+        # Step3-6: 使用与单线程完全相同的函数填写所有信息
+        # fill_product_info: 标题、描述、品牌、参考链接、货号、英文描述、类目属性、主规格、细节图/方形图/色块图
+        self.fill_product_info(info)
+        time.sleep(2)
+        # fill_spec_and_supply_info: 价格(批量填写)、件数类型、包装重量、库存
+        import copy as _copy
+        _info_pub = _copy.copy(info)
+        _price_raw = _info_pub.get("price", "")
+        if _price_raw and price_multiplier and price_multiplier != 1.0:
+            _pm = re.search(r"[\d]+\.?[\d]*", str(_price_raw).replace(",", ""))
+            if _pm:
+                _info_pub["price"] = str(round(float(_pm.group()) * price_multiplier, 2))
+        self.fill_spec_and_supply_info(_info_pub)
         # Step7: 点击发布商品按鈕
         self.log("点击发布商品...")
         submitted = False
