@@ -435,9 +435,9 @@ class SheinPublisher:
                         continue
             return False
         try:
-            # Step0: 等待弹框出现（最多10秒，每1秒检查一次）
+            # Step0: 等待弹框出现（最多5秒，每1秒检查一次）
             self.log("[DEBUG] 等待图片裁剪弹框...")
-            if not self._wait_until(_is_crop_dialog_visible, timeout=10, interval=1, desc="图片裁剪弹框出现"):
+            if not self._wait_until(_is_crop_dialog_visible, timeout=5, interval=1, desc="图片裁剪弹框出现"):
                 self.log("[DEBUG] 未检测到裁剪弹框，跳过")
                 return False
             time.sleep(0.3)
