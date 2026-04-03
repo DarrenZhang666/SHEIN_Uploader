@@ -10,7 +10,7 @@
 import tkinter as tk
 from tkinter import simpledialog
 
-_DEV_PASSWORD = "Adq430483"
+_DEV_PASSWORD = "666666"
 
 # ── 全局状态 ─────────────────────────────────────────
 _developer_mode = False

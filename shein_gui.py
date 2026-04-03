@@ -27,6 +27,10 @@ class SheinApp(tk.Tk):
         self._driver_ready=False      # 驱动预热完成标志
         self._publish_running=False   # 当前是否正在执行上品流程
         self._publish_session_id = 0  # 上品会话ID（用于中断旧线程）
+        self._login_cookies = []      # 登录会话快照：cookies
+        self._login_storage = {}      # 登录会话快照：localStorage
+        self._login_session_storage = {}  # 登录会话快照：sessionStorage
+        self._login_session_account = ""  # 最近一次登录会话所属账号
         
         # 初始化日志文件
         self._init_log_file()
@@ -34,24 +38,67 @@ class SheinApp(tk.Tk):
         self._build_ui(); self._apply_styles()
 
     def _init_log_file(self):
-        """初始化日志文件（保存到桌面）。"""
+        """初始化日志目录（仅在开发者模式写日志时创建文件）。"""
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         os.makedirs(desktop, exist_ok=True)
-        log_dir = os.path.join(desktop, "SHEIN_Logs")
-        os.makedirs(log_dir, exist_ok=True)
+        self._log_dir = os.path.join(desktop, "SHEIN_Logs")
+        self.log_file = None
+
+    def _ensure_log_file(self):
+        """懒创建日志文件，仅开发者模式需要详细日志时创建。"""
+        if self.log_file:
+            return
+        os.makedirs(self._log_dir, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        self.log_file = os.path.join(log_dir, "log_{}.txt".format(timestamp))
-        self._write_log("=== SHEIN 商品采集工具日志 ===")
-        self._write_log("启动时间: {}".format(time.strftime("%Y-%m-%d %H:%M:%S")))
-        self._write_log("")
+        self.log_file = os.path.join(self._log_dir, "log_{}.txt".format(timestamp))
+        try:
+            with open(self.log_file, 'a', encoding='utf-8') as f:
+                f.write("[{}] === SHEIN 商品采集工具日志 ===\n".format(time.strftime("%H:%M:%S")))
+                f.write("[{}] 启动时间: {}\n".format(
+                    time.strftime("%H:%M:%S"), time.strftime("%Y-%m-%d %H:%M:%S")))
+                f.write("[{}] \n".format(time.strftime("%H:%M:%S")))
+        except Exception:
+            pass
 
     def _write_log(self, msg):
         """写入日志文件。"""
+        if not is_dev_mode():
+            return
         try:
+            self._ensure_log_file()
             with open(self.log_file, 'a', encoding='utf-8') as f:
                 f.write("[{}] {}\n".format(time.strftime("%H:%M:%S"), msg))
         except Exception:
             pass
+
+    @staticmethod
+    def _is_simple_publish_msg(msg):
+        """非开发者模式下，仅允许显示简化上品进度日志。"""
+        if not msg:
+            return False
+        if not re.search(r"\bB[A-Z0-9]{9}\b", msg):
+            return False
+        return any(k in msg for k in ("开始上品", "上品中", "上品成功", "上品失败"))
+
+    def _log_publish_progress(self, asin, stage):
+        """统一输出简化上品进度日志。"""
+        if not asin:
+            return
+        self._pub_log("{} {}".format(asin, stage))
+
+    def _set_publish_status(self, asin, detailed_msg, stage_for_non_dev=None):
+        """
+        发布流程状态栏输出：
+        - 开发者模式：显示 detailed_msg
+        - 非开发者模式：仅显示「ASIN + 开始/上品中/上品成功/上品失败」
+        """
+        if not hasattr(self, "status_lbl"):
+            return
+        if is_dev_mode():
+            self.after(0, lambda m=str(detailed_msg)[:100]: self.status_lbl.config(text=m))
+            return
+        if asin and stage_for_non_dev:
+            self.after(0, lambda a=asin, s=stage_for_non_dev: self.status_lbl.config(text="{} {}".format(a, s)))
 
     def _warmup_chrome(self):
         """后台预热 Chrome，程序启动时自动运行。"""
@@ -339,6 +386,85 @@ class SheinApp(tk.Tk):
         except Exception:
             pass
 
+    def _capture_login_session_from_driver(self, driver, account=""):
+        """从浏览器提取并缓存登录会话（cookies/localStorage/sessionStorage）。"""
+        if driver is None:
+            return False
+        cookies = []
+        local_storage = {}
+        session_storage = {}
+        try:
+            cookies = driver.get_cookies() or []
+        except Exception:
+            cookies = []
+        try:
+            local_storage = driver.execute_script(
+                "var r={}; for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i); r[k]=localStorage.getItem(k);} return r;"
+            ) or {}
+        except Exception:
+            local_storage = {}
+        try:
+            session_storage = driver.execute_script(
+                "var r={}; for(var i=0;i<sessionStorage.length;i++){var k=sessionStorage.key(i); r[k]=sessionStorage.getItem(k);} return r;"
+            ) or {}
+        except Exception:
+            session_storage = {}
+        if not (cookies or local_storage or session_storage):
+            return False
+        self._login_cookies = cookies
+        self._login_storage = local_storage
+        self._login_session_storage = session_storage
+        if account:
+            self._login_session_account = account
+        return True
+
+    def _get_saved_login_session(self):
+        """优先从当前浏览器提取，其次返回已缓存会话。"""
+        try:
+            if self._is_publisher_reusable(self._shein_publisher):
+                acct = (self._shein_publisher_account or self.shein_account.get().strip() or "")
+                self._capture_login_session_from_driver(self._shein_publisher.driver, acct)
+        except Exception:
+            pass
+        return (
+            list(self._login_cookies or []),
+            dict(self._login_storage or {}),
+            dict(self._login_session_storage or {}),
+        )
+
+    def _inject_login_session_to_driver(self, driver, login_cookies, login_storage, login_session_storage):
+        """将缓存会话注入到目标浏览器。"""
+        if driver is None:
+            return
+        if login_storage:
+            try:
+                driver.execute_script(
+                    "for (var k in arguments[0]) { try { localStorage.setItem(k, arguments[0][k]); } catch(e) {} }",
+                    login_storage,
+                )
+            except Exception:
+                pass
+        if login_session_storage:
+            try:
+                driver.execute_script(
+                    "for (var k in arguments[0]) { try { sessionStorage.setItem(k, arguments[0][k]); } catch(e) {} }",
+                    login_session_storage,
+                )
+            except Exception:
+                pass
+        if login_cookies:
+            for ck in login_cookies:
+                try:
+                    c = dict(ck)
+                    if c.get('expiry') is not None:
+                        try:
+                            c['expiry'] = int(c['expiry'])
+                        except Exception:
+                            c.pop('expiry', None)
+                    driver.add_cookie(c)
+                except Exception:
+                    continue
+
     def _open_shein(self):
         """打开 SHEIN 登录页面。"""
         account = self.shein_account.get().strip()
@@ -529,6 +655,11 @@ class SheinApp(tk.Tk):
         _login_acct = getattr(self, '_shein_publisher_account', '') or ''
         if _login_acct:
             self.after(0, lambda a=_login_acct: self._save_account_to_history(a))
+        try:
+            if self._capture_login_session_from_driver(pub.driver, _login_acct):
+                self._pub_log("[OK] 已保存登录会话快照")
+        except Exception as _se:
+            self._pub_log("[WARN] 保存登录会话失败: {}".format(str(_se)[:80]))
 
         # 更新按钮
         self.after(0, lambda: self._shein_login_btn.config(
@@ -536,6 +667,14 @@ class SheinApp(tk.Tk):
         self.after(0, lambda: self.status_lbl.config(
             text="SHEIN 登录成功" + ("  账号: " + _login_acct if _login_acct else "")))
         self._pub_log("[OK] SHEIN 登录成功，账号: {}".format(_login_acct or "(未获取到)"))
+        # 按需求：登录成功后关闭登录窗口，但保留会话用于后续单线程/多线程直达发布页
+        try:
+            pub.driver.quit()
+            if self._shein_publisher is pub:
+                self._shein_publisher = None
+            self._pub_log("[OK] 登录窗口已关闭（会话已保留）")
+        except Exception:
+            pass
 
     def _open_publish_page(self):
         """打开 SHEIN 商品发布页面，自动上传选中商品的图片。"""
@@ -618,11 +757,29 @@ class SheinApp(tk.Tk):
                     threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
                     return
 
-                # 没有可用实例时，启动/连接浏览器（优先连接现有 Edge/Chrome）
+                # 没有可用实例时，启动/连接浏览器
                 pub = SheinPublisher(log_cb=self._pub_log)
+                target_account = (self.shein_account.get().strip()
+                                  or self._login_session_account
+                                  or self._shein_publisher_account
+                                  or 'default')
                 self.status_lbl.config(text='正在连接或启动浏览器...')
-                pub.start_browser()
+                pub.start_browser(account=target_account)
                 self._shein_publisher = pub
+                self._shein_publisher_account = target_account
+                # 注入已保存登录会话，确保无需重新登录
+                login_cookies, login_storage, login_session_storage = self._get_saved_login_session()
+                if login_cookies or login_storage or login_session_storage:
+                    try:
+                        pub.driver.get("https://sso.geiwohuo.com/#/login")
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
+                    self._inject_login_session_to_driver(
+                        pub.driver, login_cookies, login_storage, login_session_storage
+                    )
+                    self._pub_log("已注入登录会话(cookies:{} storage:{})".format(
+                        len(login_cookies), len(login_storage)))
                 self.status_lbl.config(text='浏览器已就绪，正在打开商品发布页...')
                 pub.driver.get(SHEIN_PUBLISH_URL)
                 time.sleep(2)
@@ -657,6 +814,8 @@ class SheinApp(tk.Tk):
     def _auto_upload_image(self, session_id=None):
         """自动上传商品图片、选择推荐类目、填写基础信息（在后台线程中调用）。"""
         self._publish_running = True
+        target_asin = None
+        dot = None
         if session_id is None:
             session_id = self._publish_session_id
         try:
@@ -674,6 +833,9 @@ class SheinApp(tk.Tk):
                 return
             if self._check_stop_or_return(session_id=session_id):
                 return
+            self._log_publish_progress(target_asin, "开始上品")
+            self._log_publish_progress(target_asin, "上品中")
+            _set_status = lambda msg, stage=None: self._set_publish_status(target_asin, msg, stage)
 
             try:
                 self._shein_publisher._dismiss_announcements()
@@ -687,13 +849,13 @@ class SheinApp(tk.Tk):
             os.makedirs(temp_dir, exist_ok=True)
             temp_image = os.path.join(temp_dir, '{}.jpg'.format(target_asin))
 
-            self.after(0, lambda: self.status_lbl.config(text='下载商品图片...'))
+            _set_status('下载商品图片...', "上品中")
             try:
                 response = requests.get(image_url, timeout=10)
                 with open(temp_image, 'wb') as f:
                     f.write(response.content)
             except Exception as e:
-                self.after(0, lambda err=str(e): self.status_lbl.config(text='下载图片失败: ' + err[:40]))
+                _set_status('下载图片失败: {}'.format(str(e)[:40]), "上品失败")
                 if dot:
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
@@ -704,7 +866,7 @@ class SheinApp(tk.Tk):
                     return
 
                 if attempt > 1:
-                    self.after(0, lambda a=attempt: self.status_lbl.config(text='第{}/3次重试：返回商品发布页...'.format(a)))
+                    _set_status('第{}/3次重试：返回商品发布页...'.format(attempt), "上品中")
                     self._pub_log('[RETRY] 选择类目失败，开始第{}/3次重试'.format(attempt))
                     try:
                         self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
@@ -722,18 +884,18 @@ class SheinApp(tk.Tk):
 
                 if self._check_stop_or_return(session_id=session_id):
                     return
-                self.after(0, lambda a=attempt: self.status_lbl.config(text='点击"识图发品"按钮（第{}/3次）...'.format(a)))
+                _set_status('点击"识图发品"按钮（第{}/3次）...'.format(attempt), "上品中")
                 if not self._shein_publisher.click_identify_image_button():
-                    self.after(0, lambda: self.status_lbl.config(text='未找到"识图发品"按钮'))
+                    _set_status('未找到"识图发品"按钮', "上品失败")
                     if dot:
                         self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                     return
 
                 if self._check_stop_or_return(session_id=session_id):
                     return
-                self.after(0, lambda a=attempt: self.status_lbl.config(text='上传图片到 SHEIN（第{}/3次）...'.format(a)))
+                _set_status('上传图片到 SHEIN（第{}/3次）...'.format(attempt), "上品中")
                 if not self._shein_publisher.upload_product_image(temp_image):
-                    self.after(0, lambda: self.status_lbl.config(text='✗ 图片上传失败'))
+                    _set_status('✗ 图片上传失败', "上品失败")
                     if dot:
                         self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                     return
@@ -741,22 +903,22 @@ class SheinApp(tk.Tk):
                 for i in range(5, 0, -1):
                     if self._check_stop_or_return(session_id=session_id):
                         return
-                    self.after(0, lambda ii=i, a=attempt: self.status_lbl.config(text='✓ 图片上传成功，等待识别中... {}s（第{}/3次）'.format(ii, a)))
+                    _set_status('✓ 图片上传成功，等待识别中... {}s（第{}/3次）'.format(i, attempt), "上品中")
                     time.sleep(1)
 
                 if self._check_stop_or_return(session_id=session_id):
                     return
-                self.after(0, lambda a=attempt: self.status_lbl.config(text='选择第一个推荐类目（第{}/3次）...'.format(a)))
+                _set_status('选择第一个推荐类目（第{}/3次）...'.format(attempt), "上品中")
                 if self._shein_publisher.select_first_category():
                     category_selected = True
                     break
 
                 if attempt < 3:
-                    self.after(0, lambda a=attempt: self.status_lbl.config(text='✗ 选择类目失败，准备第{}/3次重试...'.format(a + 1)))
+                    _set_status('✗ 选择类目失败，准备第{}/3次重试...'.format(attempt + 1), "上品中")
                     continue
 
             if not category_selected:
-                self.after(0, lambda: self.status_lbl.config(text='✗ 选择类目失败：重试3次仍未识别到类目，返回首页'))
+                _set_status('✗ 选择类目失败：重试3次仍未识别到类目，返回首页', "上品失败")
                 self._pub_log('[ERROR] 商品 {} 识图发品失败：3次均未识别到类目，返回首页'.format(target_asin))
                 try:
                     self._shein_publisher.driver.get(SHEIN_HOME_URL)
@@ -768,38 +930,38 @@ class SheinApp(tk.Tk):
 
             if self._check_stop_or_return(session_id=session_id):
                 return
-            self.after(0, lambda: self.status_lbl.config(text='✓ 已选择推荐类目，点击确认...'))
+            _set_status('✓ 已选择推荐类目，点击确认...', "上品中")
             time.sleep(1)
             if not self._shein_publisher.click_confirm_button():
-                self.after(0, lambda: self.status_lbl.config(text='✗ 点击确认按钮失败'))
+                _set_status('✗ 点击确认按钮失败', "上品失败")
                 if dot:
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
             if self._check_stop_or_return(session_id=session_id):
                 return
-            self.after(0, lambda: self.status_lbl.config(text='✓ 商品类目确认成功，等待页面加载...'))
+            _set_status('✓ 商品类目确认成功，等待页面加载...', "上品中")
             time.sleep(1.5)
 
             if self._check_stop_or_return(session_id=session_id):
                 return
-            self.after(0, lambda: self.status_lbl.config(text='填写商品基础信息...'))
+            _set_status('填写商品基础信息...', "上品中")
             if not self._shein_publisher.fill_product_info(product_info):
-                self.after(0, lambda: self.status_lbl.config(text='✗ 基础信息填写失败'))
+                _set_status('✗ 基础信息填写失败', "上品失败")
                 if dot:
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
             if self._check_stop_or_return(session_id=session_id):
                 return
-            self.after(0, lambda: self.status_lbl.config(text='✓ 商品基础信息填写完成'))
+            _set_status('✓ 商品基础信息填写完成', "上品中")
 
-            self.after(0, lambda: self.status_lbl.config(text='等待页面加载，准备填写规格及供应信息...'))
+            _set_status('等待页面加载，准备填写规格及供应信息...', "上品中")
             time.sleep(2)
             if self._check_stop_or_return(session_id=session_id):
                 return
 
-            self.after(0, lambda: self.status_lbl.config(text='填写规格及供应信息...'))
+            _set_status('填写规格及供应信息...', "上品中")
             try:
                 try:
                     mult = float(self.price_multiplier.get())
@@ -820,14 +982,14 @@ class SheinApp(tk.Tk):
                 self._shein_publisher.fill_spec_and_supply_info(product_info_pub)
                 if self._check_stop_or_return(session_id=session_id):
                     return
-                self.after(0, lambda: self.status_lbl.config(text='✓ 规格及供应信息填写完成'))
+                _set_status('✓ 规格及供应信息填写完成', "上品中")
             except Exception as spec_e:
                 self._pub_log('[ERROR] 规格及供应信息填写异常: {}'.format(str(spec_e)[:80]))
-                self.after(0, lambda: self.status_lbl.config(text='规格及供应信息填写遇到问题，请手动检查'))
+                _set_status('规格及供应信息填写遇到问题，请手动检查', "上品失败")
 
             if self._check_stop_or_return(session_id=session_id):
                 return
-            self.after(0, lambda: self.status_lbl.config(text='点击发布商品...'))
+            _set_status('点击发布商品...', "上品中")
             self._pub_log('[DEBUG] 开始点击发布商品按鈕...')
             try:
                 from selenium.webdriver.common.by import By as _By
@@ -865,7 +1027,7 @@ class SheinApp(tk.Tk):
                         break
 
                 if submitted:
-                    self.after(0, lambda: self.status_lbl.config(text='✓ 已点击发布，等待确认弹窗...'))
+                    _set_status('✓ 已点击发布，等待确认弹窗...', "上品中")
                     _confirm_clicked = False
                     _deadline = time.time() + 15
                     _dlg_xpaths = [
@@ -897,36 +1059,45 @@ class SheinApp(tk.Tk):
                             break
                         time.sleep(0.5)
                     if _confirm_clicked:
-                        self.after(0, lambda: self.status_lbl.config(text='✓ 商品已提交发布'))
+                        _set_status('✓ 商品已提交发布', "上品成功")
                         if dot:
                             self.after(0, lambda a=target_asin: self._set_asin_status(a, "success"))
                         self._pub_log('商品 {} 已提交发布'.format(target_asin))
                     else:
-                        self.after(0, lambda: self.status_lbl.config(text='✗ 发布失败：15秒内未检测到"一键翻译并发布"确认弹窗'))
+                        _set_status('✗ 发布失败：15秒内未检测到"一键翻译并发布"确认弹窗', "上品失败")
                         if dot:
                             self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                         self._pub_log('[ERROR] 商品 {} 发布失败：点击发布按鈕后15秒内未出现"一键翻译并发布"确认弹窗，请检查页面状态'.format(target_asin))
                 else:
-                    self.after(0, lambda: self.status_lbl.config(text='✗ 未找到发布按鈕，请手动点击发布'))
+                    _set_status('✗ 未找到发布按鈕，请手动点击发布', "上品失败")
                     if dot:
                         self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                     self._pub_log('[ERROR] 未找到发布商品按鈕')
             except Exception as pub_e:
                 self._pub_log('[ERROR] 点击发布商品异常: {}'.format(str(pub_e)[:80]))
-                self.after(0, lambda err=str(pub_e): self.status_lbl.config(text='发布出错: ' + err[:40]))
+                _set_status('发布出错: {}'.format(str(pub_e)[:40]), "上品失败")
                 if dot:
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
 
         except Exception as e:
             if '用户已停止上品' in str(e):
                 self._pub_log('[STOP] 用户已停止上品')
-                self.after(0, lambda: self.status_lbl.config(text='已停止上品'))
+                self._set_publish_status(target_asin, '已停止上品', "上品失败")
             else:
-                self.after(0, lambda err=str(e): self.status_lbl.config(text='上传出错: ' + err[:40]))
+                self._set_publish_status(target_asin, '上传出错: {}'.format(str(e)[:40]), "上品失败")
                 if dot:
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 self._pub_log('上传出错: ' + str(e))
         finally:
+            try:
+                if target_asin:
+                    _st = self.asin_status.get(target_asin, "")
+                    if _st == "success":
+                        self._log_publish_progress(target_asin, "上品成功")
+                    elif _st == "fail":
+                        self._log_publish_progress(target_asin, "上品失败")
+            except Exception:
+                pass
             self._publish_running = False
     def _upload_product_image_btn(self):
         """上传商品图片按钮回调。"""
@@ -1204,10 +1375,13 @@ class SheinApp(tk.Tk):
         if hasattr(self,"img_lbl"): self.img_lbl.config(image=photo,text="")
 
     def _pub_log(self, msg):
-        """发布日志回调，可在子线程中安全调用。同时保存到日志文件。"""
+        """发布日志回调：开发者模式=完整日志，非开发者模式=仅简化上品进度。"""
         m = str(msg)[:100] if msg else ""
-        # 写入日志文件
-        self._write_log(msg)
+        if is_dev_mode():
+            self._write_log(msg)
+        else:
+            if not self._is_simple_publish_msg(m):
+                return
         # 更新状态栏
         if hasattr(self, "status_lbl"):
             self.after(0, lambda m=m: self.status_lbl.config(text=m))
@@ -1244,33 +1418,8 @@ class SheinApp(tk.Tk):
             max_workers = 5
         max_workers = max(1, min(20, max_workers, total if total > 0 else 1))
 
-        # 从“登录 SHEIN”已登录实例提取会话（cookies + localStorage），供多线程实例复用
-        source_driver = None
-        login_cookies = []
-        login_storage = {}
-        login_session_storage = {}
-        try:
-            if self._shein_publisher is not None and self._shein_publisher.is_alive():
-                source_driver = self._shein_publisher.driver
-        except Exception:
-            source_driver = None
-        if source_driver is not None:
-            try:
-                login_cookies = source_driver.get_cookies() or []
-            except Exception:
-                login_cookies = []
-            try:
-                login_storage = source_driver.execute_script(
-                    "var r={}; for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i); r[k]=localStorage.getItem(k);} return r;"
-                ) or {}
-            except Exception:
-                login_storage = {}
-            try:
-                login_session_storage = source_driver.execute_script(
-                    "var r={}; for(var i=0;i<sessionStorage.length;i++){var k=sessionStorage.key(i); r[k]=sessionStorage.getItem(k);} return r;"
-                ) or {}
-            except Exception:
-                login_session_storage = {}
+        # 获取登录会话（优先当前实例，兜底使用缓存），供多线程实例复用
+        login_cookies, login_storage, login_session_storage = self._get_saved_login_session()
 
         base_account = (self.shein_account.get() or '').strip() or 'default'
         try:
@@ -1305,9 +1454,11 @@ class SheinApp(tk.Tk):
             dot = self.asin_dots.get(asin)
             if ok:
                 if dot: self.after(0, lambda a=asin: self._set_asin_status(a, "success"))
+                self._log_publish_progress(asin, "上品成功")
                 self._pub_log("[OK {}/{}] {} 上品成功".format(s, total, asin))
             else:
                 if dot: self.after(0, lambda a=asin: self._set_asin_status(a, "fail"))
+                self._log_publish_progress(asin, "上品失败")
                 self._pub_log("[FAIL {}/{}] {} 失败: {}".format(f, total, asin, str(err)[:80]))
 
             self.after(0, lambda dd=d, tt=total, ss=s, ff=f:
@@ -1320,34 +1471,9 @@ class SheinApp(tk.Tk):
 
             def _inject_login_session(driver):
                 """将主登录实例的 cookies/localStorage/sessionStorage 注入 worker 浏览器。"""
-                if login_storage:
-                    try:
-                        driver.execute_script(
-                            "for (var k in arguments[0]) { try { localStorage.setItem(k, arguments[0][k]); } catch(e) {} }",
-                            login_storage,
-                        )
-                    except Exception:
-                        pass
-                if login_session_storage:
-                    try:
-                        driver.execute_script(
-                            "for (var k in arguments[0]) { try { sessionStorage.setItem(k, arguments[0][k]); } catch(e) {} }",
-                            login_session_storage,
-                        )
-                    except Exception:
-                        pass
-                if login_cookies:
-                    for ck in login_cookies:
-                        try:
-                            c = dict(ck)
-                            if c.get('expiry') is not None:
-                                try:
-                                    c['expiry'] = int(c['expiry'])
-                                except Exception:
-                                    c.pop('expiry', None)
-                            driver.add_cookie(c)
-                        except Exception:
-                            continue
+                self._inject_login_session_to_driver(
+                    driver, login_cookies, login_storage, login_session_storage
+                )
 
             def _is_on_publish_page(url):
                 return ("followsales-pro/list" in url
@@ -1423,6 +1549,7 @@ class SheinApp(tk.Tk):
                     asin = _next_asin()
                     if asin is None:
                         return
+                    self._log_publish_progress(asin, "开始上品")
 
                     info = self.product_cache.get(asin, {})
                     if not info or not info.get('image_url'):
@@ -1431,6 +1558,7 @@ class SheinApp(tk.Tk):
                         continue
 
                     try:
+                        self._log_publish_progress(asin, "上品中")
                         if not _ensure_publish_page(pub.driver):
                             worker_has_failure = True
                             _record_result(asin, False, '未能进入商品发布页（授权中）')
