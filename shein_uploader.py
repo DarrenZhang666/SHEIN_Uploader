@@ -1634,6 +1634,17 @@ class SheinPublisher:
         driver = self.driver
         try:
             self.log("[DEBUG] 检查主规格是否需要填写...")
+            # 先探测是否存在“有无主规格”开关：
+            # 若不存在，通常页面默认就是“有主规格”，后续必须继续填写主规格，不应提前跳过
+            has_main_spec_switch = False
+            try:
+                has_main_spec_switch = bool(driver.find_elements(
+                    By.XPATH,
+                    "//div[contains(@class,'so-form-item')]"
+                    "[.//div[contains(@class,'so-form-label') and contains(normalize-space(.),'有无主规格')]]"
+                ))
+            except Exception:
+                has_main_spec_switch = False
 
             # 若仅单SKU，或ASIN规格为“默认规格/未识别”，则保持“无主规格”并跳过本步骤
             try:
@@ -1652,8 +1663,10 @@ class SheinPublisher:
                 basis_norm = [str(x).strip().lower() for x in basis_values if str(x).strip()]
                 basis_unrecognized = (len(basis_norm) == 0 or all(x in ("未识别", "unknown", "unrecognized", "none", "n/a") for x in basis_norm))
 
-                # 仅在「单SKU」或「默认规格+分类依据未识别」时跳过主规格切换
-                should_skip_main_spec = single_sku or (is_default_attr and basis_unrecognized)
+                # 仅在存在“有无主规格”开关时，才允许走“保持无主规格并跳过”逻辑
+                should_skip_main_spec = has_main_spec_switch and (
+                    single_sku or (is_default_attr and basis_unrecognized)
+                )
                 if should_skip_main_spec:
                     self.log("[INFO] 主规格跳过：保持'无主规格'（single_sku={}, 默认规格={}, 分类依据未识别={}）".format(
                         single_sku, is_default_attr, basis_unrecognized))
@@ -2560,6 +2573,37 @@ class SheinPublisher:
                 first_val = _extract_target_spec_value(picked_attr)
                 if first_val:
                     all_spec_values = [first_val]
+            # 需求：若 ASIN 未提供可用“规格/分类依据”，则第二个框直接点击并选择首项
+            if not all_spec_values:
+                self.log("[INFO] 未提取到ASIN主规格值，按兜底策略选择第2个下拉首项")
+                value_inner = None
+                for xp in [
+                    ".//div[contains(@class,'specValues') or contains(@class,'spmp_style__specValues')]//div[contains(@class,'so-select-inner') and @data-id]",
+                    ".//div[contains(@class,'so-select-inner') and @data-id][2]",
+                    ".//div[contains(@class,'so-select-inner') and @data-id]",
+                ]:
+                    try:
+                        for el in spec_content.find_elements(By.XPATH, xp):
+                            if el.is_displayed():
+                                value_inner = el
+                                break
+                    except Exception:
+                        pass
+                    if value_inner is not None:
+                        break
+                if value_inner is None:
+                    self._last_main_spec_filled_values = []
+                    self.log("[WARN] 未找到第2个下拉框(主规格値)")
+                    return
+                picked_val = _pick_first(value_inner, "主规格値")
+                if picked_val:
+                    self._last_main_spec_filled_values = [picked_val]
+                    self.log("[OK] 主规格填写完成: 属性={}，値=[{}]".format(
+                        picked_attr, picked_val))
+                else:
+                    self._last_main_spec_filled_values = []
+                    self.log("[WARN] 第2个下拉框未成功选择首项")
+                return
             self.log("[DEBUG] 需填入的主规格値共 {} 个: {}".format(
                 len(all_spec_values), " | ".join(all_spec_values)))
             if not all_spec_values:
