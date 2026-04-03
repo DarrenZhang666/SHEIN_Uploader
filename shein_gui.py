@@ -331,6 +331,9 @@ class SheinApp(tk.Tk):
             }
             lbl.bind("<Button-1>",lambda e,a=asin:self._click(a))
             row.bind("<Button-1>",lambda e,a=asin:self._click(a))
+            lbl.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
+            row.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
+            dot.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
         self.cnt_lbl.config(text="({})".format(len(self.asin_list)))
         self._upd_cnt(); self.select_all_var.set(False)
         self._update_asin_row_styles()
@@ -357,6 +360,14 @@ class SheinApp(tk.Tk):
         self._update_asin_row_styles()
         if asin in self.product_cache: self._show(self.product_cache[asin])
         else: self._placeholder(asin)
+
+    def _dbl_select_asin(self, asin):
+        """双击 ASIN 行时直接勾选该 ASIN。"""
+        var = self.asin_vars.get(asin)
+        if var is not None and not var.get():
+            var.set(True)
+            self._upd_cnt()
+        self._click(asin)
 
     def _placeholder(self,asin):
         for w in self.df.winfo_children(): w.destroy()
