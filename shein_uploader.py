@@ -259,7 +259,12 @@ class SheinPublisher:
         try:
             self._ensure_not_stopped()
             self.log("[DEBUG] 查找'识图发品'按钮...")
-            time.sleep(2)  # 等待页面加载
+            self._wait_ready_state(timeout=2)
+            def _wait_upload_input():
+                return self._wait_until(
+                    lambda: len(self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")) > 0,
+                    timeout=5, interval=1, desc="识图上传框出现"
+                )
             # 方法1：查找包含"识图"的 div 或 button
             for el in self.driver.find_elements(By.XPATH, "//*[contains(text(), '识图')]"):
                 try:
@@ -270,7 +275,7 @@ class SheinPublisher:
                         try:
                             el.click()
                             self.log("[OK] 已点击'识图发品'按钮")
-                            time.sleep(2)
+                            _wait_upload_input()
                             return True
                         except Exception:
                             # 尝试点击父元素
@@ -278,7 +283,7 @@ class SheinPublisher:
                                 parent = el.find_element(By.XPATH, "..")
                                 parent.click()
                                 self.log("[OK] 已点击'识图发品'按钮（父元素）")
-                                time.sleep(2)
+                                _wait_upload_input()
                                 return True
                             except Exception:
                                 continue
@@ -293,7 +298,7 @@ class SheinPublisher:
                         self.log("[DEBUG] 找到识图 span: {}".format(text))
                         span.click()
                         self.log("[OK] 已点击'识图发品'按钮")
-                        time.sleep(2)
+                        _wait_upload_input()
                         return True
                 except Exception:
                     continue
@@ -305,7 +310,7 @@ class SheinPublisher:
                         self.log("[DEBUG] 找到识图发品 div")
                         div.click()
                         self.log("[OK] 已点击'识图发品'按钮")
-                        time.sleep(2)
+                        _wait_upload_input()
                         return True
                 except Exception:
                     continue
@@ -476,10 +481,24 @@ class SheinPublisher:
             abs_path = os.path.abspath(image_path)
             self.log("[DEBUG] 上传图片: {}".format(os.path.basename(image_path)))
             file_input.send_keys(abs_path)
-            # 识图发品阶段不做裁剪，等待系统识别类目
-            wait_secs = 4
-            self.log("[DEBUG] 图片已上传，等待系统识别类目 {} 秒...".format(wait_secs))
-            time.sleep(wait_secs)
+            # 识图发品阶段改为“最长等待 + 每1秒检测”，识别完成则提前结束
+            max_wait_secs = 30
+            self.log("[DEBUG] 图片已上传，等待系统识别类目（最长 {} 秒）...".format(max_wait_secs))
+            def _recognition_ready():
+                try:
+                    # 推荐类目出现时可直接进入下一步
+                    spans = self.driver.find_elements(By.XPATH, "//span[contains(text(), '/')]")
+                    for sp in spans:
+                        try:
+                            txt = (sp.text or "").strip()
+                            if sp.is_displayed() and txt.count('/') >= 3:
+                                return True
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                return False
+            self._wait_until(_recognition_ready, timeout=max_wait_secs, interval=1, desc="识图推荐类目出现")
             # 等待上传完成
             self.log("[OK] 图片已上传: {}".format(os.path.basename(image_path)))
             return True
@@ -543,7 +562,20 @@ class SheinPublisher:
                         self.log("[DEBUG] 找到'确认，下一步'按钮")
                         btn.click()
                         self.log("[OK] 已点击'确认，下一步'按钮")
-                        time.sleep(2)
+                        # 改为动态等待填写信息页加载完成
+                        def _fill_page_ready():
+                            try:
+                                # 标题输入、类目属性卡片、规格板块任意一个出现视为进入下一阶段
+                                if self.driver.find_elements(By.ID, "attribute_info"):
+                                    return True
+                                if self.driver.find_elements(By.XPATH, "//input[contains(@placeholder,'标题') or contains(@placeholder,'商品名称')]"):
+                                    return True
+                                if self.driver.find_elements(By.XPATH, "//*[contains(text(),'规格及供应') or contains(text(),'商品基础信息')]"):
+                                    return True
+                            except Exception:
+                                pass
+                            return False
+                        self._wait_until(_fill_page_ready, timeout=10, interval=1, desc="填写信息页面加载")
                         return True
                 except Exception:
                     continue
@@ -560,7 +592,13 @@ class SheinPublisher:
             self.log("[DEBUG] 开始填写商品基础信息...")
             # 1. 填写商品标题(英语)
             self.log("[DEBUG] 填写商品标题(英语)...")
-            time.sleep(3)  # 等待页面完全加载
+            self._wait_until(
+                lambda: bool(self.driver.find_elements(By.XPATH, "//span[contains(text(), '商品标题')]"))
+                        or bool(self.driver.find_elements(By.XPATH, "//input[contains(@placeholder,'标题') or contains(@placeholder,'商品名称')]")),
+                timeout=1,
+                interval=1,
+                desc="商品标题区域加载"
+            )
             title = product_info.get("title", "")
             if title:
                 # 查找"商品标题(英语)"对应的输入框
@@ -639,7 +677,13 @@ class SheinPublisher:
                     self.log("[DEBUG] 填写品牌失败: {}".format(str(e)[:40]))
             # 5. 填写货号（XYZ-{ASIN}）
             self.log("[DEBUG] 填写货号...")
-            time.sleep(3)  # 等待页面完全加载
+            self._wait_until(
+                lambda: bool(self.driver.find_elements(By.XPATH, "//span[normalize-space(text())='货号']"))
+                        or bool(self.driver.find_elements(By.XPATH, "//input[contains(@placeholder,'货号') or contains(@placeholder,'型号')]")),
+                timeout=1,
+                interval=1,
+                desc="货号区域加载"
+            )
             asin = product_info.get("asin", "")
             if asin:
                 model_number = "XYZ-{}".format(asin)
@@ -4303,10 +4347,10 @@ class SheinPublisher:
                 "  2. 网站页面结构已更新\n"
                 "  3. 需要先完成店铺资质认证\n"
                 "请在浏览器中手动检查。")
-        time.sleep(2)
+        self._wait_ready_state(timeout=3)
         # 关闭可能弹出的公告弹窗，避免影响类目选择等后续操作
         self._dismiss_announcements()
-        time.sleep(1)
+        self._wait_ready_state(timeout=2)
         # Step2: 选择类目（优先识图，其次关键词树，最后列表模式）
         # 使用与单线程上品完全相同的函数链：
         #   click_identify_image_button → upload_product_image → select_first_category → click_confirm_button
@@ -4324,9 +4368,6 @@ class SheinPublisher:
 
                 if _tmp_img and self.click_identify_image_button():
                     if self.upload_product_image(_tmp_img):
-                        for _ci in range(5, 0, -1):
-                            self._ensure_not_stopped()
-                            time.sleep(1)
                         if self.select_first_category():
                             if self.click_confirm_button():
                                 cat_selected = True

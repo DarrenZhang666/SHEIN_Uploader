@@ -928,12 +928,6 @@ class SheinApp(tk.Tk):
                         self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                     return
 
-                for i in range(5, 0, -1):
-                    if self._check_stop_or_return(session_id=session_id):
-                        return
-                    _set_status('✓ 图片上传成功，等待识别中... {}s（第{}/3次）'.format(i, attempt), "上品中")
-                    time.sleep(1)
-
                 if self._check_stop_or_return(session_id=session_id):
                     return
                 _set_status('选择第一个推荐类目（第{}/3次）...'.format(attempt), "上品中")
