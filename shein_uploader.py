@@ -637,26 +637,6 @@ class SheinPublisher:
                             continue
                 except Exception as e:
                     self.log("[DEBUG] 填写品牌失败: {}".format(str(e)[:40]))
-            # 4. 填写参考产品链接（ASIN链接）
-            self.log("[DEBUG] 填写参考产品链接...")
-            asin_url = product_info.get("url", "")
-            if asin_url:
-                # 查找产品链接输入框（在"参考产品链接"部分）
-                try:
-                    all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
-                    for inp in all_inputs:
-                        try:
-                            placeholder = inp.get_attribute("placeholder")
-                            if placeholder and "链接" in placeholder:
-                                inp.clear()
-                                inp.send_keys(asin_url)
-                                self.log("[OK] 参考产品链接已填写: {}".format(asin_url[:50]))
-                                time.sleep(0.5)
-                                break
-                        except Exception:
-                            continue
-                except Exception as e:
-                    self.log("[DEBUG] 填写链接失败: {}".format(str(e)[:40]))
             # 5. 填写货号（XYZ-{ASIN}）
             self.log("[DEBUG] 填写货号...")
             time.sleep(3)  # 等待页面完全加载
