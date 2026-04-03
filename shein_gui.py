@@ -1316,6 +1316,7 @@ class SheinApp(tk.Tk):
         def _worker_loop(worker_idx):
             def _worker_log(msg):
                 self._pub_log('[W{}] {}'.format(worker_idx, str(msg)[:80]))
+            worker_has_failure = False
 
             def _inject_login_session(driver):
                 """将主登录实例的 cookies/localStorage/sessionStorage 注入 worker 浏览器。"""
@@ -1425,11 +1426,13 @@ class SheinApp(tk.Tk):
 
                     info = self.product_cache.get(asin, {})
                     if not info or not info.get('image_url'):
+                        worker_has_failure = True
                         _record_result(asin, False, '缺少商品图片')
                         continue
 
                     try:
                         if not _ensure_publish_page(pub.driver):
+                            worker_has_failure = True
                             _record_result(asin, False, '未能进入商品发布页（授权中）')
                             continue
                         cat_result = auto_match_category(info)
@@ -1439,13 +1442,18 @@ class SheinApp(tk.Tk):
                         if result:
                             _record_result(asin, True)
                         else:
+                            worker_has_failure = True
                             _record_result(asin, False, '发布流程未能确认成功')
                     except Exception as e:
+                        worker_has_failure = True
                         _record_result(asin, False, str(e))
             finally:
                 try:
                     if pub.driver:
-                        pub.driver.quit()
+                        if is_dev_mode() and worker_has_failure:
+                            self._pub_log('[W{}] [DEV] 检测到失败，保留当前浏览器页面用于排查'.format(worker_idx))
+                        else:
+                            pub.driver.quit()
                 except Exception:
                     pass
 
