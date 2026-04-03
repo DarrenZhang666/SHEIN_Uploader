@@ -5,6 +5,8 @@ import re
 import time
 import random
 import tempfile
+import threading
+import hashlib
 import requests
 from shein_login import SheinLoginManager
 from shein_asin import HEADERS_POOL
@@ -25,6 +27,10 @@ class SheinPublisher:
     LOGIN_URL   = "https://sso.geiwohuo.com/#/login"
     PUBLISH_URL = "https://sso.geiwohuo.com/#/spmp/commoditiesCategory/followsales-pro/list"
     DEBUG_PORT  = 9222  # Chrome 远程调试端口
+    # 仅做进程内内存缓存，避免磁盘长期堆积图片文件
+    _IMG_MEM_CACHE_LOCK = threading.Lock()
+    _IMG_MEM_CACHE = {}
+    _IMG_MEM_CACHE_MAX = 120
 
     def __init__(self, log_cb=None):
         self.driver = None
@@ -3731,6 +3737,61 @@ class SheinPublisher:
         except Exception:
             pass
         return None
+
+    def _get_image_bytes_cached(self, url):
+        """
+        仅内存缓存图片字节，避免落盘长期占用。
+        返回 (img_bytes, ext, from_cache)。
+        """
+        if not url:
+            return None, ".jpg", False
+
+        key = hashlib.md5(url.encode("utf-8")).hexdigest()
+        with self._IMG_MEM_CACHE_LOCK:
+            cached = self._IMG_MEM_CACHE.get(key)
+            if cached and cached.get("bytes"):
+                return cached["bytes"], cached.get("ext", ".jpg"), True
+
+        last_err = ""
+        for _attempt in range(2):
+            try:
+                hdrs = random.choice(HEADERS_POOL).copy() if HEADERS_POOL else {}
+                # 分离连接超时和读取超时，避免长时间卡住
+                r = requests.get(url, headers=hdrs, timeout=(3, 8))
+                if r.status_code != 200:
+                    last_err = "http {}".format(r.status_code)
+                    continue
+                img_bytes = r.content or b""
+                if not img_bytes:
+                    last_err = "empty file"
+                    continue
+
+                ctype = (r.headers.get("Content-Type", "") or "").lower()
+                ext = ".jpg"
+                if "png" in ctype:
+                    ext = ".png"
+                elif "webp" in ctype:
+                    ext = ".webp"
+                elif "gif" in ctype:
+                    ext = ".gif"
+                elif "jpeg" in ctype or "jpg" in ctype:
+                    ext = ".jpg"
+
+                with self._IMG_MEM_CACHE_LOCK:
+                    # 控制缓存上限，避免内存无限增长
+                    if len(self._IMG_MEM_CACHE) >= self._IMG_MEM_CACHE_MAX:
+                        try:
+                            self._IMG_MEM_CACHE.pop(next(iter(self._IMG_MEM_CACHE)))
+                        except Exception:
+                            self._IMG_MEM_CACHE.clear()
+                    self._IMG_MEM_CACHE[key] = {"bytes": img_bytes, "ext": ext}
+                return img_bytes, ext, False
+            except Exception as e:
+                last_err = str(e)[:80]
+                continue
+        if last_err:
+            self.log("[识图] 下载图片失败: {}".format(last_err))
+        return None, ".jpg", False
     # ── 识图选类目
 
     def select_category_by_image(self, img_url_or_path, timeout=20):
@@ -3745,10 +3806,22 @@ class SheinPublisher:
         except Exception as e:
             self.log("[识图] 导航失败: {}".format(e)); return False
         tmp_path = None
+        need_cleanup = False
         if img_url_or_path.startswith("http"):
-            tmp_path = self._save_img_temp(img_url_or_path)
-            if not tmp_path: self.log("[识图] 图片下载失败"); return False
+            _t0 = time.time()
+            img_bytes, img_ext, from_cache = self._get_image_bytes_cached(img_url_or_path)
+            if not img_bytes:
+                self.log("[识图] 图片下载失败")
+                return False
+            fd, tmp_path = tempfile.mkstemp(suffix=img_ext if img_ext else ".jpg")
+            with os.fdopen(fd, "wb") as _f:
+                _f.write(img_bytes)
             img_path = tmp_path
+            need_cleanup = True
+            if from_cache:
+                self.log("[识图] 使用内存缓存图片（不落盘缓存）")
+            else:
+                self.log("[识图] 下载图片耗时 {:.2f}s".format(time.time() - _t0))
         else:
             img_path = img_url_or_path
         entry_xpaths = [
@@ -3880,7 +3953,7 @@ class SheinPublisher:
             if not confirmed: self.log("[识图] 未找到确认按钒")
             return confirmed
         finally:
-            if tmp_path and os.path.exists(tmp_path):
+            if need_cleanup and tmp_path and os.path.exists(tmp_path):
                 try: os.remove(tmp_path)
                 except Exception: pass
 
