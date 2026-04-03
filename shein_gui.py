@@ -100,6 +100,24 @@ class SheinApp(tk.Tk):
         if asin and stage_for_non_dev:
             self.after(0, lambda a=asin, s=stage_for_non_dev: self.status_lbl.config(text="{} {}".format(a, s)))
 
+    def _is_chinese_page(self, driver):
+        """检测当前页面是否为中文界面。"""
+        try:
+            txt = driver.execute_script(
+                "return document && document.body ? (document.body.innerText || '') : '';"
+            ) or ""
+            if not txt:
+                return False
+            # 关键文案命中优先判定
+            keywords = ("中文", "卖家中心", "发布商品", "识图发品", "确认，下一步")
+            if any(k in txt for k in keywords):
+                return True
+            # 兜底：统计中文字符数量
+            zh_count = len(re.findall(r"[\u4e00-\u9fff]", txt))
+            return zh_count >= 20
+        except Exception:
+            return False
+
     def _warmup_chrome(self):
         """后台预热 Chrome，程序启动时自动运行。"""
         try:
@@ -667,14 +685,24 @@ class SheinApp(tk.Tk):
         self.after(0, lambda: self.status_lbl.config(
             text="SHEIN 登录成功" + ("  账号: " + _login_acct if _login_acct else "")))
         self._pub_log("[OK] SHEIN 登录成功，账号: {}".format(_login_acct or "(未获取到)"))
-        # 按需求：登录成功后关闭登录窗口，但保留会话用于后续单线程/多线程直达发布页
-        try:
-            pub.driver.quit()
-            if self._shein_publisher is pub:
-                self._shein_publisher = None
-            self._pub_log("[OK] 登录窗口已关闭（会话已保留）")
-        except Exception:
-            pass
+        # 登录成功后的窗口行为：
+        # - 开发者模式：保留窗口便于观察
+        # - 非开发者模式：先检查页面是否中文；不是中文则保留窗口并提示切换语言
+        if is_dev_mode():
+            self._pub_log("[DEV] 开发者模式：保留登录窗口")
+        else:
+            if not self._is_chinese_page(pub.driver):
+                self._pub_log("[WARN] 非开发者模式：检测到页面非中文，保留窗口等待手动切换")
+                self.after(0, lambda: messagebox.showwarning("语言提示", "请切换语言为中文。"))
+                self.after(0, lambda: self.status_lbl.config(text="请先将 SHEIN 页面语言切换为中文"))
+                return
+            try:
+                pub.driver.quit()
+                if self._shein_publisher is pub:
+                    self._shein_publisher = None
+                self._pub_log("[OK] 登录窗口已关闭（会话已保留）")
+            except Exception:
+                pass
 
     def _open_publish_page(self):
         """打开 SHEIN 商品发布页面，自动上传选中商品的图片。"""
