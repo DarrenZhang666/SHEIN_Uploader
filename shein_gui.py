@@ -1248,6 +1248,7 @@ class SheinApp(tk.Tk):
         source_driver = None
         login_cookies = []
         login_storage = {}
+        login_session_storage = {}
         try:
             if self._shein_publisher is not None and self._shein_publisher.is_alive():
                 source_driver = self._shein_publisher.driver
@@ -1264,6 +1265,12 @@ class SheinApp(tk.Tk):
                 ) or {}
             except Exception:
                 login_storage = {}
+            try:
+                login_session_storage = source_driver.execute_script(
+                    "var r={}; for(var i=0;i<sessionStorage.length;i++){var k=sessionStorage.key(i); r[k]=sessionStorage.getItem(k);} return r;"
+                ) or {}
+            except Exception:
+                login_session_storage = {}
 
         base_account = (self.shein_account.get() or '').strip() or 'default'
         # 同时启动过多浏览器会触发“授权中/网页无法访问”，限制到3更稳
@@ -1307,12 +1314,7 @@ class SheinApp(tk.Tk):
                 self._pub_log('[W{}] {}'.format(worker_idx, str(msg)[:80]))
 
             def _inject_login_session(driver):
-                # 将主登录实例的 localStorage/cookies 注入当前 worker（不做额外页面跳转）
-                try:
-                    pass
-                except Exception:
-                    return
-
+                """将主登录实例的 cookies/localStorage/sessionStorage 注入 worker 浏览器。"""
                 if login_storage:
                     try:
                         driver.execute_script(
@@ -1321,7 +1323,14 @@ class SheinApp(tk.Tk):
                         )
                     except Exception:
                         pass
-
+                if login_session_storage:
+                    try:
+                        driver.execute_script(
+                            "for (var k in arguments[0]) { try { sessionStorage.setItem(k, arguments[0][k]); } catch(e) {} }",
+                            login_session_storage,
+                        )
+                    except Exception:
+                        pass
                 if login_cookies:
                     for ck in login_cookies:
                         try:
@@ -1335,42 +1344,66 @@ class SheinApp(tk.Tk):
                         except Exception:
                             continue
 
+            def _is_on_publish_page(url):
+                return ("followsales-pro/list" in url
+                        and ("commoditiesCategory" in url or "commodities-category" in url))
+
             def _ensure_publish_page(driver):
                 try:
                     cur = driver.current_url or ""
                 except Exception:
                     cur = ""
-                if ("followsales-pro/list" in cur
-                        and ("commoditiesCategory" in cur or "commodities-category" in cur)):
+                if _is_on_publish_page(cur):
                     return True
 
-                # 快速路径：先直接跳发布页
-                try:
-                    driver.get(SHEIN_PUBLISH_URL)
-                    time.sleep(0.4)
-                    cur = driver.current_url or ""
-                    if ("followsales-pro/list" in cur
-                            and ("commoditiesCategory" in cur or "commodities-category" in cur)):
-                        return True
-                except Exception:
-                    pass
+                _has_session = bool(login_cookies or login_storage)
 
-                # 失败再做一次会话注入 + 重试跳转
-                _inject_login_session(driver)
-                try:
-                    driver.get(SHEIN_PUBLISH_URL)
-                    time.sleep(0.8)
-                    cur = driver.current_url or ""
-                except Exception:
-                    cur = ""
-                return ("followsales-pro/list" in cur
-                        and ("commoditiesCategory" in cur or "commodities-category" in cur))
+                # 优化：先导航到基础域名建立 cookie 上下文，注入会话后再直达发布页
+                if _has_session:
+                    try:
+                        driver.get("https://sso.geiwohuo.com/#/login")
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
+                    _inject_login_session(driver)
+                    _worker_log("已注入登录会话(cookies:{} storage:{})".format(
+                        len(login_cookies), len(login_storage)))
+
+                for _attempt in range(3):
+                    try:
+                        driver.get(SHEIN_PUBLISH_URL)
+                        time.sleep(1.0 if _attempt == 0 else 2.0)
+                        cur = driver.current_url or ""
+                        if _is_on_publish_page(cur):
+                            return True
+                        if "/auth/" in cur or "GMPSSO" in cur:
+                            _worker_log("授权中页面，第{}/3次重试".format(_attempt + 1))
+                            try:
+                                driver.get("https://sso.geiwohuo.com/#/home")
+                                time.sleep(1.0)
+                            except Exception:
+                                pass
+                            continue
+                    except Exception:
+                        pass
+
+                # 最终重试：再次注入会话 + 导航
+                if _has_session:
+                    _inject_login_session(driver)
+                    try:
+                        driver.get(SHEIN_PUBLISH_URL)
+                        time.sleep(2.0)
+                        cur = driver.current_url or ""
+                    except Exception:
+                        cur = ""
+                    return _is_on_publish_page(cur)
+                return False
 
             worker_account = '{}__w{}'.format(base_account, worker_idx)
             pub = SheinPublisher(log_cb=_worker_log)
             try:
-                # 不再复制 profile，直接用会话注入方式提速
-                pub.start_browser(account=worker_account)
+                # 先克隆已登录账号 profile，再补会话注入，尽量避免每个线程从登录页慢跳转
+                pub.start_browser(account=worker_account, clone_from_account=base_account)
                 if not _ensure_publish_page(pub.driver):
                     self._pub_log('[W{}] 会话注入后仍未进入发布页'.format(worker_idx))
                 else:

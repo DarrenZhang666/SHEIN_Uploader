@@ -6,6 +6,7 @@ SHEIN 登录模块
 import os
 import time
 import threading
+import shutil
 try:
     import winreg
 except Exception:
@@ -197,10 +198,51 @@ class SheinLoginManager:
             h = (h * 31 + ord(ch)) & 0xFFFF
         return 9300 + (h % 200)
 
-    def start_browser(self, account=""):
+    def _safe_profile_name(self, account=""):
+        import re as _re
+        return _re.sub(r'[^\w\-.]', '_', account) if account else "default"
+
+    def _clone_profile_best_effort(self, src_profile, dst_profile):
+        """
+        尽力复制浏览器 profile（跳过锁文件/临时文件），用于并发线程快速复用登录态。
+        返回 (copied_count, skipped_count)。
+        """
+        copied = 0
+        skipped = 0
+        if not os.path.isdir(src_profile):
+            return copied, skipped
+
+        skip_names = {
+            "LOCK", "lockfile", "SingletonLock", "SingletonCookie",
+            "SingletonSocket", "DevToolsActivePort"
+        }
+
+        for root, dirs, files in os.walk(src_profile):
+            rel = os.path.relpath(root, src_profile)
+            dst_root = dst_profile if rel == "." else os.path.join(dst_profile, rel)
+            try:
+                os.makedirs(dst_root, exist_ok=True)
+            except Exception:
+                skipped += len(files)
+                continue
+
+            for fn in files:
+                try:
+                    if fn in skip_names or fn.lower().endswith(".lock"):
+                        skipped += 1
+                        continue
+                    src_f = os.path.join(root, fn)
+                    dst_f = os.path.join(dst_root, fn)
+                    shutil.copy2(src_f, dst_f)
+                    copied += 1
+                except Exception:
+                    skipped += 1
+                    continue
+        return copied, skipped
+
+    def start_browser(self, account="", clone_from_account=""):
         """启动浏览器。同一账号复用实例，不同账号用独立 profile 和端口。"""
         import threading as _th
-        import re as _re
         import socket as _socket
         _t0 = time.time()
         self._disable_ie_esc_notice()
@@ -256,10 +298,27 @@ class SheinLoginManager:
             self.log("[DEBUG] 端口{}有响应但连接失败，启动新浏览器".format(_port))
 
         # 启动新浏览器 — 每个账号独立的 profile 目录
-        _safe_name = _re.sub(r'[^\w\-.]', '_', account) if account else "default"
+        _safe_name = self._safe_profile_name(account)
         _profile = os.path.join(
             os.path.expanduser("~"), ".shein_profiles", _safe_name)
-        os.makedirs(_profile, exist_ok=True)
+        _profile_exists = os.path.isdir(_profile)
+        _profile_empty = (not _profile_exists) or (len(os.listdir(_profile)) == 0 if _profile_exists else True)
+
+        if clone_from_account and clone_from_account != account and _profile_empty:
+            _clone_name = self._safe_profile_name(clone_from_account)
+            _src_profile = os.path.join(os.path.expanduser("~"), ".shein_profiles", _clone_name)
+            if os.path.isdir(_src_profile):
+                try:
+                    os.makedirs(_profile, exist_ok=True)
+                    copied, skipped = self._clone_profile_best_effort(_src_profile, _profile)
+                    self.log("[DEBUG] 已克隆登录 profile: {} -> {} (复制{} 跳过{})".format(
+                        _clone_name, _safe_name, copied, skipped))
+                except Exception as _ce:
+                    self.log("[DEBUG] 克隆 profile 失败: {}".format(str(_ce)[:80]))
+            else:
+                os.makedirs(_profile, exist_ok=True)
+        else:
+            os.makedirs(_profile, exist_ok=True)
         self.log("[DEBUG] 启动新浏览器, profile={}".format(_profile))
 
         def _make_opts(opt_class):
