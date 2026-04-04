@@ -2101,7 +2101,42 @@ class SheinPublisher:
                     if first_part:
                         return first_part
                 return ""
+            def _collect_preferred_basis():
+                """收集用于主规格属性核对的分类依据关键词。"""
+                basis = []
+                if not isinstance(product_info, dict):
+                    return basis
+                sku_list = product_info.get("sku_list", []) or []
+                for sku in sku_list:
+                    try:
+                        for b in sku.get("dimension_basis", []) or []:
+                            bb = str(b or "").strip()
+                            if bb and bb not in basis:
+                                basis.append(bb)
+                    except Exception:
+                        pass
+                    # 兜底：从 raw_dimension_key 中提取 key（例如 Color=Black -> Color）
+                    try:
+                        raw_key = str(((sku.get("debug_variation") or {}).get("raw_dimension_key") or "")).strip()
+                        if raw_key:
+                            for part in re.split(r"[;,|]", raw_key):
+                                seg = str(part or "").strip()
+                                if not seg:
+                                    continue
+                                key = ""
+                                if "=" in seg:
+                                    key = seg.split("=", 1)[0].strip()
+                                elif ":" in seg:
+                                    key = seg.split(":", 1)[0].strip()
+                                if key and key not in basis:
+                                    basis.append(key)
+                    except Exception:
+                        pass
+                return basis
+            attr_match_success = True
+
             def _pick_first(inner, label):
+                nonlocal attr_match_success
                 data_id = (inner.get_attribute("data-id") or "").strip()
                 self.log("[DEBUG] 点击{}下拉框 data-id={}".format(label, data_id or "N/A"))
                 options = []
@@ -2125,17 +2160,20 @@ class SheinPublisher:
                 target = options[0]
                 picked = (target.text or "").strip().replace("\n", " ")
                 if label == "主规格属性":
-                    preferred_basis = []
-                    if isinstance(product_info, dict):
-                        for sku in product_info.get("sku_list", []) or []:
-                            for b in sku.get("dimension_basis", []) or []:
-                                bb = str(b or "").strip()
-                                if bb and bb not in preferred_basis:
-                                    preferred_basis.append(bb)
+                    attr_match_success = False
+                    preferred_basis = _collect_preferred_basis()
                     if preferred_basis:
                         norm_basis_set = set(_normalize_key(x) for x in preferred_basis if _normalize_key(x))
+                        picked_norm = _normalize_key(picked)
                         if len(options) == 1:
-                            self.log("[DEBUG] 主规格属性仅 1 个选项，直接选择")
+                            # 只有一个选项也必须核对分类依据，不匹配则进入 A/B/C 兜底
+                            attr_match_success = bool(picked_norm and picked_norm in norm_basis_set)
+                            if attr_match_success:
+                                self.log("[OK] 主规格属性仅1项且已匹配分类依据: {} (依据: {})".format(
+                                    picked, " / ".join(preferred_basis)))
+                            else:
+                                self.log("[WARN] 主规格属性仅1项但未匹配分类依据({})，将走A/B/C兜底".format(
+                                    " / ".join(preferred_basis)))
                         else:
                             matched = None
                             for opt in options:
@@ -2146,12 +2184,15 @@ class SheinPublisher:
                             if matched is not None:
                                 target = matched
                                 picked = (matched.text or "").strip().replace("\n", " ")
+                                attr_match_success = True
                                 self.log("[OK] 主规格属性已按分类依据匹配: {} (依据: {})".format(
                                     picked, " / ".join(preferred_basis)))
                             else:
+                                attr_match_success = False
                                 self.log("[WARN] 主规格属性未匹配到分类依据({})，回退首项".format(
                                     " / ".join(preferred_basis)))
                     else:
+                        attr_match_success = False
                         self.log("[DEBUG] 未获取到 ASIN 分类依据，主规格属性回退首项")
                 ok = _click_option(target)
                 if not ok:
@@ -2650,6 +2691,67 @@ class SheinPublisher:
             picked_attr = _pick_first(attr_inner, "主规格属性")
             if not picked_attr:
                 self.log("[WARN] 第1个下拉框未成功选择")
+                return
+
+            # 兜底规则：分类依据与主规格属性无法匹配时，
+            # 第2框固定按 A/B/C 填写（“请选择或自定义”）
+            if not attr_match_success:
+                self.log("[INFO] 主规格属性核对失败，启用固定值兜底: A/B/C")
+                fixed_values = ["A", "B", "C"]
+                filled_vals = []
+                used_data_ids = set()
+                for fixed_val in fixed_values:
+                    value_inner = None
+                    for _retry in range(20):
+                        candidates = []
+                        for xp in [
+                            ".//div[contains(@class,'specValues') or contains(@class,'spmp_style__specValues')]//div[contains(@class,'so-select-inner') and @data-id]",
+                            ".//div[contains(@class,'so-select-inner') and @data-id]",
+                        ]:
+                            try:
+                                for el in spec_content.find_elements(By.XPATH, xp):
+                                    if el.is_displayed():
+                                        candidates.append(el)
+                            except Exception:
+                                pass
+                            if candidates:
+                                break
+                        for c in candidates:
+                            try:
+                                did = (c.get_attribute('data-id') or '').strip()
+                                if did and did not in used_data_ids:
+                                    value_inner = c
+                                    break
+                            except Exception:
+                                continue
+                        if value_inner is not None:
+                            break
+                        time.sleep(0.5)
+                    if value_inner is None:
+                        self.log("[WARN] 固定值 '{}' 未找到可填写输入框，停止".format(fixed_val))
+                        break
+                    try:
+                        did = (value_inner.get_attribute('data-id') or '').strip()
+                        if did:
+                            used_data_ids.add(did)
+                    except Exception:
+                        pass
+                    picked_val = _type_and_pick_first(value_inner, "主规格値", fixed_val)
+                    if not picked_val and fixed_val == "A":
+                        # A 失败时，优先保证首个值能落地
+                        picked_val = _pick_first(value_inner, "主规格値")
+                    if picked_val:
+                        filled_vals.append(picked_val)
+                        self.log("[OK] 固定主规格値已填写: {}".format(picked_val))
+                        time.sleep(1.0)
+                    else:
+                        self.log("[WARN] 固定主规格値 '{}' 填写失败".format(fixed_val))
+                self._last_main_spec_filled_values = list(filled_vals)
+                if filled_vals:
+                    self.log("[OK] 主规格兜底完成: 属性={}，値=[{}]".format(
+                        picked_attr, " | ".join(filled_vals)))
+                else:
+                    self.log("[WARN] 主规格兜底失败：A/B/C 均未写入")
                 return
             # 5) 第二个框：主规格值下拉
             # 5) 第二个框：主规格値—循环填写所有 SKU 规格値
@@ -3280,6 +3382,10 @@ class SheinPublisher:
                 self.log("[WARN] 未找到细节图表格行，回退单框模式")
                 self._upload_images_to_single_input(fallback_images)
                 return
+            max_sku_rows = 3
+            if len(rows) > max_sku_rows:
+                self.log("[INFO] 细节图仅处理前{}个SKU行（其余跳过）".format(max_sku_rows))
+                rows = rows[:max_sku_rows]
             self.log("[DEBUG] 找到 {} 行 SKU 细节图行".format(len(rows)))
 
             # -- 动态检测各列索引（细节图、方形图、色块图）--
