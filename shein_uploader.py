@@ -40,6 +40,7 @@ class SheinPublisher:
         self._stop_publish = False
         self._browser_account = ""
         self._clone_from_account = ""
+        self._last_recognition_state = "idle"
         # 记录主规格实际成功写入顺序，供后续按行上传图片对齐
         self._last_main_spec_filled_values = []
 
@@ -472,6 +473,7 @@ class SheinPublisher:
         """上传商品图片到'识图发品'页面。"""
         if not os.path.isfile(image_path):
             self.log("[ERROR] 图片文件不存在: {}".format(image_path))
+            self._last_recognition_state = "upload_failed"
             return False
         try:
             self._ensure_not_stopped()
@@ -479,15 +481,16 @@ class SheinPublisher:
             file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
             if not file_inputs:
                 self.log("[ERROR] 未找到文件上传框")
+                self._last_recognition_state = "upload_failed"
                 return False
             # 使用第一个文件上传框
             file_input = file_inputs[0]
             abs_path = os.path.abspath(image_path)
             self.log("[DEBUG] 上传图片: {}".format(os.path.basename(image_path)))
             file_input.send_keys(abs_path)
-            # 识图发品阶段改为“最长等待 + 每1秒检测”，识别完成则提前结束
-            max_wait_secs = 30
-            self.log("[DEBUG] 图片已上传，等待系统识别类目（最长 {} 秒）...".format(max_wait_secs))
+            # 识图发品阶段：10 秒内每秒检测一次“推荐类目/暂无推荐”
+            max_wait_secs = 10
+            self.log("[DEBUG] 图片已上传，识别监测中（最长 {} 秒，每秒检测推荐类目/暂无推荐）...".format(max_wait_secs))
             def _recognition_ready():
                 try:
                     # 推荐类目出现时可直接进入下一步
@@ -502,12 +505,28 @@ class SheinPublisher:
                 except Exception:
                     pass
                 return False
-            self._wait_until(_recognition_ready, timeout=max_wait_secs, interval=1, desc="识图推荐类目出现")
-            # 等待上传完成
+
+            self._last_recognition_state = "waiting"
+            for _ in range(max_wait_secs):
+                self._ensure_not_stopped()
+                if self.has_no_category_recommend_hint():
+                    self._last_recognition_state = "no_category"
+                    self.log("[WARN] 检测到“识图发品暂无分类推荐”提示")
+                    break
+                if _recognition_ready():
+                    self._last_recognition_state = "category_ready"
+                    self.log("[OK] 检测到推荐类目")
+                    break
+                time.sleep(1)
+            if self._last_recognition_state == "waiting":
+                self._last_recognition_state = "timeout"
+                self.log("[WARN] 10秒内未检测到推荐类目或暂无推荐提示")
+
             self.log("[OK] 图片已上传: {}".format(os.path.basename(image_path)))
             return True
         except Exception as e:
             self.log("[ERROR] 上传失败: {}".format(str(e)[:60]))
+            self._last_recognition_state = "upload_failed"
             return False
 
     def select_first_category(self):
@@ -4522,6 +4541,8 @@ class SheinPublisher:
                             step_err = "未找到识图发品按钮"
                         if (not step_err) and (not self.upload_product_image(_tmp_img)):
                             step_err = step_err or "上传识图图片失败"
+                        if (not step_err) and (self._last_recognition_state == "no_category"):
+                            step_err = "识图发品暂无分类推荐"
                         if (not step_err) and (not self.select_first_category()):
                             step_err = step_err or "未识别到推荐类目"
                         if (not step_err) and (not self.click_confirm_button()):

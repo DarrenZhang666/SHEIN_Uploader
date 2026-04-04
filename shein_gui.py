@@ -740,9 +740,15 @@ class SheinApp(tk.Tk):
         # 优先使用勾选的 ASIN；未勾选时回退到当前点击项
         selected_asins = [a for a, v in self.asin_vars.items() if v.get()]
         if len(selected_asins) > 1:
+            skipped_success = [a for a in selected_asins if self.asin_status.get(a) == "success"]
+            publish_asins = [a for a in selected_asins if self.asin_status.get(a) != "success"]
+            if skipped_success:
+                self._pub_log("[SKIP] 已过滤 {} 个已上品成功 ASIN".format(len(skipped_success)))
+            if not publish_asins:
+                self.status_lbl.config(text="所选商品均已上品成功，已自动跳过")
+                return
             # 并发模式按“全部选中项”执行，缺图项在 worker 内计为失败，
             # 确保结果弹窗以“选中总数”为准，不会因预过滤而提前结束。
-            publish_asins = list(selected_asins)
             try:
                 max_workers = int(self.fetch_workers.get())
             except Exception:
@@ -758,14 +764,18 @@ class SheinApp(tk.Tk):
                 info = self.product_cache.get(asin)
                 if info and info.get('image_url'):
                     valid_count += 1
-            self.status_lbl.config(text='并发上品中：{} 个商品（可发布 {} 个，{}线程）...'.format(
-                len(publish_asins), valid_count, min(max_workers, len(publish_asins))))
+            self.status_lbl.config(text='并发上品中：{} 个商品（可发布 {} 个，跳过 {} 个，{}线程）...'.format(
+                len(selected_asins), valid_count, len(skipped_success), min(max_workers, len(publish_asins))))
             threading.Thread(target=self._publish_worker, args=(publish_asins, max_workers, current_session_id), daemon=True).start()
             return
 
         target_asin = selected_asins[0] if selected_asins else self.current_asin
         if target_asin is None:
             messagebox.showwarning('提示', '请先勾选一个商品或点击左侧 ASIN')
+            return
+        if self.asin_status.get(target_asin) == "success":
+            self.status_lbl.config(text="ASIN {} 已上品成功，已自动跳过".format(target_asin))
+            self._pub_log("[SKIP] {} 已上品成功，跳过本次上品".format(target_asin))
             return
 
         # 同步当前 ASIN，后续流程统一使用 current_asin
@@ -988,6 +998,8 @@ class SheinApp(tk.Tk):
                     _set_status('上传图片到 SHEIN（第{}/3次）...'.format(attempt), "上品中")
                     if not self._shein_publisher.upload_product_image(temp_image):
                         step_err = "图片上传失败"
+                    elif getattr(self._shein_publisher, "_last_recognition_state", "") == "no_category":
+                        step_err = "识图发品暂无分类推荐"
 
                 if not step_err:
                     if self._check_stop_or_return(session_id=session_id):
