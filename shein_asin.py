@@ -584,6 +584,118 @@ def _extract_color_only_asins(soup):
     return result
 
 
+def _split_color_candidates(color_name):
+    """
+    将颜色名拆分为候选颜色（按优先级排序）。
+    规则：
+    1) 含 '&' 时优先取 '&' 前面的颜色；
+    2) 支持空格/斜杠/逗号等分隔（如 "orange blue"）；
+    3) 去重并保序。
+    """
+    raw = str(color_name or "").strip().lower()
+    if not raw:
+        return []
+
+    # 先按 & 分段，确保 "& 前优先"
+    amp_parts = [p.strip() for p in raw.split("&") if p.strip()]
+    if not amp_parts:
+        amp_parts = [raw]
+
+    candidates = []
+    for part in amp_parts:
+        # 将其它连接符统一为空格
+        norm = re.sub(r"[/|,+\-]+", " ", part)
+        tokens = [t for t in re.split(r"\s+", norm) if t]
+        # 优先加入分段首词（如 "orange blue" 优先 orange）
+        if tokens:
+            first = re.sub(r"[^a-z]", "", tokens[0])
+            if first and first not in candidates:
+                candidates.append(first)
+        # 其余词作为次级候选
+        for tk in tokens[1:]:
+            c = re.sub(r"[^a-z]", "", tk)
+            if c and c not in candidates:
+                candidates.append(c)
+    return candidates
+
+
+def _extract_color_from_attrs(attr_text):
+    """从 sku_attributes 中抽取颜色值文本。"""
+    t = str(attr_text or "").strip()
+    if not t:
+        return ""
+    m = re.search(r"color\s*:\s*([^/]+)", t, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # 回退：取第一个片段
+    return t.split("/", 1)[0].strip()
+
+
+def _enforce_unique_color_skus(sku_list):
+    """
+    对 color 维度 SKU 执行唯一化规则：
+    1) 含 '&' 优先取前色；
+    2) 前色冲突则尝试后色；
+    3) 前后都冲突则随机删重（不保留该重复 SKU）。
+    """
+    if not sku_list:
+        return sku_list
+
+    color_indices = []
+    for i, sku in enumerate(sku_list):
+        basis = [str(b).lower() for b in (sku.get("dimension_basis") or [])]
+        if any("color" in b or "colour" in b for b in basis):
+            color_indices.append(i)
+
+    if not color_indices:
+        return sku_list
+
+    used_colors = set()
+    chosen_by_idx = {}
+    dropped = set()
+    # 随机顺序决定冲突保留者，满足“随机删重”
+    process_order = list(color_indices)
+    random.shuffle(process_order)
+
+    for idx in process_order:
+        sku = sku_list[idx]
+        raw_color = _extract_color_from_attrs(sku.get("sku_attributes", ""))
+        candidates = _split_color_candidates(raw_color)
+        if not candidates and raw_color:
+            c = re.sub(r"[^a-z]", "", raw_color.lower())
+            if c:
+                candidates = [c]
+
+        chosen = ""
+        for c in candidates:
+            if c and c not in used_colors:
+                chosen = c
+                break
+        if chosen:
+            chosen_by_idx[idx] = chosen
+            used_colors.add(chosen)
+        else:
+            dropped.add(idx)
+
+    result = []
+    for i, sku in enumerate(sku_list):
+        if i in dropped:
+            continue
+        if i in chosen_by_idx:
+            sku = dict(sku)
+            sku["sku_attributes"] = "Color: {}".format(chosen_by_idx[i])
+        result.append(sku)
+
+    # 兜底：避免全部被删空
+    if not result and sku_list:
+        first = dict(sku_list[0])
+        raw = _extract_color_from_attrs(first.get("sku_attributes", ""))
+        cands = _split_color_candidates(raw)
+        first["sku_attributes"] = "Color: {}".format(cands[0] if cands else (raw or "default"))
+        return [first]
+    return result
+
+
 def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=5):
     if not color_image_map:
         return []
@@ -892,10 +1004,11 @@ def fetch_amazon_product(asin, region="美国"):
             )
             sku_image_cache[asin] = fallback_images[:]
 
+            used_colors = set()
+            color_to_idx = {}
             for ca, color_name in _color_asins_from_html:
                 if not ca or ca in sku_seen:
                     continue
-                sku_seen.add(ca)
                 sku_images = sku_image_cache.get(ca, [])
                 if not sku_images:
                     sku_images = _pick_images_from_color_map(
@@ -903,10 +1016,41 @@ def fetch_amazon_product(asin, region="美国"):
                     )
                 if not sku_images:
                     sku_images = fallback_images[:]
-                attr_text = "Color: {}".format(color_name) if color_name else "默认规格"
+
+                # 颜色唯一性策略：
+                # 1) 优先 "&" 前颜色；2) 冲突时尝试后颜色；3) 都冲突则随机删重
+                candidates = _split_color_candidates(color_name)
+                chosen_color = ""
+                for c in candidates:
+                    if c and c not in used_colors:
+                        chosen_color = c
+                        break
+                if not chosen_color:
+                    # 所有候选都冲突：随机决定是否替换已有冲突 SKU（实现随机删重）
+                    if candidates:
+                        conflict_color = candidates[0]
+                        old_idx = color_to_idx.get(conflict_color, -1)
+                        if old_idx >= 0 and random.choice([True, False]):
+                            # 用当前 SKU 替换已存在同色 SKU
+                            old_sku_asin = sku_list[old_idx].get("sku_asin")
+                            if old_sku_asin in sku_seen:
+                                sku_seen.discard(old_sku_asin)
+                            sku_list[old_idx] = {
+                                "sku_asin": ca,
+                                "sku_attributes": "Color: {}".format(conflict_color),
+                                "dimension_basis": ["color"],
+                                "images": sku_images[:5]
+                            }
+                            sku_seen.add(ca)
+                        # 不替换则随机删除当前重复项（直接跳过）
+                    continue
+
+                sku_seen.add(ca)
+                used_colors.add(chosen_color)
+                color_to_idx[chosen_color] = len(sku_list)
                 sku_list.append({
                     "sku_asin": ca,
-                    "sku_attributes": attr_text,
+                    "sku_attributes": "Color: {}".format(chosen_color),
                     "dimension_basis": ["color"],
                     "images": sku_images[:5]
                 })
@@ -967,6 +1111,9 @@ def fetch_amazon_product(asin, region="美国"):
                     "dimension_basis": basis,
                     "images": sku_images[:5]
                 })
+
+        # 对所有 color SKU 执行统一颜色唯一化（覆盖所有构建路径）
+        sku_list = _enforce_unique_color_skus(sku_list)
 
         if not sku_list:
             sku_list.append({
