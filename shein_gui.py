@@ -4,6 +4,7 @@
 from shein_main import *
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from shein_developer_mode import DevModeToggle, is_dev_mode
+from shein_mysql import verify_shein_account
 
 class SheinApp(tk.Tk):
     def __init__(self):
@@ -42,6 +43,7 @@ class SheinApp(tk.Tk):
         self._current_preview_url = ""
         self._preview_inflight = set()
         self._active_publish_asin = None
+        self._verified_accounts: set[str] = set()
         
         # 初始化日志文件
         self._init_log_file()
@@ -703,11 +705,28 @@ class SheinApp(tk.Tk):
                 except Exception:
                     continue
 
+    def _verify_account(self, account: str) -> bool:
+        """验证 SHEIN 账号是否已授权，通过后缓存结果。"""
+        if account in self._verified_accounts:
+            return True
+        self.status_lbl.config(text='正在验证账号授权...')
+        ok, msg = verify_shein_account(account)
+        if ok:
+            self._verified_accounts.add(account)
+            self.status_lbl.config(text='账号验证通过')
+            return True
+        self.status_lbl.config(text='账号验证失败')
+        messagebox.showerror('账号验证失败', msg)
+        return False
+
     def _open_shein(self):
         """打开 SHEIN 登录页面。"""
         account = self.shein_account.get().strip()
         if not account:
             messagebox.showwarning('提示', '请先在「SHEIN账号」输入框中填写账号')
+            return
+
+        if not self._verify_account(account):
             return
 
         if self._launching_browser:
@@ -935,6 +954,13 @@ class SheinApp(tk.Tk):
 
     def _open_publish_page(self):
         """打开 SHEIN 商品发布页面，自动上传选中商品的图片。"""
+        account = self.shein_account.get().strip()
+        if not account:
+            messagebox.showwarning('提示', '请先在「SHEIN账号」输入框中填写账号')
+            return
+        if not self._verify_account(account):
+            return
+
         # 优先使用勾选的 ASIN；未勾选时回退到当前点击项
         selected_asins = [a for a, v in self.asin_vars.items() if v.get()]
         if len(selected_asins) > 1:
