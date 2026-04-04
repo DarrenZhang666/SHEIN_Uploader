@@ -44,6 +44,8 @@ class SheinPublisher:
         self._last_recognition_state = "idle"
         # 记录主规格实际成功写入顺序，供后续按行上传图片对齐
         self._last_main_spec_filled_values = []
+        self._main_spec_filled_sku_indices = []
+        self._main_spec_force_abc_mode = False
 
     def _ensure_not_stopped(self):
         if self._stop_publish:
@@ -2699,6 +2701,7 @@ class SheinPublisher:
                 self.log("[INFO] 主规格属性核对失败，启用固定值兜底: A/B/C")
                 fixed_values = ["A", "B", "C"]
                 filled_vals = []
+                filled_sku_indices = []
                 used_data_ids = set()
                 for fixed_val in fixed_values:
                     value_inner = None
@@ -2742,17 +2745,22 @@ class SheinPublisher:
                         picked_val = _pick_first(value_inner, "主规格値")
                     if picked_val:
                         filled_vals.append(picked_val)
+                        # A/B/C 与 SKU 顺序强绑定：A->0, B->1, C->2
+                        filled_sku_indices.append(len(filled_sku_indices))
                         self.log("[OK] 固定主规格値已填写: {}".format(picked_val))
                         time.sleep(1.0)
                     else:
                         self.log("[WARN] 固定主规格値 '{}' 填写失败".format(fixed_val))
                 self._last_main_spec_filled_values = list(filled_vals)
+                self._main_spec_filled_sku_indices = list(filled_sku_indices)
+                self._main_spec_force_abc_mode = bool(filled_vals)
                 if filled_vals:
                     self.log("[OK] 主规格兜底完成: 属性={}，値=[{}]".format(
                         picked_attr, " | ".join(filled_vals)))
                 else:
                     self.log("[WARN] 主规格兜底失败：A/B/C 均未写入")
                 return
+            self._main_spec_force_abc_mode = False
             # 5) 第二个框：主规格值下拉
             # 5) 第二个框：主规格値—循环填写所有 SKU 规格値
             def _collect_all_spec_values(attr_text):
@@ -2823,15 +2831,21 @@ class SheinPublisher:
                         break
                 if value_inner is None:
                     self._last_main_spec_filled_values = []
+                    self._main_spec_filled_sku_indices = []
+                    self._main_spec_force_abc_mode = False
                     self.log("[WARN] 未找到第2个下拉框(主规格値)")
                     return
                 picked_val = _pick_first(value_inner, "主规格値")
                 if picked_val:
                     self._last_main_spec_filled_values = [picked_val]
+                    self._main_spec_filled_sku_indices = [0]
+                    self._main_spec_force_abc_mode = False
                     self.log("[OK] 主规格填写完成: 属性={}，値=[{}]".format(
                         picked_attr, picked_val))
                 else:
                     self._last_main_spec_filled_values = []
+                    self._main_spec_filled_sku_indices = []
+                    self._main_spec_force_abc_mode = False
                     self.log("[WARN] 第2个下拉框未成功选择首项")
                 return
             self.log("[DEBUG] 需填入的主规格値共 {} 个: {}".format(
@@ -2926,10 +2940,14 @@ class SheinPublisher:
                     self.log("[WARN] 规格値 '{}' 输入匹配失败，尝试下一个输入框重试".format(spec_val))
             if filled_vals:
                 self._last_main_spec_filled_values = list(filled_vals)
+                self._main_spec_filled_sku_indices = list(range(len(filled_vals)))
+                self._main_spec_force_abc_mode = False
                 self.log("[OK] 主规格填写完成: 属性={}，値=[{}]".format(
                     picked_attr, " | ".join(filled_vals)))
             else:
                 self._last_main_spec_filled_values = []
+                self._main_spec_filled_sku_indices = []
+                self._main_spec_force_abc_mode = False
                 self.log("[WARN] 主规格値全部填写失败")
         except Exception as e:
             self.log("[WARN] 主规格处理失败: {}".format(str(e)[:100]))
@@ -3419,9 +3437,25 @@ class SheinPublisher:
                 _col_color_block = _col_detail + 2 if _col_detail >= 0 else 4
             self.log("[DEBUG] 列索引: 细节图={}, 方形图={}, 色块图={}".format(
                 _col_detail, _col_square, _col_color_block))
+            row_sku_map = []
 
-            # -- 读取页面每行第1列颜色文本，反查 sku_list 找对应 SKU --
-            _CN_EN = {
+            # A/B/C 兜底模式：严格按顺序绑定，避免颜色匹配导致错位
+            if bool(getattr(self, "_main_spec_force_abc_mode", False)):
+                self.log("[INFO] A/B/C固定映射模式：SKU1->A, SKU2->B, SKU3->C")
+                limit = min(3, len(rows), len(sku_list))
+                for idx in range(limit):
+                    _sku = sku_list[idx]
+                    _label = ["A", "B", "C"][idx] if idx < 3 else "ROW{}".format(idx + 1)
+                    row_sku_map.append((_label, _sku))
+                    self.log("[MAP-ABC] 行{:02d} '{}' <- SKU{} '{}'".format(
+                        idx + 1, _label, idx + 1, _sku.get("sku_attributes", "")))
+                # 行数多于SKU时，后续行跳过（此时rows通常已截断到3）
+                for idx in range(limit, len(rows)):
+                    _label = ["A", "B", "C"][idx] if idx < 3 else "ROW{}".format(idx + 1)
+                    row_sku_map.append((_label, None))
+            # -- 普通模式：读取页面每行第1列颜色文本，反查 sku_list 找对应 SKU --
+            if not row_sku_map:
+                _CN_EN = {
                 "黑色": "black", "白色": "white", "灰色": "grey",
                 "红色": "red", "蓝色": "blue", "绿色": "green",
                 "黄色": "yellow", "粉色": "pink", "粉红色": "pink",
@@ -3442,109 +3476,108 @@ class SheinPublisher:
                 "杏色": "apricot",
             }
 
-            def _norm_color(s):
-                return re.sub(r"[\s\-_&/]+", "", (s or "")).lower()
+                def _norm_color(s):
+                    return re.sub(r"[\s\-_&/]+", "", (s or "")).lower()
 
-            def _sku_color_val(sku):
-                attrs = str(sku.get("sku_attributes") or "")
-                cv = attrs.split("/")[0].strip() if attrs else ""
-                if ":" in cv:
-                    cv = cv.split(":", 1)[1].strip()
-                return cv
+                def _sku_color_val(sku):
+                    attrs = str(sku.get("sku_attributes") or "")
+                    cv = attrs.split("/")[0].strip() if attrs else ""
+                    if ":" in cv:
+                        cv = cv.split(":", 1)[1].strip()
+                    return cv
 
-            def _read_row_color(row_el):
-                try:
-                    tds = row_el.find_elements(By.TAG_NAME, "td")
-                    if tds:
-                        raw = tds[0].text or ""
-                        lns = [l.strip() for l in raw.strip().splitlines() if l.strip()]
-                        if lns:
-                            return lns[0]
-                except Exception:
-                    pass
-                return ""
+                def _read_row_color(row_el):
+                    try:
+                        tds = row_el.find_elements(By.TAG_NAME, "td")
+                        if tds:
+                            raw = tds[0].text or ""
+                            lns = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+                            if lns:
+                                return lns[0]
+                    except Exception:
+                        pass
+                    return ""
 
-            def _split_cn_en(text):
-                """Split '白色White' into ('白色', 'White')."""
-                t = (text or "").strip()
-                cn_part = ""
-                en_part = ""
-                for ch in t:
-                    if '\u4e00' <= ch <= '\u9fff':
-                        cn_part += ch
-                    elif ch.isascii() and ch.isalpha():
-                        en_part += ch
-                    elif ch == ' ' and en_part:
-                        en_part += ch
-                return cn_part.strip(), en_part.strip()
+                def _split_cn_en(text):
+                    """Split '白色White' into ('白色', 'White')."""
+                    t = (text or "").strip()
+                    cn_part = ""
+                    en_part = ""
+                    for ch in t:
+                        if '\u4e00' <= ch <= '\u9fff':
+                            cn_part += ch
+                        elif ch.isascii() and ch.isalpha():
+                            en_part += ch
+                        elif ch == ' ' and en_part:
+                            en_part += ch
+                    return cn_part.strip(), en_part.strip()
 
-            def _match_sku_by_color(page_color, _sku_list, used_indices):
-                nc = _norm_color(page_color)
-                if not nc:
-                    return None, -1
-                # Layer 1: direct normalized match
-                for i, sku in enumerate(_sku_list):
-                    if i in used_indices:
-                        continue
-                    if _norm_color(_sku_color_val(sku)) == nc:
-                        return sku, i
-                # Layer 2: extract Chinese/English parts and match via CN_EN dict
-                cn_part, en_part = _split_cn_en(page_color)
-                # 2a: look up Chinese part in CN_EN
-                for cn_key in [page_color.strip(), cn_part]:
-                    cn_en_hit = _CN_EN.get(cn_key)
-                    if cn_en_hit:
-                        nc_en = _norm_color(cn_en_hit)
+                def _match_sku_by_color(page_color, _sku_list, used_indices):
+                    nc = _norm_color(page_color)
+                    if not nc:
+                        return None, -1
+                    # Layer 1: direct normalized match
+                    for i, sku in enumerate(_sku_list):
+                        if i in used_indices:
+                            continue
+                        if _norm_color(_sku_color_val(sku)) == nc:
+                            return sku, i
+                    # Layer 2: extract Chinese/English parts and match via CN_EN dict
+                    cn_part, en_part = _split_cn_en(page_color)
+                    # 2a: look up Chinese part in CN_EN
+                    for cn_key in [page_color.strip(), cn_part]:
+                        cn_en_hit = _CN_EN.get(cn_key)
+                        if cn_en_hit:
+                            nc_en = _norm_color(cn_en_hit)
+                            for i, sku in enumerate(_sku_list):
+                                if i in used_indices:
+                                    continue
+                                if _norm_color(_sku_color_val(sku)) == nc_en:
+                                    return sku, i
+                    # 2b: use English part directly (e.g. page="白色White" -> en_part="White")
+                    if en_part:
+                        nc_en = _norm_color(en_part)
                         for i, sku in enumerate(_sku_list):
                             if i in used_indices:
                                 continue
-                            if _norm_color(_sku_color_val(sku)) == nc_en:
+                            nc_attr = _norm_color(_sku_color_val(sku))
+                            if nc_attr == nc_en:
                                 return sku, i
-                # 2b: use English part directly (e.g. page="白色White" -> en_part="White")
-                if en_part:
-                    nc_en = _norm_color(en_part)
+                    # Layer 3: match via filled_values prefix
+                    filled_vals = getattr(self, "_last_main_spec_filled_values", []) or []
+                    filled_idxs = getattr(self, "_main_spec_filled_sku_indices", []) or []
+                    for fi, fv in enumerate(filled_vals):
+                        nfv = _norm_color(fv)
+                        if nc and nfv and (nfv.startswith(nc) or nc.startswith(nfv) or nc == nfv):
+                            if fi < len(filled_idxs):
+                                si = filled_idxs[fi]
+                                if si not in used_indices and 0 <= si < len(_sku_list):
+                                    return _sku_list[si], si
+                    # Layer 4: substring containment (fuzzy)
                     for i, sku in enumerate(_sku_list):
                         if i in used_indices:
                             continue
                         nc_attr = _norm_color(_sku_color_val(sku))
-                        if nc_attr == nc_en:
+                        if nc_attr and (nc_attr in nc or nc in nc_attr):
                             return sku, i
-                # Layer 3: match via filled_values prefix
-                filled_vals = getattr(self, "_last_main_spec_filled_values", []) or []
-                filled_idxs = getattr(self, "_main_spec_filled_sku_indices", []) or []
-                for fi, fv in enumerate(filled_vals):
-                    nfv = _norm_color(fv)
-                    if nc and nfv and (nfv.startswith(nc) or nc.startswith(nfv) or nc == nfv):
-                        if fi < len(filled_idxs):
-                            si = filled_idxs[fi]
-                            if si not in used_indices and 0 <= si < len(_sku_list):
-                                return _sku_list[si], si
-                # Layer 4: substring containment (fuzzy)
-                for i, sku in enumerate(_sku_list):
-                    if i in used_indices:
-                        continue
-                    nc_attr = _norm_color(_sku_color_val(sku))
-                    if nc_attr and (nc_attr in nc or nc in nc_attr):
-                        return sku, i
-                return None, -1
+                    return None, -1
 
-            row_sku_map = []
-            used_sku_indices = set()
-            for ri, r in enumerate(rows):
-                page_color = _read_row_color(r)
-                matched_sku, matched_idx = _match_sku_by_color(
-                    page_color, sku_list, used_sku_indices)
-                if matched_sku is not None:
-                    used_sku_indices.add(matched_idx)
-                    row_sku_map.append((page_color, matched_sku))
-                    self.log("[MAP] 行{:02d} 页面='{}' -> SKU='{}' | imgs={}".format(
-                        ri + 1, page_color,
-                        matched_sku.get("sku_attributes", ""),
-                        len((matched_sku.get("images") or [])[:max_imgs_per_sku])))
-                else:
-                    row_sku_map.append((page_color, None))
-                    self.log("[MAP] 行{:02d} 页面='{}' -> 未匹配".format(
-                        ri + 1, page_color))
+                used_sku_indices = set()
+                for ri, r in enumerate(rows):
+                    page_color = _read_row_color(r)
+                    matched_sku, matched_idx = _match_sku_by_color(
+                        page_color, sku_list, used_sku_indices)
+                    if matched_sku is not None:
+                        used_sku_indices.add(matched_idx)
+                        row_sku_map.append((page_color, matched_sku))
+                        self.log("[MAP] 行{:02d} 页面='{}' -> SKU='{}' | imgs={}".format(
+                            ri + 1, page_color,
+                            matched_sku.get("sku_attributes", ""),
+                            len((matched_sku.get("images") or [])[:max_imgs_per_sku])))
+                    else:
+                        row_sku_map.append((page_color, None))
+                        self.log("[MAP] 行{:02d} 页面='{}' -> 未匹配".format(
+                            ri + 1, page_color))
 
             for row_idx in range(len(row_sku_map)):
                 self._ensure_not_stopped()
