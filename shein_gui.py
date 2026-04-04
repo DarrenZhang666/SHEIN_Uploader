@@ -906,8 +906,9 @@ class SheinApp(tk.Tk):
                 if self._check_stop_or_return(session_id=session_id):
                     return
 
+                _set_status('识图发品流程：第{}/3次尝试...'.format(attempt), "上品中")
                 if attempt > 1:
-                    _set_status('第{}/3次重试：返回商品发布页...'.format(attempt), "上品中")
+                    _set_status('第{}/3次重试：重新打开商品发布页...'.format(attempt), "上品中")
                     self._pub_log('[RETRY] 选择类目失败，开始第{}/3次重试'.format(attempt))
                     try:
                         self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
@@ -923,42 +924,41 @@ class SheinApp(tk.Tk):
                 except Exception:
                     pass
 
+                step_err = None
                 if self._check_stop_or_return(session_id=session_id):
                     return
                 _set_status('点击"识图发品"按钮（第{}/3次）...'.format(attempt), "上品中")
                 if not self._shein_publisher.click_identify_image_button():
-                    _set_status('未找到"识图发品"按钮', "上品失败")
-                    if dot:
-                        self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
-                    return
+                    step_err = '未找到"识图发品"按钮'
 
-                if self._check_stop_or_return(session_id=session_id):
-                    return
-                _set_status('上传图片到 SHEIN（第{}/3次）...'.format(attempt), "上品中")
-                if not self._shein_publisher.upload_product_image(temp_image):
-                    _set_status('✗ 图片上传失败', "上品失败")
-                    if dot:
-                        self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
-                    return
+                if not step_err:
+                    if self._check_stop_or_return(session_id=session_id):
+                        return
+                    _set_status('上传图片到 SHEIN（第{}/3次）...'.format(attempt), "上品中")
+                    if not self._shein_publisher.upload_product_image(temp_image):
+                        step_err = "图片上传失败"
 
-                if self._check_stop_or_return(session_id=session_id):
-                    return
-                _set_status('选择第一个推荐类目（第{}/3次）...'.format(attempt), "上品中")
-                if self._shein_publisher.select_first_category():
+                if not step_err:
+                    if self._check_stop_or_return(session_id=session_id):
+                        return
+                    _set_status('选择第一个推荐类目（第{}/3次）...'.format(attempt), "上品中")
+                    if not self._shein_publisher.select_first_category():
+                        step_err = "未识别到推荐类目"
+
+                if not step_err:
                     category_selected = True
+                    self._pub_log('[OK] 商品 {} 识图选类目成功（第{}/3次）'.format(target_asin, attempt))
                     break
 
+                self._pub_log('[WARN] 商品 {} 识图第{}/3次失败: {}'.format(target_asin, attempt, step_err))
+
                 if attempt < 3:
-                    _set_status('✗ 选择类目失败，准备第{}/3次重试...'.format(attempt + 1), "上品中")
+                    _set_status('✗ 第{}/3次失败（{}），准备重试...'.format(attempt, step_err), "上品中")
                     continue
 
             if not category_selected:
-                _set_status('✗ 选择类目失败：重试3次仍未识别到类目，返回首页', "上品失败")
-                self._pub_log('[ERROR] 商品 {} 识图发品失败：3次均未识别到类目，返回首页'.format(target_asin))
-                try:
-                    self._shein_publisher.driver.get(SHEIN_HOME_URL)
-                except Exception as home_e:
-                    self._pub_log('[ERROR] 返回首页失败: {}'.format(str(home_e)[:80]))
+                _set_status('✗ 识图发品失败：第3次仍未成功选择类目，归属上品失败', "上品失败")
+                self._pub_log('[ERROR] 商品 {} 识图发品失败：3次重试后仍未成功选择类目，归属上品失败'.format(target_asin))
                 if dot:
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return

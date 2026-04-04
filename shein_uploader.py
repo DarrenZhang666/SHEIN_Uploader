@@ -4460,17 +4460,44 @@ class SheinPublisher:
                     _fd, _tmp_img = tempfile.mkstemp(suffix=img_ext)
                     with os.fdopen(_fd, "wb") as _f:
                         _f.write(img_bytes)
+                if not _tmp_img:
+                    raise Exception("识图图片下载失败")
 
-                if _tmp_img and self.click_identify_image_button():
-                    if self.upload_product_image(_tmp_img):
-                        if self.select_first_category():
-                            if self.click_confirm_button():
-                                cat_selected = True
-                                self.log("[Step2] 识图选类目成功")
+                # 识图流程最多 3 次：任一环节失败，都重新打开商品发布页后重试
+                for attempt in range(1, 4):
+                    if attempt > 1:
+                        self.log("[Step2] 第{}/3次重试：重新打开商品发布页...".format(attempt))
+                        if not _goto_publish():
+                            raise Exception("第{}/3次重试无法重新打开商品发布页".format(attempt))
+                        self._wait_ready_state(timeout=3)
+                        self._dismiss_announcements()
+                        self._wait_ready_state(timeout=2)
+
+                    step_ok = False
+                    try:
+                        if not self.click_identify_image_button():
+                            raise Exception("未找到识图发品按钮")
+                        if not self.upload_product_image(_tmp_img):
+                            raise Exception("上传识图图片失败")
+                        if not self.select_first_category():
+                            raise Exception("未识别到推荐类目")
+                        if not self.click_confirm_button():
+                            raise Exception("点击确认类目失败")
+                        step_ok = True
+                    except Exception as _step_e:
+                        self.log("[Step2] 第{}/3次识图流程失败: {}".format(attempt, _step_e))
+
+                    if step_ok:
+                        cat_selected = True
+                        self.log("[Step2] 识图选类目成功（第{}/3次）".format(attempt))
+                        break
+
+                # 第3次仍失败：直接判定上品失败（不再回退关键词类目）
                 if not cat_selected:
-                    self.log("[Step2] 识图未成功，回退到关键词分类树...")
+                    raise Exception("识图发品失败：重试3次仍未成功选择类目")
             except Exception as _img_e:
-                self.log("[Step2] 识图异常: {}，回退到关键词分类树...".format(_img_e))
+                self.log("[Step2] 识图异常: {}".format(_img_e))
+                raise
             finally:
                 if _tmp_img:
                     try:
