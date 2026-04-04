@@ -3579,6 +3579,8 @@ class SheinPublisher:
                         self.log("[MAP] 行{:02d} 页面='{}' -> 未匹配".format(
                             ri + 1, page_color))
 
+            # 细节图全局进度计数：跨 SKU 连续累加，不在每个 SKU 内重置
+            global_detail_img_idx = 0
             for row_idx in range(len(row_sku_map)):
                 self._ensure_not_stopped()
                 # Re-find rows each iteration to avoid stale DOM references
@@ -3669,7 +3671,9 @@ class SheinPublisher:
                             "arguments[0].style.visibility='visible';"
                             "arguments[0].style.opacity='1';", fi_cur)
                         fi_cur.send_keys(img_path)
-                        self.log("[DEBUG] SKU行 {} 图{}已提交".format(row_idx + 1, img_idx + 1))
+                        global_detail_img_idx += 1
+                        self.log("[DEBUG] SKU行 {} 图{}已提交".format(
+                            row_idx + 1, global_detail_img_idx))
                         self._dismiss_switch_confirm_modal()
                         self._handle_crop_dialog()
                         time.sleep(0.4)
