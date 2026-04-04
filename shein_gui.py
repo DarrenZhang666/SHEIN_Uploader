@@ -910,8 +910,12 @@ class SheinApp(tk.Tk):
         self.status_lbl.config(text='准备打开商品发布页...')
 
         def _init_selenium():
+            def _set_status(text):
+                self.after(0, lambda t=text: self.status_lbl.config(text=t))
+
             try:
-                run_headless = (not is_dev_mode())
+                dev_mode = is_dev_mode()
+                run_headless = (not dev_mode)
                 # 模式切换保护：避免开发者模式误复用之前的无界面实例
                 if self._shein_publisher is not None:
                     old_headless = bool(getattr(self._shein_publisher, "_headless_mode", False))
@@ -927,14 +931,14 @@ class SheinApp(tk.Tk):
                 if self._shein_publisher is not None and (not self._is_publisher_reusable(self._shein_publisher)):
                     self._pub_log('检测到浏览器实例不可复用（可能已被手动关闭），将重新连接')
                     self._shein_publisher = None
-                # 仅开发者模式复用前台实例；非开发者模式强制后台实例
-                if (not run_headless) and self._is_publisher_reusable(self._shein_publisher):
-                    self.status_lbl.config(text='复用当前浏览器并打开发布页...')
-                    self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
-                    time.sleep(2)
-                    self.status_lbl.config(text='正在上传商品图片...')
-                    threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
-                    return
+                # 开发者模式要求可视化全流程，强制重建可见浏览器实例（不复用旧实例）
+                if dev_mode and self._is_publisher_reusable(self._shein_publisher):
+                    self._pub_log("[DEV] 开始上品：重建可视浏览器以便观察全过程")
+                    try:
+                        self._shein_publisher.driver.quit()
+                    except Exception:
+                        pass
+                    self._shein_publisher = None
 
                 # 没有可用实例时，启动/连接浏览器
                 pub = SheinPublisher(log_cb=self._pub_log)
@@ -942,16 +946,34 @@ class SheinApp(tk.Tk):
                                   or self._login_session_account
                                   or self._shein_publisher_account
                                   or 'default')
-                self.status_lbl.config(text='正在启动后台发布实例...' if run_headless else '正在连接或启动浏览器...')
-                pub.start_browser(
-                    account=target_account,
-                    headless=run_headless,
-                    force_new=(not run_headless),
-                )
-                self._shein_publisher = pub
-                self._shein_publisher_account = target_account
-                # 注入已保存登录会话，确保无需重新登录
+                # 先拿到旧会话快照，再启动新实例，避免被新空白实例覆盖
                 login_cookies, login_storage, login_session_storage = self._get_saved_login_session()
+                _set_status('正在启动后台发布实例...' if run_headless else '正在连接或启动浏览器...')
+                launch_account = target_account
+                launch_clone_from = ""
+                try:
+                    pub.start_browser(
+                        account=launch_account,
+                        clone_from_account=launch_clone_from,
+                        headless=run_headless,
+                        force_new=(not run_headless),
+                    )
+                except Exception as first_e:
+                    # 兼容场景：先登录(非Dev)后切Dev，原账号profile可能短时残留锁，重试独立Dev profile。
+                    if not dev_mode:
+                        raise
+                    self._pub_log("[DEV] 首次启动失败，重试独立可视实例: {}".format(str(first_e)[:80]))
+                    launch_account = "{}__dev".format(target_account)
+                    launch_clone_from = target_account
+                    pub.start_browser(
+                        account=launch_account,
+                        clone_from_account=launch_clone_from,
+                        headless=False,
+                        force_new=True,
+                    )
+                self._shein_publisher = pub
+                self._shein_publisher_account = launch_account
+                # 注入已保存登录会话，确保无需重新登录
                 if login_cookies or login_storage or login_session_storage:
                     try:
                         pub.driver.get("https://sso.geiwohuo.com/#/login")
@@ -963,13 +985,13 @@ class SheinApp(tk.Tk):
                     )
                     self._pub_log("已注入登录会话(cookies:{} storage:{})".format(
                         len(login_cookies), len(login_storage)))
-                self.status_lbl.config(text='浏览器已就绪，正在打开商品发布页...')
+                _set_status('浏览器已就绪，正在打开商品发布页...')
                 pub.driver.get(SHEIN_PUBLISH_URL)
                 time.sleep(2)
-                self.status_lbl.config(text='正在上传商品图片...')
+                _set_status('正在上传商品图片...')
                 threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
             except Exception as e:
-                self.status_lbl.config(text='操作失败: ' + str(e)[:40])
+                _set_status('操作失败: ' + str(e)[:40])
                 self._pub_log('操作失败: ' + str(e))
                 self.after(0, lambda err=str(e): messagebox.showerror('失败', err[:100]))
 
