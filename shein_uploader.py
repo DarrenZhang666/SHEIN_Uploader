@@ -889,9 +889,9 @@ class SheinPublisher:
                 self.log("[DEBUG] 未找到带*号的类目属性项")
                 return
 
-            # 若存在「*产品型号」，优先写入与货号一致的值：XYZ-{ASIN}
+            # 若存在「*产品型号」，固定写入：No mode
             try:
-                model_number = "XYZ-{}".format(asin) if asin else ""
+                model_number = "No mode"
                 if model_number:
                     model_items = []
                     try:
