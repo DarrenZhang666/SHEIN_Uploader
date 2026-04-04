@@ -2694,12 +2694,22 @@ class SheinPublisher:
             if not picked_attr:
                 self.log("[WARN] 第1个下拉框未成功选择")
                 return
+            sku_count = 0
+            try:
+                sku_count = len((product_info or {}).get("sku_list", []) or [])
+            except Exception:
+                sku_count = 0
+            sku_limit = sku_count if sku_count > 0 else None
 
             # 兜底规则：分类依据与主规格属性无法匹配时，
             # 第2框固定按 A/B/C 填写（“请选择或自定义”）
             if not attr_match_success:
                 self.log("[INFO] 主规格属性核对失败，启用固定值兜底: A/B/C")
                 fixed_values = ["A", "B", "C"]
+                if sku_limit is not None and len(fixed_values) > sku_limit:
+                    self.log("[INFO] 主规格值数量限制：SKU数={}, 固定值由{}个截断为{}个".format(
+                        sku_limit, len(fixed_values), sku_limit))
+                    fixed_values = fixed_values[:sku_limit]
                 filled_vals = []
                 filled_sku_indices = []
                 used_data_ids = set()
@@ -2811,6 +2821,10 @@ class SheinPublisher:
                 first_val = _extract_target_spec_value(picked_attr)
                 if first_val:
                     all_spec_values = [first_val]
+            if sku_limit is not None and len(all_spec_values) > sku_limit:
+                self.log("[INFO] 主规格值数量限制：SKU数={}, 提取值由{}个截断为{}个".format(
+                    sku_limit, len(all_spec_values), sku_limit))
+                all_spec_values = all_spec_values[:sku_limit]
             # 需求：若 ASIN 未提供可用“规格/分类依据”，则第二个框直接点击并选择首项
             if not all_spec_values:
                 self.log("[INFO] 未提取到ASIN主规格值，按兜底策略选择第2个下拉首项")
