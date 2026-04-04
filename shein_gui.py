@@ -1779,9 +1779,23 @@ class SheinApp(tk.Tk):
             if not img:
                 return
             img.thumbnail((220,220), Image.LANCZOS)
-            self.after(0, lambda im=img, u=url: self._cache_preview_only(im, u))
+            self._safe_ui_after(0, lambda im=img, u=url: self._cache_preview_only(im, u))
         except Exception:
             self._clear_preview_inflight(url)
+
+    def _safe_ui_after(self, delay_ms, callback):
+        """线程安全调度 UI 回调；主循环不可用时静默跳过。"""
+        try:
+            if not int(self.winfo_exists()):
+                return False
+        except Exception:
+            return False
+        try:
+            self.after(delay_ms, callback)
+            return True
+        except Exception:
+            # 常见于窗口关闭后后台线程仍在回调：RuntimeError/TclError
+            return False
 
     def _cache_preview_only(self, img, url):
         try:
@@ -1794,12 +1808,12 @@ class SheinApp(tk.Tk):
         # 命中缓存直接显示，避免重复下载
         cached_photo = self._get_cached_preview_photo(url)
         if cached_photo is not None:
-            self.after(0,lambda p=cached_photo,u=url:self._set_img(p,u))
+            self._safe_ui_after(0, lambda p=cached_photo, u=url: self._set_img(p, u))
             return
         img=download_image(url)
         if img:
             img.thumbnail((220,220),Image.LANCZOS)
-            self.after(0,lambda im=img,u=url:self._cache_and_set_img(im,u))
+            self._safe_ui_after(0, lambda im=img, u=url: self._cache_and_set_img(im, u))
 
     def _cache_and_set_img(self, img, url):
         try:
