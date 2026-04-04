@@ -196,8 +196,35 @@ class SheinApp(tk.Tk):
         tk.Checkbutton(sr,text="全选",variable=self.select_all_var,command=self._sel_all,
             bg=BG_PANEL,fg=TEXT_MAIN,selectcolor=BG_CARD,activebackground=BG_PANEL,
             activeforeground=ACCENT2,font=("Segoe UI",10),cursor="hand2").pack(side="left")
-        self.sel_lbl=tk.Label(sr,text="已选 0",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_PANEL)
-        self.sel_lbl.pack(side="right")
+        self.asin_search_var = tk.StringVar(value="")
+        locate_wrap = tk.Frame(sr, bg=BG_PANEL)
+        locate_wrap.pack(side="right", padx=(6,0))
+        asin_search_entry = tk.Entry(
+            locate_wrap,
+            textvariable=self.asin_search_var,
+            width=10,
+            font=("Consolas", 9),
+            bg=BG_CARD,
+            fg=TEXT_MAIN,
+            insertbackground=TEXT_MAIN,
+            relief="flat",
+            bd=2
+        )
+        asin_search_entry.pack(side="left")
+        tk.Button(
+            locate_wrap,
+            text="定位",
+            bg="#334155",
+            fg=TEXT_MAIN,
+            font=("Segoe UI", 8, "bold"),
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=2,
+            cursor="hand2",
+            command=self._locate_asin_from_query
+        ).pack(side="left", padx=(4,0))
+        asin_search_entry.bind("<Return>", lambda _e: self._locate_asin_from_query())
         # 亚马逊地区选择（仅支持美国）
         rg=tk.Frame(f,bg=BG_PANEL); rg.pack(fill="x",padx=12,pady=(2,4))
         tk.Label(rg,text="抓取地区:",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_PANEL).pack(side="left")
@@ -205,6 +232,8 @@ class SheinApp(tk.Tk):
             values=["美国","其他国家暂不支持"],
             state="readonly",width=12,font=("Segoe UI",9))
         region_cb.pack(side="left",padx=(4,0))
+        self.sel_lbl=tk.Label(rg,text="已选: 0",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_PANEL)
+        self.sel_lbl.pack(side="left",padx=(10,0))
         tk.Frame(f,bg=BORDER,height=1).pack(fill="x",padx=8,pady=(0,4))
         c=tk.Frame(f,bg=BG_PANEL); c.pack(fill="both",expand=True,padx=4,pady=4)
         cv=tk.Canvas(c,bg=BG_PANEL,highlightthickness=0,bd=0)
@@ -506,6 +535,49 @@ class SheinApp(tk.Tk):
             self._upd_cnt()
         self._click(asin)
 
+    def _scroll_to_asin(self, asin):
+        ws = self.asin_row_widgets.get(asin) or {}
+        row = ws.get("row")
+        if row is None or not hasattr(self, "acv"):
+            return
+        try:
+            self.update_idletasks()
+            row_y = row.winfo_y()
+            list_h = max(1, self.lf.winfo_height())
+            canvas_h = max(1, self.acv.winfo_height())
+            target_top = max(0, row_y - canvas_h // 2)
+            frac = min(1.0, max(0.0, float(target_top) / float(list_h)))
+            self.acv.yview_moveto(frac)
+        except Exception:
+            pass
+
+    def _locate_asin_from_query(self):
+        """按输入关键词定位 ASIN 行（不做筛选，仅定位并展示详情）。"""
+        if not self.asin_list:
+            self.status_lbl.config(text="请先导入 ASIN 文件")
+            return
+        q = (self.asin_search_var.get() or "").strip().upper()
+        if not q:
+            self.status_lbl.config(text="请输入 ASIN 或其片段")
+            return
+        # 先精确匹配，再按片段匹配
+        matched = None
+        for asin in self.asin_list:
+            if asin.upper() == q:
+                matched = asin
+                break
+        if matched is None:
+            for asin in self.asin_list:
+                if q in asin.upper():
+                    matched = asin
+                    break
+        if not matched:
+            self.status_lbl.config(text="未找到匹配 ASIN: {}".format(q))
+            return
+        self._click(matched)
+        self._scroll_to_asin(matched)
+        self.status_lbl.config(text="已定位 ASIN: {}".format(matched))
+
     def _placeholder(self,asin):
         for w in self.df.winfo_children(): w.destroy()
         tk.Label(self.df,text="ASIN: {}\n\n尚未抓取。\n请勾选后点击【抓取选中商品】。".format(asin),
@@ -518,7 +590,7 @@ class SheinApp(tk.Tk):
 
     def _upd_cnt(self):
         cnt=sum(1 for v in self.asin_vars.values() if v.get())
-        self.sel_lbl.config(text="已选 {}".format(cnt))
+        self.sel_lbl.config(text="已选: {}".format(cnt))
         if len(self.asin_vars)>0:
             self.select_all_var.set(cnt==len(self.asin_vars))
 
