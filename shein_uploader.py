@@ -40,6 +40,7 @@ class SheinPublisher:
         self._stop_publish = False
         self._browser_account = ""
         self._clone_from_account = ""
+        self._headless_mode = False
         self._last_recognition_state = "idle"
         # 记录主规格实际成功写入顺序，供后续按行上传图片对齐
         self._last_main_spec_filled_values = []
@@ -93,14 +94,20 @@ class SheinPublisher:
         self.wait = self.login_manager.wait
         return ok
 
-    def start_browser(self, account="", clone_from_account=""):
+    def start_browser(self, account="", clone_from_account="", headless=False, force_new=False):
         self.login_manager.driver = self.driver
         self.login_manager.wait = self.wait
-        self.login_manager.start_browser(account=account, clone_from_account=clone_from_account)
+        self.login_manager.start_browser(
+            account=account,
+            clone_from_account=clone_from_account,
+            headless=headless,
+            force_new=force_new,
+        )
         self.driver = self.login_manager.driver
         self.wait = self.login_manager.wait
         self._browser_account = account or ""
         self._clone_from_account = clone_from_account or ""
+        self._headless_mode = bool(headless)
 
     def open_login(self):
         self.login_manager.driver = self.driver
@@ -4572,6 +4579,7 @@ class SheinPublisher:
                             self.start_browser(
                                 account=self._browser_account,
                                 clone_from_account=self._clone_from_account,
+                                headless=self._headless_mode,
                             )
                             driver = self.driver
                             if not _goto_publish():

@@ -815,11 +815,24 @@ class SheinApp(tk.Tk):
 
         def _init_selenium():
             try:
+                run_headless = (not is_dev_mode())
+                # 模式切换保护：避免开发者模式误复用之前的无界面实例
+                if self._shein_publisher is not None:
+                    old_headless = bool(getattr(self._shein_publisher, "_headless_mode", False))
+                    if old_headless != run_headless:
+                        self._pub_log("检测到浏览器模式切换（headless={} -> {}），重建实例".format(
+                            old_headless, run_headless))
+                        try:
+                            if getattr(self._shein_publisher, "driver", None):
+                                self._shein_publisher.driver.quit()
+                        except Exception:
+                            pass
+                        self._shein_publisher = None
                 if self._shein_publisher is not None and (not self._is_publisher_reusable(self._shein_publisher)):
                     self._pub_log('检测到浏览器实例不可复用（可能已被手动关闭），将重新连接')
                     self._shein_publisher = None
-                # 优先复用已登录的浏览器实例（通常是点击“登录 SHEIN”打开的 Edge）
-                if self._is_publisher_reusable(self._shein_publisher):
+                # 仅开发者模式复用前台实例；非开发者模式强制后台实例
+                if (not run_headless) and self._is_publisher_reusable(self._shein_publisher):
                     self.status_lbl.config(text='复用当前浏览器并打开发布页...')
                     self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
                     time.sleep(2)
@@ -833,8 +846,12 @@ class SheinApp(tk.Tk):
                                   or self._login_session_account
                                   or self._shein_publisher_account
                                   or 'default')
-                self.status_lbl.config(text='正在连接或启动浏览器...')
-                pub.start_browser(account=target_account)
+                self.status_lbl.config(text='正在启动后台发布实例...' if run_headless else '正在连接或启动浏览器...')
+                pub.start_browser(
+                    account=target_account,
+                    headless=run_headless,
+                    force_new=(not run_headless),
+                )
                 self._shein_publisher = pub
                 self._shein_publisher_account = target_account
                 # 注入已保存登录会话，确保无需重新登录
@@ -936,6 +953,9 @@ class SheinApp(tk.Tk):
                 """关闭当前实例并新开实例，直达商品发布页。"""
                 try:
                     old_pub = self._shein_publisher
+                    run_headless = bool(
+                        getattr(old_pub, "_headless_mode", (not is_dev_mode()))
+                    )
                     try:
                         if old_pub and getattr(old_pub, "driver", None):
                             old_pub.driver.quit()
@@ -948,7 +968,11 @@ class SheinApp(tk.Tk):
                                       or self._shein_publisher_account
                                       or 'default')
                     pub = SheinPublisher(log_cb=self._pub_log)
-                    pub.start_browser(account=target_account)
+                    pub.start_browser(
+                        account=target_account,
+                        headless=run_headless,
+                        force_new=(not run_headless),
+                    )
                     self._shein_publisher = pub
                     self._shein_publisher_account = target_account
 
@@ -1779,7 +1803,12 @@ class SheinApp(tk.Tk):
             pub = SheinPublisher(log_cb=_worker_log)
             try:
                 # 先克隆已登录账号 profile，再补会话注入，尽量避免每个线程从登录页慢跳转
-                pub.start_browser(account=worker_account, clone_from_account=base_account)
+                pub.start_browser(
+                    account=worker_account,
+                    clone_from_account=base_account,
+                    headless=(not is_dev_mode()),
+                    force_new=is_dev_mode(),
+                )
                 with self._worker_publishers_lock:
                     self._worker_publishers[worker_idx] = pub
                 if not _ensure_publish_page(pub.driver):

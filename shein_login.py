@@ -240,7 +240,7 @@ class SheinLoginManager:
                     continue
         return copied, skipped
 
-    def start_browser(self, account="", clone_from_account=""):
+    def start_browser(self, account="", clone_from_account="", headless=False, force_new=False):
         """启动浏览器。同一账号复用实例，不同账号用独立 profile 和端口。"""
         import threading as _th
         import socket as _socket
@@ -259,7 +259,7 @@ class SheinLoginManager:
         except Exception:
             pass
 
-        if _port_open:
+        if _port_open and (not force_new):
             # 端口有响应 → 并行尝试连接 Edge 和 Chrome
             _edge_result = [None]
             _chrome_result = [None]
@@ -333,6 +333,9 @@ class SheinLoginManager:
             o.add_argument("--remote-debugging-port={}".format(_port))
             o.add_argument("--user-data-dir={}".format(_profile))
             o.add_argument("--profile-directory=Default")
+            if headless:
+                o.add_argument("--headless=new")
+                o.add_argument("--window-size=1366,900")
             o.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
             o.add_experimental_option("useAutomationExtension", False)
             return o
