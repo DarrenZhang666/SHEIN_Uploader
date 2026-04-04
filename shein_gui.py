@@ -8,7 +8,7 @@ from shein_developer_mode import DevModeToggle, is_dev_mode
 class SheinApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SHEIN 商品采集 & 发布工具")
+        self.title("SHEIN 商品采集 & 发布工具V1.0")
         self.geometry("1280x800"); self.minsize(1000,680)
         self.configure(bg=BG_DARK)
         self.asin_list=[]; self.asin_vars={}; self.asin_dots={}; self.asin_status={}
