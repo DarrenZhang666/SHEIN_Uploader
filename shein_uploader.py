@@ -889,51 +889,68 @@ class SheinPublisher:
                 self.log("[DEBUG] 未找到带*号的类目属性项")
                 return
 
-            # 若存在「*产品型号」，固定写入：No mode
+            # 若存在「*产品型号」，固定写入：/
             try:
-                model_number = "No mode"
-                if model_number:
+                model_number = "/"
+                model_items = []
+                try:
+                    root = attr_card if attr_card is not None else driver
+                    model_items = root.find_elements(
+                        By.XPATH,
+                        ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
+                        "and contains(@class,'so-form-required') and "
+                        ".//span[contains(@class,'spmp_style__productAttrLabel') and "
+                        "(contains(normalize-space(.),'产品型号') or contains(normalize-space(.),'Product Model'))]]"
+                    )
+                except Exception:
                     model_items = []
+                for mi in model_items:
                     try:
-                        root = attr_card if attr_card is not None else driver
-                        model_items = root.find_elements(
-                            By.XPATH,
-                            ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
-                            "and contains(@class,'so-form-required') and "
-                            ".//span[contains(@class,'spmp_style__productAttrLabel') and "
-                            "(contains(normalize-space(.),'产品型号') or contains(normalize-space(.),'Product Model'))]]"
-                        )
-                    except Exception:
-                        model_items = []
-                    for mi in model_items:
-                        try:
-                            if not mi.is_displayed():
-                                continue
-                            inp = None
-                            for xp in [
-                                ".//input[@type='text' or not(@type)]",
-                                ".//textarea",
-                            ]:
-                                try:
-                                    for el in mi.find_elements(By.XPATH, xp):
-                                        if el.is_displayed() and el.is_enabled():
-                                            inp = el
-                                            break
-                                except Exception:
-                                    continue
-                                if inp is not None:
-                                    break
-                            if inp is None:
-                                continue
-                            cur_val = (inp.get_attribute("value") or "").strip()
-                            if cur_val:
-                                continue
-                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
-                            self._js_input(inp, model_number)
-                            self.log("[OK] *产品型号已填写: {}".format(model_number))
-                            time.sleep(0.1)
-                        except Exception:
+                        if not mi.is_displayed():
                             continue
+                        inp = None
+                        for xp in [
+                            ".//input[@type='text' or not(@type)]",
+                            ".//textarea",
+                        ]:
+                            try:
+                                for el in mi.find_elements(By.XPATH, xp):
+                                    if el.is_displayed() and el.is_enabled():
+                                        inp = el
+                                        break
+                            except Exception:
+                                continue
+                            if inp is not None:
+                                break
+                        if inp is None:
+                            continue
+                        cur_val = (inp.get_attribute("value") or "").strip()
+                        if cur_val:
+                            continue
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                        # 模拟人工操作：点击输入框 -> 输入 "/" -> 点击空白处确认
+                        try:
+                            inp.click()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", inp)
+                        try:
+                            inp.send_keys(Keys.CONTROL, "a")
+                            inp.send_keys(Keys.BACKSPACE)
+                        except Exception:
+                            pass
+                        inp.send_keys(model_number)
+                        try:
+                            body = driver.find_element(By.TAG_NAME, "body")
+                            driver.execute_script("arguments[0].click();", body)
+                        except Exception:
+                            try:
+                                driver.execute_script("document.body && document.body.click && document.body.click();")
+                            except Exception:
+                                pass
+                        self.log("[OK] *产品型号已填写: {}".format(model_number))
+                        time.sleep(0.15)
+                    except Exception:
+                        continue
             except Exception:
                 pass
 
@@ -950,7 +967,7 @@ class SheinPublisher:
                         ).text.strip()
                     except Exception:
                         pass
-                    # 产品型号单独按“货号值”填写，不走下拉首项逻辑
+                    # 产品型号单独按“/”填写，不走下拉首项逻辑
                     if "产品型号" in label or "Product Model" in label:
                         continue
 
