@@ -4642,90 +4642,48 @@ class SheinPublisher:
             time.sleep(0.5)
         if not _confirm_clicked:
             self.log("[WARN] 未找到'一件翻译并发布'按鈕，弹窗可能未出现或已自动关闭")
-        time.sleep(3)
+            return False
 
-        # Step9: 检测发布结果——页面是否跳转或仍停留在编辑页(表示失败)
-        publish_ok = False
-        try:
-            cur_url = driver.current_url or ""
-            # 成功后通常跳转到商品列表页或显示成功提示
-            if "followsales-pro/list" in cur_url or "commodities-category" in cur_url:
-                publish_ok = True
-            if not publish_ok:
-                # 检查是否有成功提示 Toast/弹窗
-                try:
-                    success_els = driver.find_elements(By.XPATH,
-                        "//*[contains(text(),'发布成功') or contains(text(),'提交成功') "
-                        "or contains(text(),'操作成功') or contains(text(),'success')]")
-                    for _se in success_els:
-                        try:
-                            if _se.is_displayed():
-                                publish_ok = True
-                                break
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-            if not publish_ok:
-                # 检查是否有错误/失败提示（仍停留在编辑页）
-                has_error = False
-                try:
-                    err_els = driver.find_elements(By.XPATH,
-                        "//*[contains(@class,'error') or contains(@class,'danger') "
-                        "or contains(@class,'warning') or contains(@class,'so-alert')]"
-                        "//*[string-length(normalize-space(text()))>0]")
-                    for _ee in err_els:
-                        try:
-                            if _ee.is_displayed():
-                                err_txt = (_ee.text or "").strip()[:80]
-                                if err_txt:
-                                    self.log("[WARN] 页面错误提示: {}".format(err_txt))
-                                    has_error = True
-                                    break
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-                # 检查是否还有"发布商品"按钮（说明仍在编辑页，发布未成功）
-                still_on_edit = False
-                try:
-                    for _xp in [
-                        "//button[.//span[normalize-space(text())='发布商品']]",
-                        "//button[@type='submit' and .//span[normalize-space(text())='发布商品']]",
-                    ]:
-                        for _btn in driver.find_elements(By.XPATH, _xp):
-                            if _btn.is_displayed():
-                                still_on_edit = True
-                                break
-                        if still_on_edit:
-                            break
-                except Exception:
-                    pass
-                if has_error or still_on_edit:
-                    self.log("[ERROR] 发布失败，页面仍停留在编辑页")
-                    if is_dev_mode():
-                        self.log("[DEV] 开发者模式：停留在当前页面，不做跳转")
-                    else:
-                        self.log("[INFO] 正在返回商品发布列表页...")
-                        try:
-                            self._dismiss_switch_confirm_modal()
-                            driver.get(self.PUBLISH_URL)
-                            time.sleep(3)
-                            self._dismiss_announcements()
-                            self.log("[OK] 已返回商品发布列表页，等待下一次发布")
-                        except Exception as nav_e:
-                            self.log("[WARN] 返回发布页异常: {}".format(str(nav_e)[:60]))
-                    return False
-                else:
-                    # 既无成功也无明确失败，视为成功
-                    publish_ok = True
-        except Exception as chk_e:
-            self.log("[DEBUG] 发布结果检测异常: {}".format(str(chk_e)[:60]))
-            publish_ok = True
+        # Step9: 严格按指定文案判定成功
+        # 标准：点击“一件翻译并发布”后，页面出现“提交成功，等待审核中”
+        self.log("检查发布结果文案：提交成功，等待审核中")
+        def _has_submit_success_text():
+            try:
+                els = driver.find_elements(
+                    By.XPATH,
+                    "//*[contains(normalize-space(.),'提交成功') and contains(normalize-space(.),'等待审核中')]"
+                )
+                for _el in els:
+                    try:
+                        if _el.is_displayed():
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return False
+
+        publish_ok = self._wait_until(
+            _has_submit_success_text, timeout=20, interval=1, desc="提交成功文案出现"
+        )
 
         if publish_ok:
             self.log("商品已提交发布")
             return True
+
+        self.log("[ERROR] 发布失败：未检测到“提交成功，等待审核中”文案")
+        if is_dev_mode():
+            self.log("[DEV] 开发者模式：停留在当前页面，不做跳转")
+        else:
+            self.log("[INFO] 正在返回商品发布列表页...")
+            try:
+                self._dismiss_switch_confirm_modal()
+                driver.get(self.PUBLISH_URL)
+                time.sleep(3)
+                self._dismiss_announcements()
+                self.log("[OK] 已返回商品发布列表页，等待下一次发布")
+            except Exception as nav_e:
+                self.log("[WARN] 返回发布页异常: {}".format(str(nav_e)[:60]))
         return False
 
     def _upload_detail_images(self, image_urls):

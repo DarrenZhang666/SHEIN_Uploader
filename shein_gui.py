@@ -27,6 +27,8 @@ class SheinApp(tk.Tk):
         self._driver_ready=False      # 驱动预热完成标志
         self._publish_running=False   # 当前是否正在执行上品流程
         self._publish_session_id = 0  # 上品会话ID（用于中断旧线程）
+        self._worker_publishers = {}  # 多线程worker浏览器实例 {worker_idx: publisher}
+        self._worker_publishers_lock = threading.Lock()
         self._login_cookies = []      # 登录会话快照：cookies
         self._login_storage = {}      # 登录会话快照：localStorage
         self._login_session_storage = {}  # 登录会话快照：sessionStorage
@@ -1092,10 +1094,40 @@ class SheinApp(tk.Tk):
                             break
                         time.sleep(0.5)
                     if _confirm_clicked:
-                        _set_status('✓ 商品已提交发布', "上品成功")
-                        if dot:
-                            self.after(0, lambda a=target_asin: self._set_asin_status(a, "success"))
-                        self._pub_log('商品 {} 已提交发布'.format(target_asin))
+                        _set_status('检查发布结果文案...', "上品中")
+                        _submit_ok = False
+                        _submit_deadline = time.time() + 20
+                        while time.time() < _submit_deadline:
+                            if self._check_stop_or_return(session_id=session_id):
+                                return
+                            try:
+                                _ok_els = _driver.find_elements(
+                                    _By.XPATH,
+                                    "//*[contains(normalize-space(.),'提交成功') and contains(normalize-space(.),'等待审核中')]"
+                                )
+                                for _ok_el in _ok_els:
+                                    try:
+                                        if _ok_el.is_displayed():
+                                            _submit_ok = True
+                                            break
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+                            if _submit_ok:
+                                break
+                            time.sleep(1)
+
+                        if _submit_ok:
+                            _set_status('✓ 商品已提交发布', "上品成功")
+                            if dot:
+                                self.after(0, lambda a=target_asin: self._set_asin_status(a, "success"))
+                            self._pub_log('商品 {} 已提交发布'.format(target_asin))
+                        else:
+                            _set_status('✗ 发布失败：未检测到“提交成功，等待审核中”', "上品失败")
+                            if dot:
+                                self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
+                            self._pub_log('[ERROR] 商品 {} 发布失败：点击一件翻译并发布后未出现“提交成功，等待审核中”'.format(target_asin))
                     else:
                         _set_status('✗ 发布失败：15秒内未检测到"一键翻译并发布"确认弹窗', "上品失败")
                         if dot:
@@ -1444,6 +1476,8 @@ class SheinApp(tk.Tk):
         result_lock = threading.Lock()
         task_lock = threading.Lock()
         self._stop_publish = False  # 确保开始时标志为 False
+        with self._worker_publishers_lock:
+            self._worker_publishers = {}
 
         try:
             max_workers = int(max_workers)
@@ -1568,6 +1602,8 @@ class SheinApp(tk.Tk):
             try:
                 # 先克隆已登录账号 profile，再补会话注入，尽量避免每个线程从登录页慢跳转
                 pub.start_browser(account=worker_account, clone_from_account=base_account)
+                with self._worker_publishers_lock:
+                    self._worker_publishers[worker_idx] = pub
                 if not _ensure_publish_page(pub.driver):
                     self._pub_log('[W{}] 会话注入后仍未进入发布页'.format(worker_idx))
                 else:
@@ -1611,12 +1647,32 @@ class SheinApp(tk.Tk):
             finally:
                 try:
                     if pub.driver:
-                        if is_dev_mode() and worker_has_failure:
+                        stop_requested = bool(
+                            self._stop_publish or
+                            (session_id is not None and session_id != self._publish_session_id)
+                        )
+                        if stop_requested:
+                            if is_dev_mode():
+                                self._pub_log('[W{}] [DEV] 停止后保留当前页面'.format(worker_idx))
+                            else:
+                                try:
+                                    pub.cleanup_after_stop()
+                                except Exception:
+                                    pass
+                                try:
+                                    pub.driver.get(SHEIN_PUBLISH_URL)
+                                    self._pub_log('[W{}] [STOP] 已返回商品发布页'.format(worker_idx))
+                                except Exception as _stop_nav_e:
+                                    self._pub_log('[W{}] [STOP] 返回发布页失败: {}'.format(worker_idx, str(_stop_nav_e)[:60]))
+                        elif is_dev_mode() and worker_has_failure:
                             self._pub_log('[W{}] [DEV] 检测到失败，保留当前浏览器页面用于排查'.format(worker_idx))
                         else:
                             pub.driver.quit()
                 except Exception:
                     pass
+                finally:
+                    with self._worker_publishers_lock:
+                        self._worker_publishers.pop(worker_idx, None)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_worker_loop, i + 1) for i in range(max_workers)]
@@ -1652,15 +1708,81 @@ class SheinApp(tk.Tk):
             self._publish_session_id += 1  # 使当前会话立即失效，强制旧线程退出
             self._stop_publish = True
             stopped_pub = self._shein_publisher
+            with self._worker_publishers_lock:
+                worker_pubs = list(self._worker_publishers.values())
             try:
                 if stopped_pub is not None:
                     setattr(stopped_pub, '_stop_publish', True)
             except Exception:
                 pass
+            for _wp in worker_pubs:
+                try:
+                    if _wp is not None:
+                        setattr(_wp, '_stop_publish', True)
+                except Exception:
+                    pass
             # 同时清理抓取线程
             self._fetch_thread = None
             self.progress.stop()
             self.status_lbl.config(text="停止抓取信息...")
+
+            if worker_pubs:
+                def _stop_workers_after_stop():
+                    time.sleep(0.6)
+                    try:
+                        if stop_session_id != (self._publish_session_id - 1):
+                            return
+                        if is_dev_mode():
+                            self._pub_log("[DEV] 开发者模式：多线程停止后保留所有线程当前页面")
+                            self.after(0, lambda: self.status_lbl.config(
+                                text="已停止（开发者模式：线程页面保持不变）"))
+                            return
+                        self._pub_log("[STOP] 多线程停止：所有线程返回商品发布页...")
+                        with self._worker_publishers_lock:
+                            latest = list(self._worker_publishers.values())
+                        # 合并“停止瞬间快照”与“当前最新列表”，避免遗漏
+                        all_worker_pubs = []
+                        seen_ids = set()
+                        for wp in (worker_pubs + latest):
+                            if wp is None:
+                                continue
+                            _id = id(wp)
+                            if _id in seen_ids:
+                                continue
+                            seen_ids.add(_id)
+                            all_worker_pubs.append(wp)
+                        ok_cnt = 0
+                        total_cnt = len(all_worker_pubs)
+                        for i, wp in enumerate(all_worker_pubs, 1):
+                            try:
+                                drv = getattr(wp, "driver", None)
+                                if drv is None:
+                                    continue
+                                try:
+                                    wp.cleanup_after_stop()
+                                except Exception:
+                                    pass
+                                jumped = False
+                                for _ in range(2):
+                                    try:
+                                        drv.get(SHEIN_PUBLISH_URL)
+                                        jumped = True
+                                        break
+                                    except Exception:
+                                        time.sleep(0.4)
+                                if jumped:
+                                    ok_cnt += 1
+                                else:
+                                    self._pub_log("[STOP] 线程{}返回发布页失败: driver.get异常".format(i))
+                            except Exception as e:
+                                self._pub_log("[STOP] 线程{}返回发布页失败: {}".format(i, str(e)[:60]))
+                        self.after(0, lambda c=ok_cnt, t=total_cnt: self.status_lbl.config(
+                            text="已停止上品，{}/{} 个线程已返回商品发布页".format(c, t)))
+                    except Exception as e:
+                        self._pub_log("[STOP] 多线程停止收尾失败: {}".format(str(e)[:60]))
+
+                threading.Thread(target=_stop_workers_after_stop, daemon=True).start()
+                return
 
             def _go_home_after_stop():
                 time.sleep(1.0)
