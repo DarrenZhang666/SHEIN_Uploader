@@ -889,6 +889,54 @@ class SheinPublisher:
                 self.log("[DEBUG] 未找到带*号的类目属性项")
                 return
 
+            # 若存在「*产品型号」，优先写入与货号一致的值：XYZ-{ASIN}
+            try:
+                model_number = "XYZ-{}".format(asin) if asin else ""
+                if model_number:
+                    model_items = []
+                    try:
+                        root = attr_card if attr_card is not None else driver
+                        model_items = root.find_elements(
+                            By.XPATH,
+                            ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
+                            "and contains(@class,'so-form-required') and "
+                            ".//span[contains(@class,'spmp_style__productAttrLabel') and "
+                            "(contains(normalize-space(.),'产品型号') or contains(normalize-space(.),'Product Model'))]]"
+                        )
+                    except Exception:
+                        model_items = []
+                    for mi in model_items:
+                        try:
+                            if not mi.is_displayed():
+                                continue
+                            inp = None
+                            for xp in [
+                                ".//input[@type='text' or not(@type)]",
+                                ".//textarea",
+                            ]:
+                                try:
+                                    for el in mi.find_elements(By.XPATH, xp):
+                                        if el.is_displayed() and el.is_enabled():
+                                            inp = el
+                                            break
+                                except Exception:
+                                    continue
+                                if inp is not None:
+                                    break
+                            if inp is None:
+                                continue
+                            cur_val = (inp.get_attribute("value") or "").strip()
+                            if cur_val:
+                                continue
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                            self._js_input(inp, model_number)
+                            self.log("[OK] *产品型号已填写: {}".format(model_number))
+                            time.sleep(0.1)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
             auto_filled_count = 0
             for item in required_items:
                 try:
@@ -902,6 +950,9 @@ class SheinPublisher:
                         ).text.strip()
                     except Exception:
                         pass
+                    # 产品型号单独按“货号值”填写，不走下拉首项逻辑
+                    if "产品型号" in label or "Product Model" in label:
+                        continue
 
                     # 已有值则跳过
                     has_value = False
