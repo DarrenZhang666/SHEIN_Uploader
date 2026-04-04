@@ -33,6 +33,13 @@ class SheinApp(tk.Tk):
         self._login_storage = {}      # 登录会话快照：localStorage
         self._login_session_storage = {}  # 登录会话快照：sessionStorage
         self._login_session_account = ""  # 最近一次登录会话所属账号
+        # 详情主图缓存（URL -> PhotoImage），减少切换商品时重复下载
+        self._preview_photo_cache = {}
+        self._preview_cache_order = []
+        self._preview_cache_max = 80
+        self._preview_cache_lock = threading.Lock()
+        self._current_preview_url = ""
+        self._preview_inflight = set()
         
         # 初始化日志文件
         self._init_log_file()
@@ -270,9 +277,11 @@ class SheinApp(tk.Tk):
         color_map = {
             "imported": "#ffffff",
             "fetching": YELLOW,
-            "fetch_success": GREEN,
+            # 抓取成功使用与界面主蓝区分的亮蓝色
+            "fetch_success": "#38bdf8",
             "fetch_fail": RED,
             "sku_too_many": RED,
+            "publishing": YELLOW,
             "success": GREEN,
             "fail": RED,
             "pending": "#ffffff",
@@ -876,6 +885,8 @@ class SheinApp(tk.Tk):
                 return
             self._log_publish_progress(target_asin, "开始上品")
             self._log_publish_progress(target_asin, "上品中")
+            if dot:
+                self.after(0, lambda a=target_asin: self._set_asin_status(a, "publishing"))
             _set_status = lambda msg, stage=None: self._set_publish_status(target_asin, msg, stage)
 
             try:
@@ -1390,8 +1401,16 @@ class SheinApp(tk.Tk):
         tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=10)
         self._btn(self.df,"发布此商品到 SHEIN",ACCENT,
             lambda i=info:self._publish_direct(i)).pack(anchor="w",padx=20,pady=(0,16))
-        if info.get("image_url"):
-            threading.Thread(target=self._load_img,args=(info["image_url"],),daemon=True).start()
+        preview_url = info.get("image_url") or ""
+        self._current_preview_url = preview_url
+        if preview_url:
+            cached_photo = self._get_cached_preview_photo(preview_url)
+            if cached_photo is not None:
+                self._set_img(cached_photo, preview_url)
+            else:
+                threading.Thread(target=self._load_img,args=(preview_url,),daemon=True).start()
+            # 预加载相邻商品主图，提升连续切换速度
+            self._prefetch_adjacent_previews(info.get("asin"))
         
         # 显示 SKU 维度信息（每个SKU展示5张图）
         sku_list = info.get("sku_list", [])
@@ -1428,14 +1447,104 @@ class SheinApp(tk.Tk):
         else:
             tk.Label(self.df,text="暂无 SKU 数据",font=("Segoe UI",10),fg=TEXT_SUB,bg=BG_PANEL).pack(anchor="w",padx=24,pady=4)
 
+    def _get_cached_preview_photo(self, url):
+        with self._preview_cache_lock:
+            photo = self._preview_photo_cache.get(url)
+            if photo is not None:
+                try:
+                    self._preview_cache_order.remove(url)
+                except Exception:
+                    pass
+                self._preview_cache_order.append(url)
+            return photo
+
+    def _put_cached_preview_photo(self, url, photo):
+        with self._preview_cache_lock:
+            self._preview_photo_cache[url] = photo
+            try:
+                self._preview_cache_order.remove(url)
+            except Exception:
+                pass
+            self._preview_cache_order.append(url)
+            while len(self._preview_cache_order) > self._preview_cache_max:
+                old_url = self._preview_cache_order.pop(0)
+                self._preview_photo_cache.pop(old_url, None)
+
+    def _try_mark_preview_inflight(self, url):
+        with self._preview_cache_lock:
+            if url in self._preview_inflight:
+                return False
+            self._preview_inflight.add(url)
+            return True
+
+    def _clear_preview_inflight(self, url):
+        with self._preview_cache_lock:
+            self._preview_inflight.discard(url)
+
+    def _prefetch_adjacent_previews(self, asin):
+        if not asin or asin not in self.asin_list:
+            return
+        try:
+            idx = self.asin_list.index(asin)
+        except Exception:
+            return
+        neighbors = []
+        if idx - 1 >= 0:
+            neighbors.append(self.asin_list[idx - 1])
+        if idx + 1 < len(self.asin_list):
+            neighbors.append(self.asin_list[idx + 1])
+
+        for nb_asin in neighbors:
+            info = self.product_cache.get(nb_asin) or {}
+            nb_url = info.get("image_url") or ""
+            if not nb_url:
+                continue
+            if self._get_cached_preview_photo(nb_url) is not None:
+                continue
+            if not self._try_mark_preview_inflight(nb_url):
+                continue
+            threading.Thread(target=self._prefetch_img_worker, args=(nb_url,), daemon=True).start()
+
+    def _prefetch_img_worker(self, url):
+        try:
+            img = download_image(url)
+            if not img:
+                return
+            img.thumbnail((220,220), Image.LANCZOS)
+            self.after(0, lambda im=img, u=url: self._cache_preview_only(im, u))
+        except Exception:
+            self._clear_preview_inflight(url)
+
+    def _cache_preview_only(self, img, url):
+        try:
+            ph = ImageTk.PhotoImage(img)
+            self._put_cached_preview_photo(url, ph)
+        finally:
+            self._clear_preview_inflight(url)
+
     def _load_img(self,url):
+        # 命中缓存直接显示，避免重复下载
+        cached_photo = self._get_cached_preview_photo(url)
+        if cached_photo is not None:
+            self.after(0,lambda p=cached_photo,u=url:self._set_img(p,u))
+            return
         img=download_image(url)
         if img:
             img.thumbnail((220,220),Image.LANCZOS)
-            ph=ImageTk.PhotoImage(img)
-            self.after(0,lambda p=ph:self._set_img(p))
+            self.after(0,lambda im=img,u=url:self._cache_and_set_img(im,u))
 
-    def _set_img(self,photo):
+    def _cache_and_set_img(self, img, url):
+        try:
+            ph=ImageTk.PhotoImage(img)
+        except Exception:
+            return
+        self._put_cached_preview_photo(url, ph)
+        self._set_img(ph, url)
+
+    def _set_img(self,photo,url=None):
+        # 防止异步加载时串图：仅显示当前选中商品对应图片
+        if url and url != self._current_preview_url:
+            return
         self._photo_ref=photo
         if hasattr(self,"img_lbl"): self.img_lbl.config(image=photo,text="")
 
@@ -1619,6 +1728,7 @@ class SheinApp(tk.Tk):
                     if asin is None:
                         return
                     self._log_publish_progress(asin, "开始上品")
+                    self.after(0, lambda a=asin: self._set_asin_status(a, "publishing"))
 
                     info = self.product_cache.get(asin, {})
                     if not info or not info.get('image_url'):
