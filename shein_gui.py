@@ -740,14 +740,9 @@ class SheinApp(tk.Tk):
         # 优先使用勾选的 ASIN；未勾选时回退到当前点击项
         selected_asins = [a for a, v in self.asin_vars.items() if v.get()]
         if len(selected_asins) > 1:
-            valid_asins = []
-            for asin in selected_asins:
-                info = self.product_cache.get(asin)
-                if info and info.get('image_url'):
-                    valid_asins.append(asin)
-            if not valid_asins:
-                messagebox.showwarning('提示', '所选商品都没有图片信息，请先抓取商品')
-                return
+            # 并发模式按“全部选中项”执行，缺图项在 worker 内计为失败，
+            # 确保结果弹窗以“选中总数”为准，不会因预过滤而提前结束。
+            publish_asins = list(selected_asins)
             try:
                 max_workers = int(self.fetch_workers.get())
             except Exception:
@@ -758,8 +753,14 @@ class SheinApp(tk.Tk):
             current_session_id = self._publish_session_id
             self._stop_publish = False
             self.progress.start(12)
-            self.status_lbl.config(text='并发上品中：{} 个商品（{}线程）...'.format(len(valid_asins), min(max_workers, len(valid_asins))))
-            threading.Thread(target=self._publish_worker, args=(valid_asins, max_workers, current_session_id), daemon=True).start()
+            valid_count = 0
+            for asin in publish_asins:
+                info = self.product_cache.get(asin)
+                if info and info.get('image_url'):
+                    valid_count += 1
+            self.status_lbl.config(text='并发上品中：{} 个商品（可发布 {} 个，{}线程）...'.format(
+                len(publish_asins), valid_count, min(max_workers, len(publish_asins))))
+            threading.Thread(target=self._publish_worker, args=(publish_asins, max_workers, current_session_id), daemon=True).start()
             return
 
         target_asin = selected_asins[0] if selected_asins else self.current_asin
@@ -921,23 +922,53 @@ class SheinApp(tk.Tk):
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
+            def _restart_instance_and_open_publish():
+                """关闭当前实例并新开实例，直达商品发布页。"""
+                try:
+                    old_pub = self._shein_publisher
+                    try:
+                        if old_pub and getattr(old_pub, "driver", None):
+                            old_pub.driver.quit()
+                    except Exception:
+                        pass
+                    self._shein_publisher = None
+
+                    target_account = (self.shein_account.get().strip()
+                                      or self._login_session_account
+                                      or self._shein_publisher_account
+                                      or 'default')
+                    pub = SheinPublisher(log_cb=self._pub_log)
+                    pub.start_browser(account=target_account)
+                    self._shein_publisher = pub
+                    self._shein_publisher_account = target_account
+
+                    login_cookies, login_storage, login_session_storage = self._get_saved_login_session()
+                    if login_cookies or login_storage or login_session_storage:
+                        try:
+                            pub.driver.get("https://sso.geiwohuo.com/#/login")
+                            time.sleep(0.5)
+                        except Exception:
+                            pass
+                        self._inject_login_session_to_driver(
+                            pub.driver, login_cookies, login_storage, login_session_storage
+                        )
+                    pub.driver.get(SHEIN_PUBLISH_URL)
+                    time.sleep(2)
+                    try:
+                        pub._dismiss_announcements()
+                    except Exception:
+                        pass
+                    return True
+                except Exception as _re_e:
+                    self._pub_log('[ERROR] 重开实例失败: {}'.format(str(_re_e)[:80]))
+                    return False
+
             category_selected = False
             for attempt in range(1, 4):
                 if self._check_stop_or_return(session_id=session_id):
                     return
 
                 _set_status('识图发品流程：第{}/3次尝试...'.format(attempt), "上品中")
-                if attempt > 1:
-                    _set_status('第{}/3次重试：重新打开商品发布页...'.format(attempt), "上品中")
-                    self._pub_log('[RETRY] 选择类目失败，开始第{}/3次重试'.format(attempt))
-                    try:
-                        self._shein_publisher.driver.get(SHEIN_PUBLISH_URL)
-                        time.sleep(2)
-                    except Exception as nav_e:
-                        self._pub_log('[ERROR] 重试时返回商品发布页失败: {}'.format(str(nav_e)[:80]))
-                        if dot:
-                            self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
-                        return
 
                 try:
                     self._shein_publisher._dismiss_announcements()
@@ -971,14 +1002,31 @@ class SheinApp(tk.Tk):
                     break
 
                 self._pub_log('[WARN] 商品 {} 识图第{}/3次失败: {}'.format(target_asin, attempt, step_err))
+                no_cat_hint = False
+                try:
+                    no_cat_hint = bool(self._shein_publisher.has_no_category_recommend_hint())
+                except Exception:
+                    no_cat_hint = False
 
-                if attempt < 3:
-                    _set_status('✗ 第{}/3次失败（{}），准备重试...'.format(attempt, step_err), "上品中")
+                if no_cat_hint and attempt < 3:
+                    _set_status('✗ 识图暂无分类推荐，第{}/3次：重开实例后重试...'.format(attempt), "上品中")
+                    self._pub_log('[RETRY] 命中“暂无分类推荐”，开始第{}/3次重试'.format(attempt + 1))
+                    if not _restart_instance_and_open_publish():
+                        _set_status('✗ 重开实例失败，归属上品失败', "上品失败")
+                        if dot:
+                            self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
+                        return
                     continue
+                if no_cat_hint and attempt >= 3:
+                    break
+                _set_status('✗ 识图流程失败（{}），归属上品失败'.format(step_err), "上品失败")
+                if dot:
+                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
+                return
 
             if not category_selected:
-                _set_status('✗ 识图发品失败：第3次仍未成功选择类目，归属上品失败', "上品失败")
-                self._pub_log('[ERROR] 商品 {} 识图发品失败：3次重试后仍未成功选择类目，归属上品失败'.format(target_asin))
+                _set_status('✗ 识图发品失败：3次均提示“暂无分类推荐”，归属上品失败', "上品失败")
+                self._pub_log('[ERROR] 商品 {} 识图发品失败：3次均提示“暂无分类推荐”'.format(target_asin))
                 if dot:
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
@@ -1801,14 +1849,20 @@ class SheinApp(tk.Tk):
                 except Exception as e:
                     self._pub_log('并发线程异常: {}'.format(str(e)[:80]))
 
-        if self._stop_publish:
+        stopped = bool(self._stop_publish)
+        if stopped:
             self._pub_log("上品已停止，共完成 {}/{}".format(done, total))
-        self.after(0, lambda: self._publish_done(success_list, fail_list))
+        show_popup = (not stopped and done >= total)
+        self.after(0, lambda s=success_list, f=fail_list, t=total, sp=show_popup:
+            self._publish_done(s, f, expected_total=t, show_popup=sp))
 
-    def _publish_done(self, success_list, fail_list):
+    def _publish_done(self, success_list, fail_list, expected_total=None, show_popup=True):
         self.progress.stop()
         self._stop_publish = False  # 重置停止标志，允许再次上品
         total = len(success_list) + len(fail_list)
+        if expected_total is not None and total < expected_total:
+            self.status_lbl.config(text="上品进行中：已完成 {}/{}，等待其余任务结束...".format(total, expected_total))
+            return
         msg = "上品完成！\n\n成功：{} 个\n失败：{} 个\n共计：{} 个".format(
             len(success_list), len(fail_list), total)
         if fail_list:
@@ -1818,7 +1872,8 @@ class SheinApp(tk.Tk):
                 msg += "\n  ...(共 {} 个失败)".format(len(fail_list))
         self.status_lbl.config(text="上品完成 成功:{} 失败:{}".format(
             len(success_list), len(fail_list)))
-        messagebox.showinfo("上品结果", msg)
+        if show_popup:
+            messagebox.showinfo("上品结果", msg)
 
     def _stop_publish_action(self):
         """停止上品进程。"""

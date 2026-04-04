@@ -9,8 +9,6 @@ import io
 import json
 import time
 import os
-import difflib
-import threading
 import requests
 try:
     import cloudscraper
@@ -147,40 +145,6 @@ HEADERS_POOL = [
 # 可选代理池（留空则不使用，格式: ["http://user:pass@host:port"]）
 PROXY_POOL = []
 
-# 自适应限流状态（按域名记录）
-_ANTI_BLOCK_LOCK = threading.Lock()
-_ANTI_BLOCK_STATE = {}
-
-
-def _anti_block_state(domain):
-    with _ANTI_BLOCK_LOCK:
-        st = _ANTI_BLOCK_STATE.get(domain)
-        if st is None:
-            st = {"next_allowed": 0.0, "penalty": 0.0, "blocked_streak": 0}
-            _ANTI_BLOCK_STATE[domain] = st
-        return st
-
-
-def _adaptive_sleep_before_request(domain):
-    st = _anti_block_state(domain)
-    now = time.time()
-    wait = max(0.0, float(st.get("next_allowed", 0.0)) - now)
-    if wait > 0:
-        time.sleep(min(wait, 12.0))
-
-
-def _report_request_result(domain, blocked=False):
-    st = _anti_block_state(domain)
-    now = time.time()
-    if blocked:
-        st["blocked_streak"] = int(st.get("blocked_streak", 0)) + 1
-        st["penalty"] = min(18.0, float(st.get("penalty", 0.0)) * 1.6 + 1.2)
-        st["next_allowed"] = now + float(st["penalty"]) + random.uniform(0.4, 1.8)
-    else:
-        st["blocked_streak"] = 0
-        st["penalty"] = max(0.0, float(st.get("penalty", 0.0)) * 0.55 - 0.1)
-        st["next_allowed"] = now + random.uniform(0.05, 0.35)
-
 
 def _get_proxy():
     """随机返回代理配置字典，PROXY_POOL 为空时返回 None。"""
@@ -207,31 +171,17 @@ def _make_browser_cookies(domain):
 
 
 def _is_blocked(status_code, text):
-    """判断响应是否被反爬拦截。
-    仅在页面确实是拦截页（无商品内容）时返回 True。
-    """
-    if status_code in (429, 503):
-        return True
-    if status_code == 404 and "automated" in text.lower():
-        return True
+    """判断响应是否被反爬拦截。"""
     tl = text.lower()
-    # 如果页面有正常商品内容，直接认为未被拦截
-    if "productTitle" in text or "acrCustomerReviewText" in text:
-        return False
-    # 没有商品内容时，检查拦截特征
-    if "captcha" in tl:
-        return True
-    if "robot check" in tl:
-        return True
-    if "api-services-support@amazon.com" in tl:
-        return True
-    if "sorry, we just need to make sure" in tl:
-        return True
-    if "automated access" in tl:
-        return True
-    if "to discuss automated access" in tl:
-        return True
-    return False
+    return (
+        status_code == 503
+        or (status_code == 404 and "automated" in tl)
+        or "captcha" in tl
+        or ("sorry" in tl and "automated" in tl)
+        or "robot check" in tl
+        or "api-services-support@amazon.com" in tl
+    )
+
 
 def _get_with_retry(session, url, max_attempts=3, base_timeout=12):
     """
@@ -240,30 +190,21 @@ def _get_with_retry(session, url, max_attempts=3, base_timeout=12):
     """
     shuffled = random.sample(HEADERS_POOL, len(HEADERS_POOL))
     attempts = min(max_attempts, len(shuffled))
-    domain = url.split("/")[2]
     for attempt in range(attempts):
         hdrs = shuffled[attempt].copy()
-        hdrs["Referer"] = "https://{}/".format(domain)
+        hdrs["Referer"] = "https://{}/".format(url.split("/")[2])
         proxies = _get_proxy()
-
-        # 自适应限流：先等待到可请求窗口
-        _adaptive_sleep_before_request(domain)
-
         if attempt > 0:
-            # 重试退避（失败越多等待越久）
-            wait = min((2 ** attempt) + random.uniform(0.35, 1.2), 12.0)
+            # 短暂退避：避免超长等待
+            wait = min(2 ** attempt + random.uniform(0.3, 1.0), 8.0)
             time.sleep(wait)
         try:
             r = session.get(url, headers=hdrs, proxies=proxies, timeout=base_timeout)
-            blocked = _is_blocked(r.status_code, r.text)
-            _report_request_result(domain, blocked=blocked)
-            if not blocked:
+            if not _is_blocked(r.status_code, r.text):
                 return r, hdrs
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
-            _report_request_result(domain, blocked=True)
             continue
         except Exception:
-            _report_request_result(domain, blocked=True)
             continue
     return None, None
 
@@ -554,144 +495,29 @@ def _build_variation_value_maps(page_text):
     return dimension_names, value_display_map
 
 
-def _extract_color_initial_images(page_text, max_count=8):
-    """
-    从亚马逊页面的单引号JS格式中提取 colorImages.initial 数组，
-    即当前颜色的所有角度图片（MAIN/PT01/PT02...）。
-    返回 [url, ...] 列表。
-    """
-    idx = page_text.find("colorImages'")
-    if idx < 0:
-        return []
-    init_idx = page_text.find("'initial'", idx)
-    if init_idx < 0 or init_idx - idx > 500:
-        return []
-    arr_start = page_text.find('[', init_idx)
-    if arr_start < 0:
-        return []
-    depth = 0
-    in_str = False
-    esc = False
-    str_char = None
-    end = -1
-    for i in range(arr_start, min(arr_start + 200000, len(page_text))):
-        ch = page_text[i]
-        if esc:
-            esc = False
-            continue
-        if ch == '\\':
-            esc = True
-            continue
-        if not in_str and ch in ('"', "'"):
-            in_str = True
-            str_char = ch
-            continue
-        if in_str and ch == str_char:
-            in_str = False
-            continue
-        if in_str:
-            continue
-        if ch == '[':
-            depth += 1
-        elif ch == ']':
-            depth -= 1
-            if depth == 0:
-                end = i
-                break
-    if end < 0:
-        return []
-    try:
-        items = json.loads(page_text[arr_start:end + 1])
-    except Exception:
-        return []
-    urls = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        u = it.get("hiRes") or it.get("large") or it.get("mainUrl")
-        if isinstance(u, str) and u and u not in urls:
-            urls.append(_to_sx1500(u))
-            if len(urls) >= max_count:
-                break
-    return urls
-
-
 def _extract_color_images_map(page_text):
-    """
-    从页面中提取按颜色分组的图片映射。
-    解析双引号JSON格式的 colorImages 块（key 格式为 'Color Size'，如 'Black 65L'），
-    将颜色部分（去掉尺码后缀）作为 key 存入结果。
-    返回 {color_name: [url, ...]} 字典，每色至少1张 hiRes 主图。
-    """
+    color_images = _extract_json_object_by_key(page_text, "colorImages")
+    if not isinstance(color_images, dict):
+        return {}
+
     result = {}
-    for m in re.finditer(r'colorImages"\s*:\s*\{', page_text):
-        brace_start = page_text.find('{', m.start())
-        depth = 0
-        in_str = False
-        esc = False
-        str_char = None
-        end = -1
-        for i in range(brace_start, min(brace_start + 500000, len(page_text))):
-            ch = page_text[i]
-            if esc:
-                esc = False
-                continue
-            if ch == '\\':
-                esc = True
-                continue
-            if not in_str and ch in ('"', "'"):
-                in_str = True
-                str_char = ch
-                continue
-            if in_str and ch == str_char:
-                in_str = False
-                continue
-            if in_str:
-                continue
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end < 0:
-            continue
-        try:
-            color_map = json.loads(page_text[brace_start:end + 1])
-        except Exception:
-            continue
-        for full_key, items in color_map.items():
-            # full_key 形如 "Black 65L" 或 "Jute&Black 96L"
-            # 提取颜色部分：去掉末尾的尺码（数字+字母，如 65L/96L 或 S/M/XL）
-            color_key = re.sub(
-                r'\s+\d+[A-Za-z]+$|\s+(XS|S|M|L|XL|XXL|3XL)$',
-                '',
-                full_key.strip()
-            ).strip()
-            if not color_key:
-                color_key = full_key.strip()
-            if not isinstance(items, list):
-                continue
+    for color_key, items in color_images.items():
+        urls = []
+        if isinstance(items, list):
             for it in items:
                 if not isinstance(it, dict):
                     continue
-                u = it.get("hiRes") or it.get("large") or it.get("mainUrl")
+                u = (it.get("hiRes") or it.get("large") or it.get("mainUrl")
+                     or it.get("thumb") or it.get("variant"))
                 if isinstance(u, str) and u:
-                    uu = _to_sx1500(u)
-                    # 以颜色名存储（去重）
-                    if color_key not in result:
-                        result[color_key] = []
-                    if uu not in result[color_key]:
-                        result[color_key].append(uu)
-                    # 同时以完整 key 存储，便于精确匹配
-                    fk = full_key.strip()
-                    if fk not in result:
-                        result[fk] = []
-                    if uu not in result[fk]:
-                        result[fk].append(uu)
-        break  # 只需解析第一个双引号JSON格式的 colorImages
+                    uu = _to_sx1500(u) if "images/I/" in u else u
+                    if uu not in urls:
+                        urls.append(uu)
+        if urls:
+            result[str(color_key).strip()] = urls
     return result
+
+
 
 def _extract_non_color_specs(soup):
     """
@@ -758,158 +584,16 @@ def _extract_color_only_asins(soup):
     return result
 
 
-_SHEIN_OFFICIAL_COLORS = {
-    "apricot", "blackandwhite", "burgundy", "ginger", "hotpink",
-    "orange", "royalblue", "armygreen", "blue", "camel", "gold", "khaki",
-    "pink", "silver", "beige", "bronze", "champagne", "black", "brown",
-    "clear", "green", "grey", "gray", "maroon", "multicolor", "purple",
-    "red", "white", "yellow",
-    "coralpink", "darkgrey", "darkgray", "burntorange", "redwood",
-    "lilacpurple", "coffeebrown", "watermelonpink", "violetpurple",
-    "darkgreen", "coralorange", "cadetblue", "mintblue", "babypink",
-    "dustypurple", "mintgreen", "rustyrose", "mustardyellow", "dustypink",
-    "rustbrown", "redviolet", "chocolatebrown", "lightgrey", "lightgray",
-    "rosered", "babyblue", "dustyblue", "tealblue", "mauvepurple",
-    "mochabrown", "limegreen", "redandwhite", "olivegreen", "navyblue",
-    "blueandwhite",
-}
-
-
-def _norm_color_for_match(text):
-    t = re.sub(r"[^a-zA-Z]", "", str(text or "")).lower()
-    t = t.replace("colour", "color")
-    return t
-
-
-def _is_shein_official_color(color_text):
-    """
-    严格白名单：仅整串归一化后命中官方色，或「官方色名的前缀截断」。
-    禁止 n.startswith(短官方色) 误放 White&Grey -> whitegrey 匹配 white。
-    含 & / | 等复合写法时，仅当整串归一化后恰为白名单内一项才通过。
-    """
-    raw = str(color_text or "").strip()
-    if not raw:
-        return False
-    n = _norm_color_for_match(raw)
-    if not n:
-        return False
-    if n in _SHEIN_OFFICIAL_COLORS:
-        return True
-    if re.search(r'[&/|+＆／、，·]', raw):
-        return False
-    for tok in _SHEIN_OFFICIAL_COLORS:
-        if len(n) >= 4 and len(n) < len(tok) and tok.startswith(n):
-            return True
-    return False
-
-
-def _extract_color_value_from_sku_attrs(sku_attr_text):
-    txt = str(sku_attr_text or "").strip()
-    if not txt:
-        return ""
-    for seg in txt.split("/"):
-        s = str(seg).strip()
-        if not s:
-            continue
-        if ":" in s:
-            k, v = s.split(":", 1)
-            kk = _clean_dimension_name(k)
-            if "color" in kk or "colour" in kk:
-                return str(v).strip()
-    first = txt.split("/")[0].strip()
-    if ":" in first:
-        first = first.split(":", 1)[1].strip()
-    return first
-
-
-def _closest_shein_official_color(color_text):
-    raw = str(color_text or "").strip()
-    if not raw:
-        return "", 0.0
-    n = _norm_color_for_match(raw)
-    if not n:
-        return "", 0.0
-    if n in _SHEIN_OFFICIAL_COLORS:
-        return n, 1.0
-
-    candidates = [n]
-    for seg in re.split(r"[&/|+＆／、，·\s-]+", raw):
-        sn = _norm_color_for_match(seg)
-        if sn and sn not in candidates:
-            candidates.append(sn)
-
-    best = ""
-    best_score = 0.0
-    for c in candidates:
-        for off in _SHEIN_OFFICIAL_COLORS:
-            score = difflib.SequenceMatcher(a=c, b=off).ratio()
-            if c in off or off in c:
-                score = max(score, 0.86 if min(len(c), len(off)) >= 3 else score)
-            if score > best_score:
-                best_score = score
-                best = off
-    if best_score < 0.52:
-        return "", best_score
-    return best, best_score
-
-
-def _replace_color_in_sku_attrs(sku_attr_text, standard_color):
-    txt = str(sku_attr_text or "").strip()
-    std = str(standard_color or "").strip()
-    if not txt:
-        return "Color: {}".format(std) if std else "默认规格"
-    parts = [p.strip() for p in txt.split("/") if str(p).strip()]
-    out = []
-    replaced = False
-    for p in parts:
-        if ":" in p:
-            k, _ = p.split(":", 1)
-            kk = _clean_dimension_name(k)
-            if ("color" in kk or "colour" in kk) and std:
-                out.append("Color: {}".format(std))
-                replaced = True
-                continue
-        out.append(p)
-    if not replaced and std:
-        out.insert(0, "Color: {}".format(std))
-    return " / ".join(out) if out else "默认规格"
-
-
-def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=8):
+def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=5):
     if not color_image_map:
         return []
 
-    norm_candidates = []
-    raw_candidates = []
-    for x in candidate_texts:
-        raw = str(x or "").strip()
-        if not raw:
-            continue
-        raw_candidates.append(raw.lower())
-        n = _norm_color_for_match(raw)
-        if n and n not in norm_candidates:
-            norm_candidates.append(n)
-
-    # 1) 先按归一化全等匹配，避免 red 匹配到 redwood 的误配
+    candidates = [str(x).lower() for x in candidate_texts if x]
     for key, imgs in color_image_map.items():
-        kn = _norm_color_for_match(key)
-        if kn and kn in norm_candidates:
-            return list(imgs or [])[:max_count]
-
-    # 2) 再按原文全等（忽略大小写）
-    for key, imgs in color_image_map.items():
-        kl = str(key or "").strip().lower()
-        if kl and kl in raw_candidates:
-            return list(imgs or [])[:max_count]
-
-    # 3) 最后才做弱匹配（双向包含），尽量降低误配概率
-    for key, imgs in color_image_map.items():
-        kl = str(key or "").strip().lower()
-        kn = _norm_color_for_match(key)
-        for raw in raw_candidates:
-            rn = _norm_color_for_match(raw)
-            if (kl and raw and (kl in raw or raw in kl)) or (kn and rn and (kn in rn or rn in kn)):
-                return list(imgs or [])[:max_count]
+        k = str(key).lower().strip()
+        for raw in candidates:
+            if k and raw and (k in raw or raw in k):
+                return imgs[:max_count]
 
     if len(color_image_map) == 1:
         return list(color_image_map.values())[0][:max_count]
@@ -973,7 +657,7 @@ def _fetch_page_with_selenium(url, timeout=20):
 
 
 def _fetch_sku_images(session, domain, sku_asin, headers):
-    """拉取单个 SKU 页面的主图，优先从 colorImages.initial 提取全部角度图，失败时返回空列表。"""
+    """拉取单个 SKU 页面的主图，失败时返回空列表。"""
     try:
         sku_url = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, sku_asin)
         # 优先用传入的 session（可能是 cloudscraper），直接单次请求
@@ -982,13 +666,8 @@ def _fetch_sku_images(session, domain, sku_asin, headers):
             _hdrs["Referer"] = "https://{}/".format(domain)
             r = session.get(sku_url, headers=_hdrs, timeout=10)
             if r and not _is_blocked(r.status_code, r.text):
-                # 优先：从 colorImages.initial 提取当前颜色的完整多图
-                imgs = _extract_color_initial_images(r.text, max_count=8)
-                if imgs:
-                    return imgs
-                # 兜底：从 #altImages 等DOM结构提取
                 sku_soup = BeautifulSoup(r.text, "html.parser")
-                imgs = _collect_main_images_from_soup(sku_soup, max_count=8)
+                imgs = _collect_main_images_from_soup(sku_soup, max_count=5)
                 if imgs:
                     return imgs
         except Exception:
@@ -997,13 +676,11 @@ def _fetch_sku_images(session, domain, sku_asin, headers):
         r2, _ = _get_with_retry(session, sku_url, max_attempts=1, base_timeout=8)
         if r2 is None:
             return []
-        imgs2 = _extract_color_initial_images(r2.text, max_count=8)
-        if imgs2:
-            return imgs2
         sku_soup = BeautifulSoup(r2.text, "html.parser")
-        return _collect_main_images_from_soup(sku_soup, max_count=8)
+        return _collect_main_images_from_soup(sku_soup, max_count=5)
     except Exception:
         return []
+
 
 def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_workers=6):
     """并发拉取多个 SKU 的图片，返回 {sku_asin: [img_url, ...]} 字典。"""
@@ -1057,54 +734,36 @@ def fetch_amazon_product(asin, region="美国"):
         for k, v in _make_browser_cookies(domain).items():
             sess.cookies.set(k, v, domain=domain)
 
-        # 主页面请求：cloudscraper/requests 带重试（多 URL + 多层兜底）
+        # 主页面请求：cloudscraper/requests 带重试
+        r, hdrs = _get_with_retry(sess, url, max_attempts=3, base_timeout=15)
         page_html = None
-        hdrs = random.choice(HEADERS_POOL).copy()
-        r = None
-        candidate_urls = [
-            url,
-            "https://{}/gp/product/{}?language=en_US&currency=USD".format(domain, asin),
-        ]
-        # 先走 requests/cloudscraper 重试（对多个 URL）
-        for _u in candidate_urls:
-            r, hdrs = _get_with_retry(sess, _u, max_attempts=4, base_timeout=18)
-            if r is not None and r.status_code in (200, 301, 302) and not _is_blocked(r.status_code, r.text):
-                page_html = r.text
-                break
+        if r is not None and r.status_code in (200, 301, 302) and not _is_blocked(r.status_code, r.text):
+            page_html = r.text
+        else:
+            # 第2层：cloudscraper 直接单次请求（不经过重试，换新 scraper 实例）
+            if _CLOUDSCRAPER_OK:
+                try:
+                    _scraper2 = cloudscraper.create_scraper(
+                        browser={"browser": "firefox", "platform": "windows", "mobile": False},
+                    )
+                    for k, v in _make_browser_cookies(domain).items():
+                        _scraper2.cookies.set(k, v, domain=domain)
+                    _hdrs2 = random.choice(HEADERS_POOL).copy()
+                    _r2 = _scraper2.get(url, headers=_hdrs2, timeout=15)
+                    if not _is_blocked(_r2.status_code, _r2.text):
+                        page_html = _r2.text
+                        hdrs = _hdrs2
+                except Exception:
+                    pass
 
-        # 第2层：cloudscraper 新实例再试一轮
-        if (not page_html) and _CLOUDSCRAPER_OK:
-            try:
-                _scraper2 = cloudscraper.create_scraper(
-                    browser={"browser": "firefox", "platform": "windows", "mobile": False},
-                    delay=2,
-                )
-                for k, v in _make_browser_cookies(domain).items():
-                    _scraper2.cookies.set(k, v, domain=domain)
-                for _u in candidate_urls:
-                    try:
-                        _hdrs2 = random.choice(HEADERS_POOL).copy()
-                        _r2 = _scraper2.get(_u, headers=_hdrs2, timeout=18)
-                        if _r2 is not None and _r2.status_code in (200, 301, 302) and not _is_blocked(_r2.status_code, _r2.text):
-                            page_html = _r2.text
-                            hdrs = _hdrs2
-                            break
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
-        # 第3层：Selenium 无头浏览器（最终保底，连续两次）
-        if not page_html:
-            for _u in candidate_urls:
-                page_html = _fetch_page_with_selenium(_u, timeout=30)
-                if page_html:
-                    hdrs = random.choice(HEADERS_POOL).copy()
-                    r = None
-                    break
+            # 第3层：Selenium 无头浏览器（最终保底）
+            if not page_html:
+                page_html = _fetch_page_with_selenium(url, timeout=25)
+                hdrs = random.choice(HEADERS_POOL).copy()
+                r = None
 
         if not page_html:
-            res["title"] = "被亚马逊反爬拦截，请稍后重试（建议更换网络或代理）"
+            res["title"] = "被亚马逊反爬拦截，请稍后重试"
             return res
         s = BeautifulSoup(page_html, "html.parser")
 
@@ -1137,9 +796,7 @@ def fetch_amazon_product(asin, region="美国"):
         if br:
             res["brand"] = br.get_text(strip=True)
 
-        main_images = _extract_color_initial_images(page_html, max_count=8)
-        if not main_images:
-            main_images = _collect_main_images_from_soup(s)
+        main_images = _collect_main_images_from_soup(s)
         res["main_images"] = main_images
         if main_images:
             res["image_url"] = main_images[0]
@@ -1207,6 +864,8 @@ def fetch_amazon_product(asin, region="美国"):
         color_image_map = _extract_color_images_map(page_html)
         dimension_names, value_display_map = _build_variation_value_maps(page_html)
         fallback_images = main_images[:5] if main_images else ([res["image_url"]] if res.get("image_url") else [])
+        def _basis_has_style(_basis):
+            return any("style" in str(_b).lower() for _b in (_basis or []))
 
         # 检测是否同时存在 color 和 size 两个维度
         # 若同时存在，则只爬取 color 维度下的 SKU，忽略 size
@@ -1214,7 +873,6 @@ def fetch_amazon_product(asin, region="美国"):
         _has_color = any("color" in d or "colour" in d for d in _all_dim_names_lower)
         _has_size  = any("size" in d for d in _all_dim_names_lower)
         _color_only_mode = _has_color and _has_size
-        _main_spec_is_color = _has_color
 
         # 提取「其他规格」：color_only_mode 下，收集非 color 维度的所有选项值
         # 格式：{"size": ["65L", "96L"], ...}
@@ -1226,84 +884,36 @@ def fetch_amazon_product(asin, region="美国"):
         # 优先从 HTML 直接解析 color 维度的 ASIN（#inline-twister-row-color_name）
         _color_asins_from_html = _extract_color_only_asins(s) if _color_only_mode else []
 
-        # SKU 数量预检：超过 10 个直接跳过，避免大量请求
-        _pre_count = 0
-        fallback_non_official = []
-        if _color_only_mode and _color_asins_from_html:
-            fallback_non_official = []
-            _pre_count = len([a for a, _ in _color_asins_from_html if a])
-        elif isinstance(dimension_map, dict):
-            _pre_seen = set()
-            for _dk, _da in dimension_map.items():
-                _da = str(_da or "").strip()
-                if _da and _da not in _pre_seen:
-                    if _color_only_mode:
-                        _b = _extract_dimension_basis(_dk, dimension_names=dimension_names)
-                        if not any("color" in x or "colour" in x for x in _b):
-                            continue
-                    _pre_seen.add(_da)
-            _pre_count = len(_pre_seen)
-        if _pre_count > 10:
-            res["sku_too_many"] = True
-            res["sku_pre_count"] = _pre_count
-            res["title"] = res.get("title") or ""
-            res["sku_list"] = []
-            return res
-
-        fallback_non_official = []
         if _color_only_mode and _color_asins_from_html:
             # 路径 A：HTML 解析到 color ASIN 列表，直接使用
             sku_asin_list = [a for a, _ in _color_asins_from_html if a and a != asin]
             sku_image_cache = _fetch_all_sku_images_concurrently(
                 sess, domain, sku_asin_list, hdrs, max_workers=4
             )
-            _cur_initial = _extract_color_initial_images(page_html, max_count=8)
-            sku_image_cache[asin] = _cur_initial if _cur_initial else fallback_images[:]
+            sku_image_cache[asin] = fallback_images[:]
 
-            closest_non_official = None
             for ca, color_name in _color_asins_from_html:
                 if not ca or ca in sku_seen:
                     continue
                 sku_seen.add(ca)
                 sku_images = sku_image_cache.get(ca, [])
-                map_images = _pick_images_from_color_map(
-                    color_image_map, color_name, ca, max_count=8
-                )
-                if map_images:
-                    sku_images = list(dict.fromkeys(sku_images + map_images))[:8]
+                if not sku_images:
+                    sku_images = _pick_images_from_color_map(
+                        color_image_map, color_name, ca, max_count=5
+                    )
                 if not sku_images:
                     sku_images = fallback_images[:]
-
-                if _is_shein_official_color(color_name):
-                    attr_text = "Color: {}".format(color_name) if color_name else "默认规格"
-                    sku_list.append({
-                        "sku_asin": ca,
-                        "sku_attributes": attr_text,
-                        "dimension_basis": ["color"],
-                        "images": sku_images[:8]
-                    })
-                    continue
-
-                std_color, std_score = _closest_shein_official_color(color_name)
-                if std_color:
-                    cand = {
-                        "sku_asin": ca,
-                        "sku_attributes": "Color: {}".format(std_color),
-                        "dimension_basis": ["color"],
-                        "images": sku_images[:8],
-                        "_score": std_score,
-                    }
-                    if closest_non_official is None or cand["_score"] > closest_non_official["_score"]:
-                        closest_non_official = cand
-                        fallback_non_official.append(dict(cand))
-
-            if _main_spec_is_color and (not sku_list) and closest_non_official is not None:
-                closest_non_official.pop("_score", None)
-                sku_list.append(closest_non_official)
+                attr_text = "Color: {}".format(color_name) if color_name else "默认规格"
+                sku_list.append({
+                    "sku_asin": ca,
+                    "sku_attributes": attr_text,
+                    "dimension_basis": ["color"],
+                    "images": sku_images[:5]
+                })
         else:
             # 路径 B：从 dimensionToAsinMap 构建 SKU 列表
             # color_only_mode 时只保留含 color 维度的条目
-            sku_asin_list = []
+            candidate_entries = []
             if isinstance(dimension_map, dict):
                 for dim_key, sku_asin in dimension_map.items():
                     if not sku_asin:
@@ -1311,86 +921,54 @@ def fetch_amazon_product(asin, region="美国"):
                     sku_asin = str(sku_asin).strip()
                     if not sku_asin or sku_asin in sku_seen:
                         continue
-                    if _color_only_mode:
-                        basis = _extract_dimension_basis(dim_key, dimension_names=dimension_names)
-                        if not any("color" in b or "colour" in b for b in basis):
-                            continue
-                    sku_seen.add(sku_asin)
-                    if sku_asin != asin:
-                        sku_asin_list.append(sku_asin)
-
-            sku_image_cache = _fetch_all_sku_images_concurrently(
-                sess, domain, sku_asin_list, hdrs, max_workers=4
-            )
-            _cur_initial = _extract_color_initial_images(page_html, max_count=8)
-            sku_image_cache[asin] = _cur_initial if _cur_initial else fallback_images[:]
-
-            sku_seen2 = set()
-            if isinstance(dimension_map, dict):
-                for dim_key, sku_asin in dimension_map.items():
-                    if not sku_asin:
-                        continue
-                    sku_asin = str(sku_asin).strip()
-                    if not sku_asin or sku_asin in sku_seen2:
-                        continue
                     basis = _extract_dimension_basis(dim_key, dimension_names=dimension_names)
                     if _color_only_mode:
                         if not any("color" in b or "colour" in b for b in basis):
                             continue
-                    sku_seen2.add(sku_asin)
+                    sku_seen.add(sku_asin)
+                    candidate_entries.append((dim_key, sku_asin, basis))
 
-                    sku_images = sku_image_cache.get(sku_asin, [])
+            # style 依据时，仅保留前 3 个 SKU 并在后续将规格重写为 A/B/C
+            style_mode = any(_basis_has_style(_basis) for _, _, _basis in candidate_entries)
+            if style_mode:
+                style_entries = [e for e in candidate_entries if _basis_has_style(e[2])]
+                if style_entries:
+                    candidate_entries = style_entries[:3]
+                else:
+                    candidate_entries = candidate_entries[:3]
 
+            sku_asin_list = [sku_asin for _, sku_asin, _ in candidate_entries if sku_asin != asin]
+
+            sku_image_cache = _fetch_all_sku_images_concurrently(
+                sess, domain, sku_asin_list, hdrs, max_workers=4
+            )
+            sku_image_cache[asin] = fallback_images[:]
+
+            for idx, (dim_key, sku_asin, basis) in enumerate(candidate_entries):
+                sku_images = sku_image_cache.get(sku_asin, [])
+                if not sku_images:
+                    sku_images = _pick_images_from_color_map(
+                        color_image_map, dim_key, sku_asin, max_count=5
+                    )
+                if not sku_images:
+                    sku_images = fallback_images[:]
+
+                if style_mode:
+                    sku_attr_text = ["A", "B", "C"][idx] if idx < 3 else "默认规格"
+                else:
                     sku_attr_text = _normalize_sku_attrs(
                         dim_key, dimension_names=dimension_names,
                         value_display_map=value_display_map
                     ) or "默认规格"
-                    color_hint = _extract_color_value_from_sku_attrs(sku_attr_text)
 
-                    map_images = _pick_images_from_color_map(
-                        color_image_map, color_hint, dim_key, sku_asin, max_count=8
-                    )
-                    if map_images:
-                        sku_images = list(dict.fromkeys(sku_images + map_images))[:8]
-                    if not sku_images:
-                        sku_images = fallback_images[:]
+                sku_list.append({
+                    "sku_asin": sku_asin,
+                    "sku_attributes": sku_attr_text,
+                    "dimension_basis": basis,
+                    "images": sku_images[:5]
+                })
 
-                    if _main_spec_is_color and any("color" in b or "colour" in b for b in basis):
-                        _color_val = _extract_color_value_from_sku_attrs(sku_attr_text)
-                        if _is_shein_official_color(_color_val):
-                            sku_list.append({
-                                "sku_asin": sku_asin,
-                                "sku_attributes": sku_attr_text,
-                                "dimension_basis": basis,
-                                "images": sku_images[:8]
-                            })
-                        else:
-                            std_color, std_score = _closest_shein_official_color(_color_val)
-                            if std_color:
-                                fallback_non_official.append({
-                                    "sku_asin": sku_asin,
-                                    "sku_attributes": _replace_color_in_sku_attrs(sku_attr_text, std_color),
-                                    "dimension_basis": basis,
-                                    "images": sku_images[:8],
-                                    "_score": std_score,
-                                })
-                        continue
-
-                    sku_list.append({
-                        "sku_asin": sku_asin,
-                        "sku_attributes": sku_attr_text,
-                        "dimension_basis": basis,
-                        "images": sku_images[:8]
-                    })
-
-        if _main_spec_is_color and (not sku_list):
-            if fallback_non_official:
-                fallback_non_official.sort(key=lambda x: x.get('_score', 0.0), reverse=True)
-                chosen = dict(fallback_non_official[0])
-                chosen.pop('_score', None)
-                sku_list.append(chosen)
-
-        if not sku_list and not _main_spec_is_color:
+        if not sku_list:
             sku_list.append({
                 "sku_asin": asin,
                 "sku_attributes": "默认规格",

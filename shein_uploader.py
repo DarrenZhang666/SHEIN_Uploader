@@ -38,6 +38,8 @@ class SheinPublisher:
         self.log    = log_cb or print
         self.login_manager = SheinLoginManager(log_cb=self.log)
         self._stop_publish = False
+        self._browser_account = ""
+        self._clone_from_account = ""
         # 记录主规格实际成功写入顺序，供后续按行上传图片对齐
         self._last_main_spec_filled_values = []
 
@@ -96,6 +98,8 @@ class SheinPublisher:
         self.login_manager.start_browser(account=account, clone_from_account=clone_from_account)
         self.driver = self.login_manager.driver
         self.wait = self.login_manager.wait
+        self._browser_account = account or ""
+        self._clone_from_account = clone_from_account or ""
 
     def open_login(self):
         self.login_manager.driver = self.driver
@@ -548,6 +552,36 @@ class SheinPublisher:
         except Exception as e:
             self.log("[ERROR] 选择类目失败: {}".format(str(e)[:60]))
             return False
+
+    def has_no_category_recommend_hint(self):
+        """页面是否出现“识图发品暂无分类推荐，建议...”提示。"""
+        driver = self.driver
+        try:
+            xpaths = [
+                "//*[contains(normalize-space(.),'识图发品暂无分类推荐')]",
+                "//*[contains(normalize-space(.),'暂无分类推荐') and contains(normalize-space(.),'建议')]",
+            ]
+            for xp in xpaths:
+                try:
+                    for el in driver.find_elements(By.XPATH, xp):
+                        try:
+                            if el.is_displayed():
+                                return True
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+            try:
+                body_text = driver.execute_script(
+                    "return (document && document.body && document.body.innerText) ? document.body.innerText : '';"
+                ) or ""
+                if ("识图发品暂无分类推荐" in body_text) or ("暂无分类推荐" in body_text and "建议" in body_text):
+                    return True
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return False
 
     def click_confirm_button(self):
         """点击'确认，下一步'按钮。"""
@@ -4480,34 +4514,56 @@ class SheinPublisher:
                 if not _tmp_img:
                     raise Exception("识图图片下载失败")
 
-                # 识图流程最多 3 次：任一环节失败，都重新打开商品发布页后重试
+                # 新策略：仅当出现“暂无分类推荐”提示时，关闭实例重开后重试（最多3次）
                 for attempt in range(1, 4):
-                    if attempt > 1:
-                        self.log("[Step2] 第{}/3次重试：重新打开商品发布页...".format(attempt))
-                        if not _goto_publish():
-                            raise Exception("第{}/3次重试无法重新打开商品发布页".format(attempt))
-                        self._wait_ready_state(timeout=3)
-                        self._dismiss_announcements()
-                        self._wait_ready_state(timeout=2)
-
-                    step_ok = False
+                    step_err = None
                     try:
                         if not self.click_identify_image_button():
-                            raise Exception("未找到识图发品按钮")
-                        if not self.upload_product_image(_tmp_img):
-                            raise Exception("上传识图图片失败")
-                        if not self.select_first_category():
-                            raise Exception("未识别到推荐类目")
-                        if not self.click_confirm_button():
-                            raise Exception("点击确认类目失败")
-                        step_ok = True
+                            step_err = "未找到识图发品按钮"
+                        if (not step_err) and (not self.upload_product_image(_tmp_img)):
+                            step_err = step_err or "上传识图图片失败"
+                        if (not step_err) and (not self.select_first_category()):
+                            step_err = step_err or "未识别到推荐类目"
+                        if (not step_err) and (not self.click_confirm_button()):
+                            step_err = step_err or "点击确认类目失败"
                     except Exception as _step_e:
-                        self.log("[Step2] 第{}/3次识图流程失败: {}".format(attempt, _step_e))
+                        step_err = str(_step_e)[:80] if _step_e else "识图流程异常"
 
-                    if step_ok:
+                    if not step_err:
                         cat_selected = True
                         self.log("[Step2] 识图选类目成功（第{}/3次）".format(attempt))
                         break
+
+                    no_cat_hint = self.has_no_category_recommend_hint()
+                    self.log("[Step2] 第{}/3次识图失败: {} | 无推荐提示={}".format(
+                        attempt, step_err, no_cat_hint))
+
+                    if no_cat_hint and attempt < 3:
+                        self.log("[Step2] 命中“暂无分类推荐”，关闭当前实例并新开实例重试...")
+                        try:
+                            try:
+                                if self.driver:
+                                    self.driver.quit()
+                            except Exception:
+                                pass
+                            self.driver = None
+                            self.wait = None
+                            self.start_browser(
+                                account=self._browser_account,
+                                clone_from_account=self._clone_from_account,
+                            )
+                            driver = self.driver
+                            if not _goto_publish():
+                                raise Exception("新实例未能进入商品发布页")
+                            self._wait_ready_state(timeout=3)
+                            self._dismiss_announcements()
+                            self._wait_ready_state(timeout=2)
+                            continue
+                        except Exception as _re_e:
+                            raise Exception("识图重试时重开实例失败: {}".format(str(_re_e)[:80]))
+                    if no_cat_hint and attempt >= 3:
+                        raise Exception("识图发品失败：3次均提示“暂无分类推荐”")
+                    raise Exception("识图发品失败：{}".format(step_err))
 
                 # 第3次仍失败：直接判定上品失败（不再回退关键词类目）
                 if not cat_selected:
