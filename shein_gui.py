@@ -2173,51 +2173,24 @@ class SheinApp(tk.Tk):
 
 
     def _publish_direct(self, product_info):
-        """点击'发布此商品'按钮后，直接跳转到发布页面并开始发布流程。"""
+        """详情页“发布此商品”与“开始上品”保持完全同流程（单品模式）。"""
         if product_info is None or not product_info.get('image_url'):
             messagebox.showwarning('提示', '商品信息不完整，请重新抓取')
             return
-        
-        self.current_asin = product_info.get('asin')
-        self._publish_session_id += 1
-        current_session_id = self._publish_session_id
-        self._stop_publish = False
+        target_asin = str(product_info.get('asin') or '').strip()
+        if not target_asin:
+            messagebox.showwarning('提示', '未获取到 ASIN，无法发布')
+            return
+        # 强制详情页走单品发布：仅勾选当前 ASIN，再调用统一入口 _open_publish_page
+        self.current_asin = target_asin
         try:
-            if self._shein_publisher is not None:
-                setattr(self._shein_publisher, '_stop_publish', False)
+            for a, v in self.asin_vars.items():
+                if hasattr(v, "set"):
+                    v.set(a == target_asin)
+            self._update_selection_count()
         except Exception:
             pass
-        
-        self.status_lbl.config(text='准备打开商品发布页...')
-        
-        def _init_and_publish():
-            try:
-                if self._is_publisher_reusable(self._shein_publisher):
-                    self.status_lbl.config(text='复用当前浏览器，跳转到发布页...')
-                    publish_url = SHEIN_PUBLISH_URL
-                    self._shein_publisher.driver.get(publish_url)
-                    time.sleep(3)
-                    self.status_lbl.config(text='✓ 已跳转到发布页面，开始上传商品...')
-                    threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
-                    return
-                
-                pub = SheinPublisher(log_cb=self._pub_log)
-                self.status_lbl.config(text='正在连接或启动浏览器...')
-                pub.start_browser()
-                self._shein_publisher = pub
-                self.status_lbl.config(text='浏览器已就绪，跳转到发布页...')
-                
-                publish_url = "https://sso.geiwohuo.com/#/spmc/commodities-category/followsales-pro/list?auth_login_token=994120f4fc4b4be5af3917e601a648e7&externalSystem=spmp"
-                pub.driver.get(publish_url)
-                time.sleep(3)
-                self.status_lbl.config(text='✓ 已跳转到发布页面，开始上传商品...')
-                threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
-            except Exception as e:
-                self.status_lbl.config(text='操作失败: ' + str(e)[:40])
-                self._pub_log('操作失败: ' + str(e))
-                self.after(0, lambda err=str(e): messagebox.showerror('失败', err[:100]))
-        
-        threading.Thread(target=_init_and_publish, daemon=True).start()
+        self._open_publish_page()
 
 # ── 品类选择对话框 ──────────────────────────
 class CategoryDialog(tk.Toplevel):
