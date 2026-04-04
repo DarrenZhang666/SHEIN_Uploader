@@ -13,6 +13,7 @@ class SheinApp(tk.Tk):
         self.configure(bg=BG_DARK)
         self.asin_list=[]; self.asin_vars={}; self.asin_dots={}; self.asin_status={}
         self.asin_row_widgets={}
+        self.asin_progress={}
         self.product_cache={}; self.current_asin=None
         self.select_all_var=tk.BooleanVar(value=False)
         self.price_multiplier=tk.StringVar(value="3")
@@ -40,6 +41,7 @@ class SheinApp(tk.Tk):
         self._preview_cache_lock = threading.Lock()
         self._current_preview_url = ""
         self._preview_inflight = set()
+        self._active_publish_asin = None
         
         # 初始化日志文件
         self._init_log_file()
@@ -293,6 +295,83 @@ class SheinApp(tk.Tk):
                 hint.config(text="sku\u8fc7\u591a\u4e0d\u722c\u53d6", fg=RED)
             else:
                 hint.config(text="", fg=dot.cget("bg"))
+        if status in ("imported", "pending", "fetch_success"):
+            self._set_asin_progress(asin, 0, "未上品", state="idle")
+        elif status == "publishing":
+            self._set_asin_progress(asin, 10, "上品中", state="running")
+        elif status == "success":
+            self._set_asin_progress(asin, 100, "上品成功", state="success")
+        elif status in ("fail", "fetch_fail", "sku_too_many"):
+            self._set_asin_progress(asin, 100, "上品失败", state="fail")
+
+    def _set_asin_progress(self, asin, pct=None, text=None, state="running"):
+        """更新 ASIN 行内简化进度条与文字。"""
+        ws = self.asin_row_widgets.get(asin) or {}
+        bar = ws.get("prog_canvas")
+        fill_id = ws.get("prog_fill")
+        txt_lbl = ws.get("prog_text")
+        if not bar or not fill_id or not txt_lbl:
+            return
+        cur = self.asin_progress.get(asin, {"pct": 0, "text": "未上品", "state": "idle"})
+        if pct is None:
+            pct = cur.get("pct", 0)
+        if text is None:
+            text = cur.get("text", "未上品")
+        pct = max(0, min(100, int(pct)))
+        color_map = {
+            "idle": "#64748b",
+            "running": "#3b82f6",
+            "success": "#22c55e",
+            "fail": "#ef4444",
+            "stopped": "#94a3b8",
+        }
+        fill_color = color_map.get(state, "#3b82f6")
+        width = 110
+        bar.coords(fill_id, 0, 0, int(width * pct / 100.0), 6)
+        bar.itemconfig(fill_id, fill=fill_color, outline=fill_color)
+        txt_lbl.config(text=text, fg=fill_color if state in ("success", "fail") else TEXT_SUB)
+        self.asin_progress[asin] = {"pct": pct, "text": text, "state": state}
+
+    def _update_publish_progress_by_msg(self, asin, msg):
+        m = str(msg or "")
+        if "识图" in m:
+            self._set_asin_progress(asin, 25, "识图发品中", state="running"); return
+        if "类目" in m:
+            self._set_asin_progress(asin, 35, "确认类目", state="running"); return
+        if "填写商品基础信息" in m or "填写基础信息" in m:
+            self._set_asin_progress(asin, 45, "填写基础信息", state="running"); return
+        if "基础信息填写完成" in m:
+            self._set_asin_progress(asin, 50, "基础信息已完成", state="running"); return
+        if "填写规格" in m:
+            self._set_asin_progress(asin, 62, "填写规格信息", state="running"); return
+        if "上传细节图" in m:
+            self._set_asin_progress(asin, 70, "上传细节图中", state="running"); return
+        if "规格已确定" in m or "规格及供应信息填写完成" in m:
+            self._set_asin_progress(asin, 68, "规格已确定", state="running"); return
+        if "发布" in m or "确认弹窗" in m or "结果文案" in m:
+            self._set_asin_progress(asin, 88, "确认其他信息中", state="running"); return
+        if "商品已提交发布" in m:
+            self._set_asin_progress(asin, 100, "完成发布", state="success"); return
+        if "发布失败" in m:
+            self._set_asin_progress(asin, 100, "发布失败", state="fail"); return
+
+    def _route_asin_progress_from_log(self, msg):
+        """从上传日志中提取更细阶段（例如第X张细节图）。"""
+        m = str(msg or "")
+        asin = self._active_publish_asin or self.current_asin
+        if not asin:
+            return
+        try:
+            mm = re.search(r"图(\d+)已提交", m)
+            if mm and ("SKU行" in m):
+                img_idx = int(mm.group(1))
+                pct = min(74, 68 + img_idx * 2)
+                self._set_asin_progress(asin, pct, "上传第{}张细节图中".format(img_idx), state="running")
+                return
+            if "细节图上传完成" in m:
+                self._set_asin_progress(asin, 75, "细节图上传完成", state="running")
+        except Exception:
+            pass
 
     def _reset_publishing_asins_to_unpublished(self):
         """停止上品时，将仍处于上品中的黄色状态恢复为未发布蓝色。"""
@@ -300,6 +379,7 @@ class SheinApp(tk.Tk):
             for asin, st in list(self.asin_status.items()):
                 if st == "publishing":
                     self._set_asin_status(asin, "fetch_success")
+                    self._set_asin_progress(asin, 0, "未上品", state="idle")
         except Exception:
             pass
 
@@ -340,6 +420,14 @@ class SheinApp(tk.Tk):
             lbl.pack(side="left",padx=4,pady=5)
             hint=tk.Label(row,text="",font=("Segoe UI",8),fg=bg,bg=bg,anchor="w")
             hint.pack(side="left",padx=(0,4))
+            prog_wrap = tk.Frame(row, bg=bg)
+            prog_wrap.pack(side="right", padx=(4,8), pady=2)
+            prog_text = tk.Label(prog_wrap, text="未上品", font=("Segoe UI",8), fg=TEXT_SUB, bg=bg, anchor="e")
+            prog_text.pack(fill="x")
+            prog_canvas = tk.Canvas(prog_wrap, width=110, height=6, bg=bg, highlightthickness=0, bd=0)
+            prog_canvas.pack(fill="x")
+            prog_canvas.create_rectangle(0, 0, 110, 6, fill="#334155", outline="#334155")
+            prog_fill = prog_canvas.create_rectangle(0, 0, 0, 6, fill="#64748b", outline="#64748b")
             self.asin_hints[asin]=hint
             self.asin_row_widgets[asin] = {
                 "idx": idx,
@@ -348,12 +436,17 @@ class SheinApp(tk.Tk):
                 "lbl": lbl,
                 "dot": dot,
                 "hint": hint,
+                "prog_wrap": prog_wrap,
+                "prog_text": prog_text,
+                "prog_canvas": prog_canvas,
+                "prog_fill": prog_fill,
             }
             lbl.bind("<Button-1>",lambda e,a=asin:self._click(a))
             row.bind("<Button-1>",lambda e,a=asin:self._click(a))
             lbl.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
             row.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
             dot.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
+            self._set_asin_progress(asin, 0, "未上品", state="idle")
         self.cnt_lbl.config(text="({})".format(len(self.asin_list)))
         self._upd_cnt(); self.select_all_var.set(False)
         self._update_asin_row_styles()
@@ -374,6 +467,9 @@ class SheinApp(tk.Tk):
             ws["lbl"].config(bg=bg, fg=fg)
             ws["dot"].config(bg=bg)
             ws["hint"].config(bg=bg, fg=(TEXT_SUB if is_selected else bg))
+            if ws.get("prog_wrap"): ws["prog_wrap"].config(bg=bg)
+            if ws.get("prog_text"): ws["prog_text"].config(bg=bg)
+            if ws.get("prog_canvas"): ws["prog_canvas"].config(bg=bg)
 
     def _click(self,asin):
         self.current_asin=asin
@@ -909,6 +1005,7 @@ class SheinApp(tk.Tk):
             if self.current_asin is None or self._shein_publisher is None:
                 return
             target_asin = self.current_asin
+            self._active_publish_asin = target_asin
             if self._check_stop_or_return(session_id=session_id):
                 return
 
@@ -924,7 +1021,9 @@ class SheinApp(tk.Tk):
             self._log_publish_progress(target_asin, "上品中")
             if dot:
                 self.after(0, lambda a=target_asin: self._set_asin_status(a, "publishing"))
-            _set_status = lambda msg, stage=None: self._set_publish_status(target_asin, msg, stage)
+            def _set_status(msg, stage=None):
+                self._set_publish_status(target_asin, msg, stage)
+                self._update_publish_progress_by_msg(target_asin, msg)
 
             try:
                 self._shein_publisher._dismiss_announcements()
@@ -1095,12 +1194,12 @@ class SheinApp(tk.Tk):
                 return
             _set_status('✓ 商品基础信息填写完成', "上品中")
 
-            _set_status('等待页面加载，准备填写规格及供应信息...', "上品中")
+            _set_status('等待页面加载，准备填写规格信息...', "上品中")
             time.sleep(2)
             if self._check_stop_or_return(session_id=session_id):
                 return
 
-            _set_status('填写规格及供应信息...', "上品中")
+            _set_status('填写规格信息...', "上品中")
             try:
                 try:
                     mult = float(self.price_multiplier.get())
@@ -1118,10 +1217,11 @@ class SheinApp(tk.Tk):
 
                 if self._check_stop_or_return(session_id=session_id):
                     return
+                _set_status('上传细节图...', "上品中")
                 self._shein_publisher.fill_spec_and_supply_info(product_info_pub)
                 if self._check_stop_or_return(session_id=session_id):
                     return
-                _set_status('✓ 规格及供应信息填写完成', "上品中")
+                _set_status('✓ 规格已确定', "上品中")
             except Exception as spec_e:
                 self._pub_log('[ERROR] 规格及供应信息填写异常: {}'.format(str(spec_e)[:80]))
                 _set_status('规格及供应信息填写遇到问题，请手动检查', "上品失败")
@@ -1252,6 +1352,8 @@ class SheinApp(tk.Tk):
             if '用户已停止上品' in str(e):
                 self._pub_log('[STOP] 用户已停止上品')
                 self._set_publish_status(target_asin, '已停止上品', "上品失败")
+                if target_asin:
+                    self._set_asin_progress(target_asin, 0, "已停止", state="stopped")
             else:
                 self._set_publish_status(target_asin, '上传出错: {}'.format(str(e)[:40]), "上品失败")
                 if dot:
@@ -1267,6 +1369,7 @@ class SheinApp(tk.Tk):
                         self._log_publish_progress(target_asin, "上品失败")
             except Exception:
                 pass
+            self._active_publish_asin = None
             self._publish_running = False
     def _upload_product_image_btn(self):
         """上传商品图片按钮回调。"""
@@ -1644,6 +1747,7 @@ class SheinApp(tk.Tk):
     def _pub_log(self, msg):
         """发布日志回调：开发者模式=完整日志，非开发者模式=仅简化上品进度。"""
         m = str(msg)[:100] if msg else ""
+        self._route_asin_progress_from_log(m)
         if is_dev_mode():
             self._write_log(msg)
         else:
@@ -1827,6 +1931,7 @@ class SheinApp(tk.Tk):
                         return
                     self._log_publish_progress(asin, "开始上品")
                     self.after(0, lambda a=asin: self._set_asin_status(a, "publishing"))
+                    self.after(0, lambda a=asin: self._set_asin_progress(a, 15, "上品中", state="running"))
 
                     info = self.product_cache.get(asin, {})
                     if not info or not info.get('image_url'):
