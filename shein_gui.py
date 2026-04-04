@@ -681,8 +681,22 @@ class SheinApp(tk.Tk):
         if not logged_in:
             return
 
-        # 已登录，等待页面完全渲染后直达商品发布页
+        # 已登录，等待页面完全渲染
         _t.sleep(2)
+        # 非开发者模式下：若页面非中文，保留当前页面供手动调试语言，不做关闭处理
+        if not is_dev_mode():
+            try:
+                if not self._is_chinese_page(pub.driver):
+                    self._pub_log("[WARN] 检测到页面非中文，已保留当前页面供手动调试语言")
+                    self.after(0, lambda: messagebox.showwarning("语言提示", "检测到页面不是中文，请先手动切换语言。"))
+                    self.after(0, lambda: self.status_lbl.config(text="页面非中文：已保留当前网页，请先切换为中文"))
+                    return
+            except Exception:
+                # 检测异常时也不自动关闭，避免误伤调试场景
+                self._pub_log("[WARN] 页面语言检测异常，已保留当前页面")
+                self.after(0, lambda: self.status_lbl.config(text="页面语言检测异常：已保留当前网页"))
+                return
+
         try:
             pub.driver.get(SHEIN_PUBLISH_URL)
         except Exception:
@@ -818,11 +832,6 @@ class SheinApp(tk.Tk):
         if is_dev_mode():
             self._pub_log("[DEV] 开发者模式：保留登录窗口")
         else:
-            if not self._is_chinese_page(pub.driver):
-                self._pub_log("[WARN] 非开发者模式：检测到页面非中文，保留窗口等待手动切换")
-                self.after(0, lambda: messagebox.showwarning("语言提示", "请切换语言为中文。"))
-                self.after(0, lambda: self.status_lbl.config(text="请先将 SHEIN 页面语言切换为中文"))
-                return
             try:
                 pub.driver.quit()
                 if self._shein_publisher is pub:
