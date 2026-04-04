@@ -383,6 +383,27 @@ class SheinApp(tk.Tk):
         except Exception:
             pass
 
+    @staticmethod
+    def _has_publishable_price(product_info):
+        """价格可用于上品：非 NA/N/A 且包含数字。"""
+        if not isinstance(product_info, dict):
+            return False
+        raw = str(product_info.get("price", "") or "").strip()
+        if not raw:
+            return False
+        norm = raw.replace(" ", "").upper()
+        if norm in ("NA", "N/A", "NONE", "NULL", "-", "--"):
+            return False
+        return bool(re.search(r"\d", raw))
+
+    def _mark_asin_no_price(self, asin):
+        """标记 ASIN 因无价格无法上品（红色进度）。"""
+        if not asin:
+            return
+        self._set_asin_status(asin, "fail")
+        self._set_asin_progress(asin, 100, "No price，stop", state="fail")
+        self._pub_log("[SKIP] {} 无价格，无法上品".format(asin))
+
     def _import_txt(self):
         path=filedialog.askopenfilename(title="选择 ASIN 文本文件",
             filetypes=[("文本文件","*.txt"),("所有文件","*.*")])
@@ -847,10 +868,26 @@ class SheinApp(tk.Tk):
         if len(selected_asins) > 1:
             skipped_success = [a for a in selected_asins if self.asin_status.get(a) == "success"]
             publish_asins = [a for a in selected_asins if self.asin_status.get(a) != "success"]
+            no_price_asins = []
+            filtered_asins = []
+            for asin in publish_asins:
+                info = self.product_cache.get(asin) or {}
+                if self._has_publishable_price(info):
+                    filtered_asins.append(asin)
+                else:
+                    no_price_asins.append(asin)
+            publish_asins = filtered_asins
+            for asin in no_price_asins:
+                self._mark_asin_no_price(asin)
             if skipped_success:
                 self._pub_log("[SKIP] 已过滤 {} 个已上品成功 ASIN".format(len(skipped_success)))
+            if no_price_asins:
+                self._pub_log("[SKIP] 已过滤 {} 个无价格 ASIN".format(len(no_price_asins)))
             if not publish_asins:
-                self.status_lbl.config(text="所选商品均已上品成功，已自动跳过")
+                if no_price_asins:
+                    self.status_lbl.config(text="No price, stop")
+                else:
+                    self.status_lbl.config(text="所选商品均已上品成功，已自动跳过")
                 return
             # 并发模式按“全部选中项”执行，缺图项在 worker 内计为失败，
             # 确保结果弹窗以“选中总数”为准，不会因预过滤而提前结束。
@@ -890,6 +927,10 @@ class SheinApp(tk.Tk):
         product_info = self.product_cache.get(target_asin)
         if not product_info or not product_info.get('image_url'):
             messagebox.showwarning('提示', 'ASIN {} 没有图片信息，请先抓取商品'.format(target_asin))
+            return
+        if not self._has_publishable_price(product_info):
+            self._mark_asin_no_price(target_asin)
+            self.status_lbl.config(text='无价格，无法上品')
             return
         
         # 每次点击“开始上品”创建新的会话ID，并清理停止标志
@@ -1772,8 +1813,17 @@ class SheinApp(tk.Tk):
         # 防止异步加载时串图：仅显示当前选中商品对应图片
         if url and url != self._current_preview_url:
             return
-        self._photo_ref=photo
-        if hasattr(self,"img_lbl"): self.img_lbl.config(image=photo,text="")
+        img_lbl = getattr(self, "img_lbl", None)
+        if img_lbl is None:
+            return
+        try:
+            if not int(img_lbl.winfo_exists()):
+                return
+            self._photo_ref = photo
+            img_lbl.config(image=photo, text="")
+        except Exception:
+            # 详情面板切换时旧 Label 可能已销毁，忽略异步回调即可
+            return
 
     def _pub_log(self, msg):
         """发布日志回调：开发者模式=完整日志，非开发者模式=仅简化上品进度。"""
