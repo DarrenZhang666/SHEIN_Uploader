@@ -294,6 +294,15 @@ class SheinApp(tk.Tk):
             else:
                 hint.config(text="", fg=dot.cget("bg"))
 
+    def _reset_publishing_asins_to_unpublished(self):
+        """停止上品时，将仍处于上品中的黄色状态恢复为未发布蓝色。"""
+        try:
+            for asin, st in list(self.asin_status.items()):
+                if st == "publishing":
+                    self._set_asin_status(asin, "fetch_success")
+        except Exception:
+            pass
+
     def _import_txt(self):
         path=filedialog.askopenfilename(title="选择 ASIN 文本文件",
             filetypes=[("文本文件","*.txt"),("所有文件","*.*")])
@@ -1817,6 +1826,7 @@ class SheinApp(tk.Tk):
             stop_session_id = self._publish_session_id
             self._publish_session_id += 1  # 使当前会话立即失效，强制旧线程退出
             self._stop_publish = True
+            self._reset_publishing_asins_to_unpublished()
             stopped_pub = self._shein_publisher
             with self._worker_publishers_lock:
                 worker_pubs = list(self._worker_publishers.values())
