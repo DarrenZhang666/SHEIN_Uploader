@@ -14,7 +14,7 @@ import requests
 _SECURE_KEY = "ShEiN_2025!@xKz9#Qm7$wPv"
 
 # ====== 服务器地址 ======
-_AUTH_API_URL = "http://你的服务器IP:8000/check_auth"
+_AUTH_API_URL = "http://39.103.78.67:8000/check_auth"
 
 _REQUEST_TIMEOUT = 10  # 秒
 
