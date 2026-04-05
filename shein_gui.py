@@ -774,24 +774,95 @@ class SheinApp(tk.Tk):
         threading.Thread(target=_launch, daemon=True).start()
 
 
+    def _has_confirmed_shein_session(self, driver):
+        """更严格地判断 SHEIN 是否已完成登录，返回 (是否登录, 判定依据)。"""
+        try:
+            url = (driver.current_url or "").strip().lower()
+        except Exception:
+            return False, "url_unavailable"
+
+        if not url or url.startswith("about:blank"):
+            return False, "blank_url"
+        if "geiwohuo.com" not in url:
+            return False, "outside_domain"
+        if "login" in url:
+            return False, "still_login_page"
+        if "/auth/" in url or "gmpsso" in url:
+            return False, "auth_pending"
+
+        # 已进入发布页通常意味着登录完成
+        if "followsales-pro/list" in url and ("commoditiescategory" in url or "commodities-category" in url):
+            return True, "publish_url"
+
+        # 优先以 localStorage 中的登录信息作为确认依据（仅 token 容易误判，故不单独使用）
+        try:
+            session_state = driver.execute_script(
+                """
+                try {
+                    var infoRaw = localStorage.getItem('loginInfo');
+                    var info = infoRaw ? JSON.parse(infoRaw) : null;
+                    var hasLoginInfo = !!(info && (
+                        info.userName || info.supplierUserName || info.phoneTel || info.email
+                    ));
+                    return {hasLoginInfo: hasLoginInfo};
+                } catch (e) {
+                    return {hasLoginInfo: false};
+                }
+                """
+            ) or {}
+            if isinstance(session_state, dict):
+                if bool(session_state.get("hasLoginInfo")):
+                    # loginInfo 需配合 home 页面，避免被残留缓存误判
+                    if "#/home" in url:
+                        return True, "home_with_localStorage.loginInfo"
+        except Exception:
+            pass
+
+        # 兜底：当 URL 已进入 home，同时带有用户态 cookie 时也认为已登录
+        try:
+            cookies = driver.get_cookies() or []
+            cookie_names = {(ck.get("name") or "").lower() for ck in cookies}
+            hints = (
+                "userinfo", "user_info", "username", "user_name", "loginname",
+                "accesstoken", "access_token", "refreshtoken", "refresh_token",
+                "id_token", "jwt"
+            )
+            has_user_cookie = any(any(h in name for h in hints) for name in cookie_names)
+            if has_user_cookie and "#/home" in url:
+                return True, "home_with_user_cookie"
+        except Exception:
+            pass
+
+        return False, "no_confirmed_session"
+
+
     def _watch_login(self, pub, timeout=180):
         """后台轮询检测SHEIN登录状态，成功后更新按钮显示账号。"""
         import time as _t
         end = _t.time() + timeout
         logged_in = False
+        login_reason = ""
         while _t.time() < end:
             try:
-                url = pub.driver.current_url
-                # 离开登录页即视为登录成功
-                if ("sso.geiwohuo.com" in url or "geiwohuo.com" in url) and "login" not in url.lower():
-                    logged_in = True
-                    break
+                _ok, _reason = self._has_confirmed_shein_session(pub.driver)
+                if _ok:
+                    # 双重确认：连续两次命中成功条件才认定登录，降低瞬时跳转误判
+                    _t.sleep(0.9)
+                    _ok2, _reason2 = self._has_confirmed_shein_session(pub.driver)
+                    if _ok2:
+                        logged_in = True
+                        login_reason = _reason2 or _reason or "unknown"
+                        break
             except Exception:
                 pass
+            # 浏览器已被手动关闭或失效时，不再继续误判
+            if not self._is_publisher_reusable(pub):
+                return
             _t.sleep(1.5)
 
         if not logged_in:
             return
+        self._pub_log("[OK] 登录判定成功依据: {}".format(login_reason or "unknown"))
 
         # 已登录，等待页面完全渲染
         _t.sleep(2)
@@ -937,7 +1008,8 @@ class SheinApp(tk.Tk):
             text="已登录", bg="#0d7a4e", font=("Segoe UI", 9, "bold")))
         self.after(0, lambda: self.status_lbl.config(
             text="SHEIN 登录成功" + ("  账号: " + _login_acct if _login_acct else "")))
-        self._pub_log("[OK] SHEIN 登录成功，账号: {}".format(_login_acct or "(未获取到)"))
+        self._pub_log("[OK] SHEIN 登录成功(依据: {})，账号: {}".format(
+            login_reason or "unknown", _login_acct or "(未获取到)"))
         # 登录成功后的窗口行为：
         # - 开发者模式：保留窗口便于观察
         # - 非开发者模式：先检查页面是否中文；不是中文则保留窗口并提示切换语言
