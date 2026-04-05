@@ -5,6 +5,7 @@ from shein_main import *
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from shein_developer_mode import DevModeToggle, is_dev_mode
 from shein_mysql import verify_shein_account_detail
+from shein_checkprice import open_shein_suggest_price_popup, dismiss_shein_user_guides
 from datetime import datetime
 
 class SheinApp(tk.Tk):
@@ -301,8 +302,37 @@ class SheinApp(tk.Tk):
                 self.status_lbl.config(text="请先导入 ASIN 文件")
 
     def _fetch_shein_suggest_price(self):
-        self.status_lbl.config(text="议价功能：抓取SHEIN建议价格（功能待实现）")
-        messagebox.showinfo("议价", "抓取SHEIN建议价格功能正在开发中。")
+        account = self.shein_account.get().strip()
+        if not account:
+            messagebox.showwarning('提示', '请先在「SHEIN账号」输入框中填写账号')
+            return
+        if not self._verify_account(account):
+            return
+
+        self.status_lbl.config(text='议价功能：正在打开商品列表并进入价格调整待确认...')
+
+        def _run():
+            try:
+                ok, msg, pub = open_shein_suggest_price_popup(
+                    publisher=self._shein_publisher,
+                    account=account,
+                    log_cb=self._pub_log,
+                    headless=False,
+                )
+                self._shein_publisher = pub
+                self._shein_publisher_account = account
+                if ok:
+                    self.after(0, lambda: self.status_lbl.config(text=msg))
+                    self.after(0, lambda: messagebox.showinfo('议价', msg))
+                else:
+                    self.after(0, lambda: self.status_lbl.config(text=msg))
+                    self.after(0, lambda: messagebox.showwarning('议价', msg))
+            except Exception as e:
+                err = str(e)[:120]
+                self.after(0, lambda: self.status_lbl.config(text='议价流程失败: ' + err))
+                self.after(0, lambda: messagebox.showerror('议价', '议价流程失败：' + err))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _build_bargain_panel(self,parent):
         self.bargain_panel=tk.Frame(parent,bg=BG_PANEL)
@@ -1166,6 +1196,10 @@ class SheinApp(tk.Tk):
         except Exception:
             pass
         _t.sleep(1)
+        try:
+            dismiss_shein_user_guides(pub.driver, log_cb=self._pub_log, timeout=10, interval=1)
+        except Exception as _guide_e:
+            self._pub_log("登录后处理引导异常: {}".format(str(_guide_e)[:80]))
         account = ""
         import re as _re
         try:
