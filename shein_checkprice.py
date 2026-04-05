@@ -673,14 +673,25 @@ return true;
     return False
 
 
-def open_shein_suggest_price_popup(publisher=None, account="", log_cb=None, headless=False, should_stop=None):
+def open_shein_suggest_price_popup(
+    publisher=None,
+    account="",
+    log_cb=None,
+    headless=False,
+    should_stop=None,
+    force_new_browser=False,
+):
     """打开 SHEIN 商品列表页并点击「价格调整待确认，请及时处理」。"""
     log = log_cb or _noop_log
 
     pub = publisher
     if pub is None or (not pub.is_alive()):
         pub = SheinPublisher(log_cb=log)
-        pub.start_browser(account=account or "default", headless=headless, force_new=False)
+        pub.start_browser(
+            account=account or "default",
+            headless=headless,
+            force_new=bool(force_new_browser),
+        )
 
     driver = getattr(pub, "driver", None)
     if driver is None or not _is_driver_alive(driver):
@@ -730,7 +741,14 @@ def open_shein_suggest_price_popup(publisher=None, account="", log_cb=None, head
     return False, "未找到“价格调整待确认，请及时处理”入口，请确认页面已加载", pub
 
 
-def fetch_shein_pending_bargain_rows(publisher=None, account="", log_cb=None, headless=False, should_stop=None):
+def fetch_shein_pending_bargain_rows(
+    publisher=None,
+    account="",
+    log_cb=None,
+    headless=False,
+    should_stop=None,
+    force_new_browser=False,
+):
     """打开议价入口并抓取弹窗中“待确认”行。"""
     log = log_cb or _noop_log
     ok, msg, pub = open_shein_suggest_price_popup(
@@ -739,6 +757,7 @@ def fetch_shein_pending_bargain_rows(publisher=None, account="", log_cb=None, he
         log_cb=log,
         headless=headless,
         should_stop=should_stop,
+        force_new_browser=force_new_browser,
     )
     if not ok:
         return False, msg, pub, []

@@ -59,6 +59,8 @@ class SheinApp(tk.Tk):
         self._bargain_fetch_thread = None
         self._bargain_fetch_running = False
         self._stop_bargain_fetch = False
+        self._bargain_runtime_publisher = None
+        self._bargain_runtime_is_temp = False
         
         # 初始化日志文件
         self._init_log_file()
@@ -320,12 +322,20 @@ class SheinApp(tk.Tk):
         if not self._verify_account(account):
             return
 
+        dev_mode = bool(is_dev_mode())
+        fetch_publisher = self._shein_publisher if dev_mode else None
+        headless_mode = (not dev_mode)
+        force_new_browser = (not dev_mode)
+
         self._stop_bargain_fetch = False
         self._bargain_fetch_running = True
+        self._bargain_runtime_publisher = None
+        self._bargain_runtime_is_temp = (not dev_mode)
         self.status_lbl.config(text='议价功能：正在抓取“待确认”数据...')
         self._set_bargain_progress("进入议价界面", state="running", percent=25)
 
         def _run():
+            temp_pub = None
             try:
                 import re
                 progress_state = {"total_pages": 1}
@@ -358,15 +368,24 @@ class SheinApp(tk.Tk):
                         )
                         return
 
+                run_pub = fetch_publisher
+                if not dev_mode:
+                    run_pub = SheinPublisher(log_cb=_progress_log)
+                    self._bargain_runtime_publisher = run_pub
+
                 ok, msg, pub, rows = fetch_shein_pending_bargain_rows(
-                    publisher=self._shein_publisher,
+                    publisher=run_pub,
                     account=account,
                     log_cb=_progress_log,
-                    headless=False,
+                    headless=headless_mode,
                     should_stop=lambda: bool(self._stop_bargain_fetch or self._app_closing),
+                    force_new_browser=force_new_browser,
                 )
-                self._shein_publisher = pub
-                self._shein_publisher_account = account
+                self._bargain_runtime_publisher = pub
+                temp_pub = pub
+                if dev_mode:
+                    self._shein_publisher = pub
+                    self._shein_publisher_account = account
                 self._bargain_rows = rows or []
                 self.after(0, self._render_bargain_rows)
                 if ok:
@@ -387,7 +406,12 @@ class SheinApp(tk.Tk):
                 self.after(0, lambda: self.status_lbl.config(text='议价流程失败: ' + err))
                 self.after(0, lambda: messagebox.showerror('议价', '议价流程失败：' + err))
             finally:
+                if (not dev_mode) and temp_pub is not None:
+                    self._close_publisher_instance(temp_pub, reason="议价抓取结束自动关闭")
+                self._bargain_runtime_publisher = None
+                self._bargain_runtime_is_temp = False
                 self._bargain_fetch_running = False
+                self._stop_bargain_fetch = False
                 self._bargain_fetch_thread = None
 
         self._bargain_fetch_thread = threading.Thread(target=_run, daemon=True)
@@ -547,6 +571,25 @@ class SheinApp(tk.Tk):
             self._bargain_progress_percent = 100.0
         self._draw_bargain_progress_bar(self._bargain_progress_percent, color_map.get(state, "#3b82f6"))
         lbl.config(text=str(text or ""))
+
+    def _close_publisher_instance(self, pub, reason=""):
+        """安全关闭单个浏览器实例。"""
+        if pub is None:
+            return
+        try:
+            if hasattr(pub, "request_stop"):
+                pub.request_stop(force_quit=True)
+            elif hasattr(pub, "quit"):
+                pub.quit()
+            else:
+                driver = getattr(pub, "driver", None)
+                if driver is not None:
+                    driver.quit()
+        except Exception as e:
+            self._pub_log("[WARN] 关闭浏览器实例失败: {}".format(str(e)[:80]))
+        finally:
+            if reason:
+                self._pub_log("[BARGAIN] 已关闭议价浏览器实例: {}".format(reason))
 
     def _toggle_main_panels_for_mode(self):
         if self.current_view_mode == "bargain":
@@ -2980,26 +3023,26 @@ return false;
         if getattr(self, "_bargain_fetch_running", False):
             self._stop_bargain_fetch = True
             self._set_bargain_progress("正在停止...", state="fail")
-            self.status_lbl.config(text="正在停止议价抓取并返回首页...")
+            self.status_lbl.config(text="正在停止议价抓取...")
             try:
-                if self._shein_publisher is not None:
-                    setattr(self._shein_publisher, "_stop_publish", True)
+                pub = self._bargain_runtime_publisher or self._shein_publisher
+                if pub is not None:
+                    setattr(pub, "_stop_publish", True)
             except Exception:
                 pass
 
             def _stop_bargain_async():
+                is_temp_runtime = bool(self._bargain_runtime_is_temp)
                 try:
-                    pub = self._shein_publisher
-                    driver = getattr(pub, "driver", None) if pub else None
-                    if driver is not None:
-                        try:
-                            _ = driver.current_url
-                            driver.get("https://sso.geiwohuo.com/#/home")
-                        except Exception:
-                            pass
+                    pub = self._bargain_runtime_publisher
+                    # 非开发者模式：议价抓取使用临时后台浏览器，停止时立即关闭实例与进程
+                    if is_temp_runtime and pub is not None:
+                        self._close_publisher_instance(pub, reason="用户停止议价抓取")
                 finally:
-                    self.after(0, lambda: self._switch_view_mode("collect_publish"))
-                    self.after(0, lambda: self.status_lbl.config(text="已停止议价抓取，并返回首页"))
+                    if is_temp_runtime:
+                        self.after(0, lambda: self.status_lbl.config(text="已停止议价抓取，后台浏览器已关闭"))
+                    else:
+                        self.after(0, lambda: self.status_lbl.config(text="已停止议价抓取"))
 
             threading.Thread(target=_stop_bargain_async, daemon=True).start()
             if not self._publish_running:
