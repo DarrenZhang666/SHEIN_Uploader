@@ -102,6 +102,19 @@ class SheinApp(tk.Tk):
         """统一输出简化上品进度日志。"""
         if not asin:
             return
+        # 直接按 ASIN 更新，避免多线程日志路由时序导致串行/错位。
+        try:
+            s = str(stage or "")
+            if s == "开始上品":
+                self._set_asin_progress(asin, 10, "开始上品", state="running")
+            elif s == "上品中":
+                self._set_asin_progress(asin, 15, "上品中", state="running")
+            elif s == "上品成功":
+                self._set_asin_progress(asin, 100, "上品成功", state="success")
+            elif s == "上品失败":
+                self._set_asin_progress(asin, 100, "上品失败", state="fail")
+        except Exception:
+            pass
         self._pub_log("{} {}".format(asin, stage))
 
     def _set_publish_status(self, asin, detailed_msg, stage_for_non_dev=None):
@@ -354,6 +367,9 @@ class SheinApp(tk.Tk):
         if text is None:
             text = cur.get("text", "未上品")
         pct = max(0, min(100, int(pct)))
+        # 运行中阶段不允许回退，避免并发日志时序导致进度条倒退。
+        if state == "running" and cur.get("state") == "running":
+            pct = max(int(cur.get("pct", 0)), pct)
         color_map = {
             "idle": "#64748b",
             "running": "#3b82f6",
@@ -370,30 +386,44 @@ class SheinApp(tk.Tk):
 
     def _update_publish_progress_by_msg(self, asin, msg):
         m = str(msg or "")
-        if "识图" in m:
-            self._set_asin_progress(asin, 25, "识图发品中", state="running"); return
-        if "类目" in m:
-            self._set_asin_progress(asin, 35, "确认类目", state="running"); return
-        if "填写商品基础信息" in m or "填写基础信息" in m:
-            self._set_asin_progress(asin, 45, "填写基础信息", state="running"); return
-        if "基础信息填写完成" in m:
-            self._set_asin_progress(asin, 50, "基础信息已完成", state="running"); return
-        if "填写规格" in m:
-            self._set_asin_progress(asin, 62, "填写规格信息", state="running"); return
-        if "上传细节图" in m:
-            self._set_asin_progress(asin, 70, "上传细节图中", state="running"); return
-        if "规格已确定" in m or "规格及供应信息填写完成" in m:
-            self._set_asin_progress(asin, 68, "规格已确定", state="running"); return
-        if "发布" in m or "确认弹窗" in m or "结果文案" in m:
-            self._set_asin_progress(asin, 88, "确认其他信息中", state="running"); return
-        if "商品已提交发布" in m:
+        # 按“后期阶段优先”匹配，避免宽泛关键词把进度卡在早期。
+        if "商品已提交发布" in m or "提交成功，等待审核中" in m:
             self._set_asin_progress(asin, 100, "完成发布", state="success"); return
-        if "发布失败" in m:
+        if "发布失败" in m or "上品失败" in m:
             self._set_asin_progress(asin, 100, "发布失败", state="fail"); return
+        if ("点击发布商品" in m or "等待确认弹窗" in m or "确认弹窗" in m
+                or "结果文案" in m or "一键翻译并发布" in m):
+            self._set_asin_progress(asin, 88, "确认其他信息中", state="running"); return
+        if "细节图上传完成" in m:
+            self._set_asin_progress(asin, 75, "细节图上传完成", state="running"); return
+        if ("SKU行" in m and "图" in m and "已提交" in m) or "开始上传细节图" in m or "上传细节图" in m:
+            # 需求：细节图阶段从 50% 开始，逐步到 75%
+            self._set_asin_progress(asin, 50, "上传细节图中", state="running"); return
+        if "规格及供应信息填写完成" in m or "规格已确定" in m:
+            self._set_asin_progress(asin, 68, "规格已确定", state="running"); return
+        if "开始填写规格及供应信息" in m or "填写规格" in m:
+            self._set_asin_progress(asin, 55, "填写规格信息", state="running"); return
+        if "商品基础信息填写完成" in m or "基础信息填写完成" in m:
+            self._set_asin_progress(asin, 45, "基础信息已完成", state="running"); return
+        if "开始填写商品基础信息" in m or "填写商品基础信息" in m or "填写基础信息" in m:
+            self._set_asin_progress(asin, 40, "填写基础信息", state="running"); return
+        if ("确认，下一步" in m or "推荐类目" in m or "确认类目" in m
+                or "选择第一个推荐类目" in m or "点击确认类目" in m):
+            self._set_asin_progress(asin, 35, "确认类目", state="running"); return
+        if ("识图发品" in m or "识图" in m or "上传图片" in m or "推荐类目" in m):
+            self._set_asin_progress(asin, 25, "识图发品中", state="running"); return
 
     def _route_asin_progress_from_log(self, msg):
         """从上传日志中提取更细阶段（例如第X张细节图）。"""
         m = str(msg or "")
+        # 优先使用日志内显式 ASIN，避免多线程串扰。
+        asin_from_msg = None
+        try:
+            _m_asin = re.search(r"\bB[A-Z0-9]{9}\b", m)
+            if _m_asin:
+                asin_from_msg = _m_asin.group(0)
+        except Exception:
+            asin_from_msg = None
         # 多线程日志通常带 [Wn] 前缀，先按 worker->ASIN 映射到对应进度条
         _wm = re.match(r"^\[W(\d+)\]\s*(.*)$", m)
         if _wm:
@@ -409,6 +439,8 @@ class SheinApp(tk.Tk):
                         target_asin = self._worker_active_asins.get(worker_idx)
                 except Exception:
                     target_asin = None
+            if not target_asin and asin_from_msg:
+                target_asin = asin_from_msg
             if target_asin:
                 # 与单线程一致：根据阶段文案更新进度条文字
                 self._update_publish_progress_by_msg(target_asin, worker_msg)
@@ -416,25 +448,27 @@ class SheinApp(tk.Tk):
                     mm = re.search(r"图(\d+)已提交", worker_msg)
                     if mm and ("SKU行" in worker_msg):
                         img_idx = int(mm.group(1))
-                        pct = min(74, 68 + img_idx * 2)
+                        # 细节图上传阶段：从 50% 逐步推进到 75%
+                        pct = min(74, 50 + img_idx * 4)
                         self._set_asin_progress(
                             target_asin, pct, "上传第{}张细节图中".format(img_idx), state="running")
                         return
                     if "细节图上传完成" in worker_msg:
+                        # 需求：细节图上传完成时，到 3/4
                         self._set_asin_progress(target_asin, 75, "细节图上传完成", state="running")
                         return
                 except Exception:
                     pass
             return
 
-        asin = self._active_publish_asin or self.current_asin
+        asin = asin_from_msg or self._active_publish_asin or self.current_asin
         if not asin:
             return
         try:
             mm = re.search(r"图(\d+)已提交", m)
             if mm and ("SKU行" in m):
                 img_idx = int(mm.group(1))
-                pct = min(74, 68 + img_idx * 2)
+                pct = min(74, 50 + img_idx * 4)
                 self._set_asin_progress(asin, pct, "上传第{}张细节图中".format(img_idx), state="running")
                 return
             if "细节图上传完成" in m:
@@ -2181,7 +2215,28 @@ class SheinApp(tk.Tk):
 
         def _worker_loop(worker_idx):
             def _worker_log(msg):
-                self._pub_log('[W{}] {}'.format(worker_idx, str(msg)[:80]))
+                _msg = str(msg)[:220]
+                _asin = None
+                try:
+                    with self._worker_publishers_lock:
+                        _asin = self._worker_active_asins.get(worker_idx)
+                except Exception:
+                    _asin = None
+                # 直接把 worker 日志映射到 worker 当前 ASIN，避免多线程进度混乱。
+                if _asin:
+                    try:
+                        self._update_publish_progress_by_msg(_asin, _msg)
+                        _mm = re.search(r"图(\d+)已提交", _msg)
+                        if _mm and ("SKU行" in _msg):
+                            _img_idx = int(_mm.group(1))
+                            _pct = min(74, 50 + _img_idx * 4)
+                            self._set_asin_progress(
+                                _asin, _pct, "上传第{}张细节图中".format(_img_idx), state="running")
+                        elif "细节图上传完成" in _msg:
+                            self._set_asin_progress(_asin, 75, "细节图上传完成", state="running")
+                    except Exception:
+                        pass
+                self._pub_log('[W{}] {}'.format(worker_idx, _msg))
             worker_has_failure = False
 
             def _inject_login_session(driver):
