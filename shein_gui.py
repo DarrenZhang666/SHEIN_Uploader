@@ -351,8 +351,10 @@ class SheinApp(tk.Tk):
             self._set_asin_progress(asin, 10, "上品中", state="running")
         elif status == "success":
             self._set_asin_progress(asin, 100, "上品成功", state="success")
-        elif status in ("fail", "fetch_fail", "sku_too_many"):
+        elif status in ("fail", "sku_too_many"):
             self._set_asin_progress(asin, 100, "上品失败", state="fail")
+        elif status == "fetch_fail":
+            self._set_asin_progress(asin, 100, "抓取失败", state="fail")
 
     def _set_asin_progress(self, asin, pct=None, text=None, state="running"):
         """更新 ASIN 行内简化进度条与文字。"""
