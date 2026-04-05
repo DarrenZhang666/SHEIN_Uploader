@@ -19,6 +19,15 @@ def _noop_log(_msg):
     pass
 
 
+def _should_stop(should_stop):
+    if should_stop is None:
+        return False
+    try:
+        return bool(should_stop())
+    except Exception:
+        return False
+
+
 def _trim_text(v):
     return re.sub(r"\s+", " ", str(v or "")).strip()
 
@@ -31,9 +40,11 @@ def _is_driver_alive(driver):
         return False
 
 
-def _wait_ready(driver, timeout=15):
+def _wait_ready(driver, timeout=15, should_stop=None):
     end = time.time() + timeout
     while time.time() < end:
+        if _should_stop(should_stop):
+            return False
         try:
             if (driver.execute_script("return document.readyState") or "") == "complete":
                 return True
@@ -102,7 +113,7 @@ def _click_todo_entrance(driver):
     return False
 
 
-def _click_pending_filter_button(driver, log, timeout=8):
+def _click_pending_filter_button(driver, log, timeout=8, should_stop=None):
     """点击“待确认”筛选按钮（该按钮用于切换显示数据，不是表格列）。"""
     if By is None:
         return False
@@ -118,6 +129,8 @@ def _click_pending_filter_button(driver, log, timeout=8):
 
     end = time.time() + timeout
     while time.time() < end:
+        if _should_stop(should_stop):
+            return False
         for xp in xpaths:
             try:
                 els = driver.find_elements(By.XPATH, xp)
@@ -395,32 +408,6 @@ return rows;
         return []
 
 
-def extract_todo_drawer_html(driver):
-    """提取当前页面中『待办任务』抽屉HTML，若找不到则返回body HTML。"""
-    script = r"""
-const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
-const visible = (el) => {
-  if (!el) return false;
-  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
-  if (!st) return !!el.offsetParent;
-  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
-  const r = el.getBoundingClientRect();
-  return r.width > 0 && r.height > 0;
-};
-const drawers = Array.from(document.querySelectorAll('.soui-modal-panel,.soui-modal-wrapper,.soui-modal,.merchant-ui-drawer,[class*="drawer"]'))
-  .filter(visible);
-for (const d of drawers) {
-  const t = clean(d.innerText || '');
-  if (t.includes('待办任务')) return d.outerHTML || '';
-}
-return (document.body && document.body.outerHTML) ? document.body.outerHTML : '';
-"""
-    try:
-        return driver.execute_script(script) or ""
-    except Exception:
-        return ""
-
-
 def _pick_value(row_obj, keys):
     # 1) 精确 key
     for k in keys:
@@ -520,11 +507,13 @@ def _normalize_bargain_row(row_obj):
     }
 
 
-def _wait_fetch_pending_bargain_rows(driver, log, timeout=14, interval=0.7, assume_pending=False, xyz_only=True):
+def _wait_fetch_pending_bargain_rows(driver, log, timeout=14, interval=0.7, assume_pending=False, xyz_only=True, should_stop=None):
     end = time.time() + timeout
     max_seen = 0
 
     while time.time() < end:
+        if _should_stop(should_stop):
+            return []
         raw_rows = _extract_rows_from_todo_drawer_table(driver)
         if not raw_rows:
             # 兜底：旧逻辑
@@ -632,7 +621,7 @@ return {page, has_next: hasNext, total_pages: totalPages, total_items: totalItem
         return {"page": 1, "has_next": False, "total_pages": 1, "total_items": 0}
 
 
-def _click_next_todo_page(driver, log, timeout=8):
+def _click_next_todo_page(driver, log, timeout=8, should_stop=None):
     """点击分页“>”按钮，返回是否成功翻页。"""
     before = _get_todo_pagination_state(driver)
     if not before.get("has_next"):
@@ -673,6 +662,8 @@ return true;
 
     end = time.time() + timeout
     while time.time() < end:
+        if _should_stop(should_stop):
+            return False
         now = _get_todo_pagination_state(driver)
         if int(now.get("page", 1)) != int(before.get("page", 1)):
             log("议价流程：已翻到第 {} 页".format(now.get("page", 1)))
@@ -682,7 +673,7 @@ return true;
     return False
 
 
-def open_shein_suggest_price_popup(publisher=None, account="", log_cb=None, headless=False):
+def open_shein_suggest_price_popup(publisher=None, account="", log_cb=None, headless=False, should_stop=None):
     """打开 SHEIN 商品列表页并点击「价格调整待确认，请及时处理」。"""
     log = log_cb or _noop_log
 
@@ -695,18 +686,27 @@ def open_shein_suggest_price_popup(publisher=None, account="", log_cb=None, head
     if driver is None or not _is_driver_alive(driver):
         return False, "浏览器未就绪，请先登录 SHEIN", pub
 
+    if _should_stop(should_stop):
+        return False, "用户已停止议价抓取", pub
+
     log("议价流程：打开商品列表页面")
     driver.get(SHEIN_LIST_URL)
-    _wait_ready(driver, timeout=15)
+    _wait_ready(driver, timeout=15, should_stop=should_stop)
+    if _should_stop(should_stop):
+        return False, "用户已停止议价抓取", pub
     time.sleep(1.2)
 
     current_url = (driver.current_url or "").lower()
     if "login" in current_url:
         return False, "当前未登录 SHEIN，请先点击“登录 SHEIN”", pub
 
+    if _should_stop(should_stop):
+        return False, "用户已停止议价抓取", pub
     _dismiss_user_guide_next_buttons(driver, log, timeout=5, interval=1)
 
     for _ in range(10):
+        if _should_stop(should_stop):
+            return False, "用户已停止议价抓取", pub
         if _click_todo_entrance(driver):
             log("议价流程：已点击“价格调整待确认，请及时处理”")
             time.sleep(1.0)
@@ -714,9 +714,13 @@ def open_shein_suggest_price_popup(publisher=None, account="", log_cb=None, head
         time.sleep(0.5)
 
     log("议价流程：首次点击入口失败，尝试再次清理引导并重试")
+    if _should_stop(should_stop):
+        return False, "用户已停止议价抓取", pub
     _dismiss_user_guide_next_buttons(driver, log, timeout=6, interval=1)
 
     for _ in range(8):
+        if _should_stop(should_stop):
+            return False, "用户已停止议价抓取", pub
         if _click_todo_entrance(driver):
             log("议价流程：重试后已点击“价格调整待确认，请及时处理”")
             time.sleep(1.0)
@@ -726,7 +730,7 @@ def open_shein_suggest_price_popup(publisher=None, account="", log_cb=None, head
     return False, "未找到“价格调整待确认，请及时处理”入口，请确认页面已加载", pub
 
 
-def fetch_shein_pending_bargain_rows(publisher=None, account="", log_cb=None, headless=False):
+def fetch_shein_pending_bargain_rows(publisher=None, account="", log_cb=None, headless=False, should_stop=None):
     """打开议价入口并抓取弹窗中“待确认”行。"""
     log = log_cb or _noop_log
     ok, msg, pub = open_shein_suggest_price_popup(
@@ -734,6 +738,7 @@ def fetch_shein_pending_bargain_rows(publisher=None, account="", log_cb=None, he
         account=account,
         log_cb=log,
         headless=headless,
+        should_stop=should_stop,
     )
     if not ok:
         return False, msg, pub, []
@@ -742,9 +747,11 @@ def fetch_shein_pending_bargain_rows(publisher=None, account="", log_cb=None, he
     if driver is None or not _is_driver_alive(driver):
         return False, "议价入口已打开，但浏览器连接中断", pub, []
 
+    if _should_stop(should_stop):
+        return False, "用户已停止议价抓取", pub, []
     _dismiss_user_guide_next_buttons(driver, log, timeout=4, interval=0.8)
 
-    clicked_pending = _click_pending_filter_button(driver, log, timeout=8)
+    clicked_pending = _click_pending_filter_button(driver, log, timeout=8, should_stop=should_stop)
     state = _get_todo_pagination_state(driver)
     total_pages_hint = state.get("total_pages", 1)
     total_items_hint = state.get("total_items", 0)
@@ -756,6 +763,8 @@ def fetch_shein_pending_bargain_rows(publisher=None, account="", log_cb=None, he
     max_pages_guard = max(1, total_pages_hint or 1) + 5
 
     for _ in range(max_pages_guard):
+        if _should_stop(should_stop):
+            return False, "用户已停止议价抓取", pub, []
         st = _get_todo_pagination_state(driver)
         page_no = int(st.get("page", 1) or 1)
         if page_no in visited_pages:
@@ -770,6 +779,7 @@ def fetch_shein_pending_bargain_rows(publisher=None, account="", log_cb=None, he
             interval=0.7,
             assume_pending=clicked_pending,
             xyz_only=True,
+            should_stop=should_stop,
         )
 
         added = 0
@@ -801,7 +811,7 @@ def fetch_shein_pending_bargain_rows(publisher=None, account="", log_cb=None, he
         if (not st_after.get("has_next")) or (st_after.get("page", 1) >= st_after.get("total_pages", 1)):
             break
 
-        if not _click_next_todo_page(driver, log, timeout=8):
+        if not _click_next_todo_page(driver, log, timeout=8, should_stop=should_stop):
             break
 
     if not all_rows:

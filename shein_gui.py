@@ -8,8 +8,6 @@ from shein_mysql import verify_shein_account_detail
 from shein_checkprice import (
     fetch_shein_pending_bargain_rows,
     dismiss_shein_user_guides,
-    _extract_candidate_rows,
-    extract_todo_drawer_html,
 )
 from datetime import datetime
 
@@ -57,6 +55,10 @@ class SheinApp(tk.Tk):
         self._account_auth_periods = {}  # account -> (start_raw, end_raw)
         self._app_closing = False
         self._bargain_rows = []
+        self._bargain_progress_percent = 0.0
+        self._bargain_fetch_thread = None
+        self._bargain_fetch_running = False
+        self._stop_bargain_fetch = False
         
         # 初始化日志文件
         self._init_log_file()
@@ -308,6 +310,9 @@ class SheinApp(tk.Tk):
                 self.status_lbl.config(text="请先导入 ASIN 文件")
 
     def _fetch_shein_suggest_price(self):
+        if getattr(self, "_bargain_fetch_running", False):
+            messagebox.showinfo("议价", "正在抓取中，请先等待当前任务完成或点击“停止”")
+            return
         account = self.shein_account.get().strip()
         if not account:
             messagebox.showwarning('提示', '请先在「SHEIN账号」输入框中填写账号')
@@ -315,32 +320,78 @@ class SheinApp(tk.Tk):
         if not self._verify_account(account):
             return
 
+        self._stop_bargain_fetch = False
+        self._bargain_fetch_running = True
         self.status_lbl.config(text='议价功能：正在抓取“待确认”数据...')
+        self._set_bargain_progress("进入议价界面", state="running", percent=25)
 
         def _run():
             try:
+                import re
+                progress_state = {"total_pages": 1}
+
+                def _progress_log(msg):
+                    self._pub_log(msg)
+                    t = str(msg or "")
+                    # 读取总页数：议价流程：分页信息 页码 1/4，总条数 37
+                    m_total = re.search(r"页码\s*(\d+)\s*/\s*(\d+)", t)
+                    if m_total:
+                        total_pages = max(1, int(m_total.group(2)))
+                        progress_state["total_pages"] = total_pages
+                        self.after(
+                            0,
+                            lambda: self._set_bargain_progress("进入议价界面", state="running", percent=25),
+                        )
+                        return
+                    # 抓取第N页
+                    m_page = re.search(r"开始抓取第\s*(\d+)\s*页", t)
+                    if m_page:
+                        page = max(1, int(m_page.group(1)))
+                        total_pages = max(1, int(progress_state.get("total_pages", 1) or 1))
+                        # 线性区间：25%（进入页面）~90%（抓完最后一页）
+                        percent = 25 + (float(page) / float(total_pages)) * 65.0
+                        self.after(
+                            0,
+                            lambda p=page, pct=percent: self._set_bargain_progress(
+                                "抓取第{}页数据".format(p), state="running", percent=pct
+                            ),
+                        )
+                        return
+
                 ok, msg, pub, rows = fetch_shein_pending_bargain_rows(
                     publisher=self._shein_publisher,
                     account=account,
-                    log_cb=self._pub_log,
+                    log_cb=_progress_log,
                     headless=False,
+                    should_stop=lambda: bool(self._stop_bargain_fetch or self._app_closing),
                 )
                 self._shein_publisher = pub
                 self._shein_publisher_account = account
                 self._bargain_rows = rows or []
                 self.after(0, self._render_bargain_rows)
                 if ok:
+                    self.after(0, lambda: self._set_bargain_progress("完毕", state="success", percent=100))
                     self.after(0, lambda: self.status_lbl.config(text=msg))
                     self.after(0, lambda: messagebox.showinfo('议价', msg))
                 else:
-                    self.after(0, lambda: self.status_lbl.config(text=msg))
-                    self.after(0, lambda: messagebox.showwarning('议价', msg))
+                    if "用户已停止议价抓取" in str(msg):
+                        self.after(0, lambda: self._set_bargain_progress("已停止", state="fail"))
+                        self.after(0, lambda: self.status_lbl.config(text="议价流程已停止"))
+                    else:
+                        self.after(0, lambda: self._set_bargain_progress("抓取失败", state="fail"))
+                        self.after(0, lambda: self.status_lbl.config(text=msg))
+                        self.after(0, lambda: messagebox.showwarning('议价', msg))
             except Exception as e:
                 err = str(e)[:120]
+                self.after(0, lambda: self._set_bargain_progress("抓取失败", state="fail"))
                 self.after(0, lambda: self.status_lbl.config(text='议价流程失败: ' + err))
                 self.after(0, lambda: messagebox.showerror('议价', '议价流程失败：' + err))
+            finally:
+                self._bargain_fetch_running = False
+                self._bargain_fetch_thread = None
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._bargain_fetch_thread = threading.Thread(target=_run, daemon=True)
+        self._bargain_fetch_thread.start()
 
     def _build_bargain_panel(self,parent):
         self.bargain_panel=tk.Frame(parent,bg=BG_PANEL)
@@ -364,8 +415,26 @@ class SheinApp(tk.Tk):
             bg=BG_PANEL,
         )
         self._bargain_count_lbl.pack(side="left", padx=(8,0))
-        self._bargain_dump_btn = self._btn(top, "抓取页面信息", "#f59e0b", self._dump_bargain_page_info)
-        self._bargain_dump_btn.pack(side="right")
+        prog_wrap = tk.Frame(top, bg=BG_PANEL)
+        prog_wrap.pack(side="right", padx=(12, 0))
+        self._bargain_progress_lbl = tk.Label(
+            prog_wrap,
+            text="待开始",
+            font=("Segoe UI", 9),
+            fg=TEXT_SUB,
+            bg=BG_PANEL,
+        )
+        self._bargain_progress_lbl.pack(anchor="e")
+        self._bargain_progress_canvas = tk.Canvas(
+            prog_wrap,
+            width=260,
+            height=16,
+            bg=BG_PANEL,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._bargain_progress_canvas.pack(anchor="e", pady=(3, 0))
+        self._set_bargain_progress("待开始", state="running", percent=0)
 
         wrap = tk.Frame(self.bargain_panel, bg=BG_CARD)
         wrap.pack(fill="both", expand=True, padx=18, pady=(0,14))
@@ -440,51 +509,44 @@ class SheinApp(tk.Tk):
         if hasattr(self, "_bargain_count_lbl"):
             self._bargain_count_lbl.config(text="{} 条".format(len(rows)))
 
-    def _dump_bargain_page_info(self):
-        pub = getattr(self, "_shein_publisher", None)
-        driver = getattr(pub, "driver", None) if pub else None
-        if driver is None:
-            messagebox.showwarning("议价", "请先登录SHEIN并打开议价页面")
+    def _draw_bargain_progress_bar(self, percent, color):
+        cv = getattr(self, "_bargain_progress_canvas", None)
+        if cv is None:
             return
         try:
-            _ = driver.current_url
+            cv.delete("all")
+            w = int(cv.cget("width"))
+            h = int(cv.cget("height"))
+            y = h // 2
+            pad = 6
+            x1 = pad
+            x2 = w - pad
+            # 底槽（圆弧）
+            cv.create_line(x1, y, x2, y, width=12, capstyle=tk.ROUND, fill="#2b3545")
+            # 进度（圆弧）
+            p = max(0.0, min(100.0, float(percent)))
+            fx = x1 + (x2 - x1) * (p / 100.0)
+            if fx > x1 + 0.3:
+                cv.create_line(x1, y, fx, y, width=12, capstyle=tk.ROUND, fill=color)
         except Exception:
-            messagebox.showwarning("议价", "浏览器连接不可用，请重新登录SHEIN")
+            pass
+
+    def _set_bargain_progress(self, text, state="running", percent=None):
+        lbl = getattr(self, "_bargain_progress_lbl", None)
+        cv = getattr(self, "_bargain_progress_canvas", None)
+        if lbl is None or cv is None:
             return
-
-        self.status_lbl.config(text="议价功能：正在抓取页面HTML到日志...")
-
-        def _run():
-            try:
-                # 先尝试清一次引导，减少遮挡
-                dismiss_shein_user_guides(driver, log_cb=self._pub_log, timeout=3, interval=0.5)
-
-                html = extract_todo_drawer_html(driver)
-                if not html:
-                    self.after(0, lambda: self.status_lbl.config(text="议价功能：未抓到页面HTML"))
-                    self.after(0, lambda: messagebox.showwarning("议价", "未抓取到页面HTML，请确认页面可见"))
-                    return
-
-                header = "===== 议价页面HTML开始（长度:{}） =====".format(len(html))
-                footer = "===== 议价页面HTML结束 ====="
-                self._pub_log(header)
-
-                # 分段写日志，避免一次写入过大导致UI阻塞
-                chunk_size = 4000
-                total = (len(html) + chunk_size - 1) // chunk_size
-                for i in range(total):
-                    chunk = html[i * chunk_size:(i + 1) * chunk_size]
-                    self._pub_log("[HTML分段 {}/{}] {}".format(i + 1, total, chunk))
-                self._pub_log(footer)
-
-                self.after(0, lambda: self.status_lbl.config(text="议价功能：页面HTML已写入日志（{}字符）".format(len(html))))
-                self.after(0, lambda: messagebox.showinfo("议价", "页面HTML已写入日志，可复制发给我继续优化"))
-            except Exception as e:
-                err = str(e)[:200]
-                self.after(0, lambda: self.status_lbl.config(text="议价功能：抓取页面信息失败"))
-                self.after(0, lambda: messagebox.showerror("议价", "抓取页面信息失败：{}".format(err)))
-
-        threading.Thread(target=_run, daemon=True).start()
+        color_map = {
+            "running": "#3b82f6",
+            "success": "#22c55e",
+            "fail": "#ef4444",
+        }
+        if percent is not None:
+            self._bargain_progress_percent = max(0.0, min(100.0, float(percent)))
+        elif state == "success":
+            self._bargain_progress_percent = 100.0
+        self._draw_bargain_progress_bar(self._bargain_progress_percent, color_map.get(state, "#3b82f6"))
+        lbl.config(text=str(text or ""))
 
     def _toggle_main_panels_for_mode(self):
         if self.current_view_mode == "bargain":
@@ -624,8 +686,8 @@ class SheinApp(tk.Tk):
         )
         st.map(
             "Bargain.Treeview",
-            background=[("selected", "#dbeafe")],
-            foreground=[("selected", TEXT_MAIN)],
+            background=[("selected", "#243447"), ("!focus", "#243447")],
+            foreground=[("selected", "#EAF3FF"), ("!focus", "#EAF3FF")],
         )
 
     def _btn(self,parent,text,color,cmd):
@@ -2836,6 +2898,34 @@ class SheinApp(tk.Tk):
 
     def _stop_publish_action(self):
         """停止上品进程。"""
+        if getattr(self, "_bargain_fetch_running", False):
+            self._stop_bargain_fetch = True
+            self._set_bargain_progress("正在停止...", state="fail")
+            self.status_lbl.config(text="正在停止议价抓取并返回首页...")
+            try:
+                if self._shein_publisher is not None:
+                    setattr(self._shein_publisher, "_stop_publish", True)
+            except Exception:
+                pass
+
+            def _stop_bargain_async():
+                try:
+                    pub = self._shein_publisher
+                    driver = getattr(pub, "driver", None) if pub else None
+                    if driver is not None:
+                        try:
+                            _ = driver.current_url
+                            driver.get("https://sso.geiwohuo.com/#/home")
+                        except Exception:
+                            pass
+                finally:
+                    self.after(0, lambda: self._switch_view_mode("collect_publish"))
+                    self.after(0, lambda: self.status_lbl.config(text="已停止议价抓取，并返回首页"))
+
+            threading.Thread(target=_stop_bargain_async, daemon=True).start()
+            if not self._publish_running:
+                return
+
         if not self._stop_publish:
             self._publish_session_id += 1  # 使当前会话立即失效，强制旧线程退出
             self._stop_publish = True
