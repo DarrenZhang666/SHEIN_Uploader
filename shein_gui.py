@@ -52,6 +52,8 @@ class SheinApp(tk.Tk):
         
         self._build_ui(); self._apply_styles()
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
+        # 兜底：任何路径导致根窗口销毁时，都确保进程退出
+        self.bind("<Destroy>", self._on_root_destroy, add="+")
 
     def _init_log_file(self):
         """初始化日志目录（仅在开发者模式写日志时创建文件）。"""
@@ -2396,8 +2398,20 @@ class SheinApp(tk.Tk):
                 self.destroy()
             except Exception:
                 pass
+            try:
+                os._exit(0)
+            except Exception:
+                pass
             return
         self._app_closing = True
+        def _hard_exit_after_delay():
+            # 兜底：避免线程池/driver 残留导致主进程不退出
+            try:
+                time.sleep(0.6)
+                os._exit(0)
+            except Exception:
+                pass
+        threading.Thread(target=_hard_exit_after_delay, daemon=True).start()
         try:
             self._stop_publish = True
             self._publish_session_id += 1
@@ -2412,6 +2426,28 @@ class SheinApp(tk.Tk):
             self.destroy()
         except Exception:
             pass
+        try:
+            os._exit(0)
+        except Exception:
+            pass
+
+    def _on_root_destroy(self, event):
+        """根窗口被销毁时的最终兜底退出。"""
+        try:
+            if event is None or event.widget is not self:
+                return
+        except Exception:
+            return
+        if self._app_closing:
+            return
+        self._app_closing = True
+        def _force_exit():
+            try:
+                time.sleep(0.2)
+                os._exit(0)
+            except Exception:
+                pass
+        threading.Thread(target=_force_exit, daemon=True).start()
 
 
 

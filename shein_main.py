@@ -126,6 +126,13 @@ if __name__ == '__main__':
         pass
     finally:
         try:
-            app.destroy()
+            if hasattr(app, "_on_app_close"):
+                app._on_app_close()
+            else:
+                app.destroy()
+        except Exception:
+            pass
+        try:
+            os._exit(0)
         except Exception:
             pass
