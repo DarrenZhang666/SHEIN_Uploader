@@ -1368,6 +1368,67 @@ class SheinApp(tk.Tk):
 
         return False, "no_confirmed_session"
 
+    def _dismiss_announcements_quick(self, driver):
+        """快速关闭公告弹窗：单次点击，不做长等待。"""
+        script = r"""
+const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const visible = (el) => {
+  if (!el) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (!st) return !!el.offsetParent;
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+const targets = ['我已确认本公告内容', '我已确认本公告，下一条', '下一条', '我知道了'];
+const btns = Array.from(document.querySelectorAll('button,span,div,a')).filter(visible);
+for (const b of btns) {
+  const t = clean(b.innerText || b.textContent || '');
+  if (!t) continue;
+  for (const kw of targets) {
+    if (t.includes(kw)) {
+      try { b.click(); return kw; } catch (e) {}
+    }
+  }
+}
+return '';
+"""
+        try:
+            clicked = driver.execute_script(script) or ""
+            if clicked:
+                self._pub_log("[LOGIN] 已快速关闭公告: {}".format(clicked))
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _has_publish_entry_text(self, driver):
+        """快速检测发布页是否已出现“识图发品”等关键文案。"""
+        script = r"""
+const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const visible = (el) => {
+  if (!el) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (!st) return !!el.offsetParent;
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+const body = document && document.body ? clean(document.body.innerText || '') : '';
+if (body.includes('识图发品')) return true;
+const nodes = Array.from(document.querySelectorAll('button,span,div,a')).filter(visible);
+for (const n of nodes) {
+  const t = clean(n.innerText || n.textContent || '');
+  if (!t) continue;
+  if (t.includes('识图发品') || t.includes('上传图片')) return true;
+}
+return false;
+"""
+        try:
+            return bool(driver.execute_script(script))
+        except Exception:
+            return False
+
 
     def _watch_login(self, pub, timeout=180):
         """后台轮询检测SHEIN登录状态，成功后更新按钮显示账号。"""
@@ -1376,29 +1437,36 @@ class SheinApp(tk.Tk):
         logged_in = False
         login_reason = ""
         while _t.time() < end:
-            try:
-                _ok, _reason = self._has_confirmed_shein_session(pub.driver)
-                if _ok:
-                    # 双重确认：连续两次命中成功条件才认定登录，降低瞬时跳转误判
-                    _t.sleep(0.9)
-                    _ok2, _reason2 = self._has_confirmed_shein_session(pub.driver)
-                    if _ok2:
-                        logged_in = True
-                        login_reason = _reason2 or _reason or "unknown"
-                        break
-            except Exception:
-                pass
             # 浏览器已被手动关闭或失效时，不再继续误判
             if not self._is_publisher_reusable(pub):
                 return
-            _t.sleep(1.5)
+            try:
+                # 先快速处理公告弹窗，避免遮挡导致“识图发品”不可见
+                self._dismiss_announcements_quick(pub.driver)
+
+                # 每1秒检测页面是否出现“识图发品”，命中即判定登录成功
+                if self._has_publish_entry_text(pub.driver):
+                    logged_in = True
+                    login_reason = "dom_text_识图发品"
+                    break
+
+                # 兜底：保留原有会话判断，避免页面文案变化时失效
+                _ok, _reason = self._has_confirmed_shein_session(pub.driver)
+                if _ok:
+                    logged_in = True
+                    login_reason = _reason or "session_confirmed"
+                    break
+            except Exception:
+                pass
+            _t.sleep(1.0)
 
         if not logged_in:
             return
         self._pub_log("[OK] 登录判定成功依据: {}".format(login_reason or "unknown"))
+        self.after(0, lambda: self.status_lbl.config(text="检测到登录成功，正在完成初始化..."))
 
-        # 已登录，等待页面完全渲染
-        _t.sleep(2)
+        # 已登录后仅做极短等待，避免“已打开商品发布页”阶段长时间停留
+        _t.sleep(0.3)
         # 非开发者模式下：若页面非中文，保留当前页面供手动调试语言，不做关闭处理
         if not is_dev_mode():
             try:
@@ -1430,7 +1498,7 @@ class SheinApp(tk.Tk):
         else:
             self._pub_log("登录后已在商品发布页，跳过重复刷新")
         try:
-            dismiss_shein_user_guides(pub.driver, log_cb=self._pub_log, timeout=10, interval=1)
+            dismiss_shein_user_guides(pub.driver, log_cb=self._pub_log, timeout=5, interval=1)
         except Exception as _guide_e:
             self._pub_log("登录后处理引导异常: {}".format(str(_guide_e)[:80]))
         account = ""
