@@ -29,18 +29,17 @@ def _make_sign(shein_id: str, timestamp: int) -> str:
     ).hexdigest()
 
 
-def verify_shein_account(shein_id: str) -> tuple[bool, str]:
+def verify_shein_account_detail(shein_id: str):
     """
-    向服务器验证 shein_id 是否授权。
+    向服务器验证 shein_id 是否授权，并返回授权有效期。
 
     Returns:
-        (True,  "验证通过")       — 账号有效
-        (False, "账号未授权...")   — 账号无效或过期
-        (False, "网络错误...")     — 无法连接服务器
+        (ok, msg, start_time, end_time)
+        start_time / end_time 可能为空字符串（取决于服务端返回）
     """
     shein_id = shein_id.strip()
     if not shein_id:
-        return False, "账号不能为空"
+        return False, "账号不能为空", "", ""
 
     timestamp = int(time.time())
     sign = _make_sign(shein_id, timestamp)
@@ -54,27 +53,61 @@ def verify_shein_account(shein_id: str) -> tuple[bool, str]:
     try:
         resp = requests.post(_AUTH_API_URL, json=payload, timeout=_REQUEST_TIMEOUT)
     except requests.ConnectionError:
-        return False, "无法连接验证服务器，请检查网络"
+        return False, "无法连接验证服务器，请检查网络", "", ""
     except requests.Timeout:
-        return False, "验证服务器响应超时，请稍后重试"
+        return False, "验证服务器响应超时，请稍后重试", "", ""
     except Exception as e:
-        return False, f"网络异常: {str(e)[:80]}"
+        return False, f"网络异常: {str(e)[:80]}", "", ""
 
     if resp.status_code == 429:
-        return False, "请求过于频繁，请稍后再试"
+        return False, "请求过于频繁，请稍后再试", "", ""
     if resp.status_code == 403:
-        return False, "验证请求被拒绝（签名或时间戳异常）"
+        return False, "验证请求被拒绝（签名或时间戳异常）", "", ""
     if resp.status_code != 200:
-        return False, f"服务器错误 (HTTP {resp.status_code})"
+        return False, f"服务器错误 (HTTP {resp.status_code})", "", ""
 
     try:
         data = resp.json()
     except Exception:
-        return False, "服务器返回数据格式异常"
+        return False, "服务器返回数据格式异常", "", ""
 
     if data.get("success") is True:
-        return True, "验证通过"
-    return False, "该SHEIN账号未授权或已过期，请联系管理员"
+        payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+        start_time = (
+            data.get("start_time")
+            or data.get("start")
+            or payload_data.get("start_time")
+            or payload_data.get("start")
+            or ""
+        )
+        end_time = (
+            data.get("end_time")
+            or data.get("end")
+            or payload_data.get("end_time")
+            or payload_data.get("end")
+            or ""
+        )
+        return True, "验证通过", str(start_time or ""), str(end_time or "")
+
+    err_msg = (
+        data.get("message")
+        or data.get("msg")
+        or "该SHEIN账号未授权或已过期，请联系管理员"
+    )
+    return False, str(err_msg), "", ""
+
+
+def verify_shein_account(shein_id: str) -> tuple[bool, str]:
+    """
+    向服务器验证 shein_id 是否授权。
+
+    Returns:
+        (True,  "验证通过")       — 账号有效
+        (False, "账号未授权...")   — 账号无效或过期
+        (False, "网络错误...")     — 无法连接服务器
+    """
+    ok, msg, _, _ = verify_shein_account_detail(shein_id)
+    return ok, msg
 
 
 if __name__ == "__main__":

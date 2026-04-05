@@ -4,7 +4,8 @@
 from shein_main import *
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from shein_developer_mode import DevModeToggle, is_dev_mode
-from shein_mysql import verify_shein_account
+from shein_mysql import verify_shein_account_detail
+from datetime import datetime
 
 class SheinApp(tk.Tk):
     def __init__(self):
@@ -46,6 +47,7 @@ class SheinApp(tk.Tk):
         self._preview_inflight = set()
         self._active_publish_asin = None
         self._verified_accounts: set[str] = set()
+        self._account_auth_periods = {}  # account -> (start_raw, end_raw)
         self._app_closing = False
         
         # 初始化日志文件
@@ -173,6 +175,14 @@ class SheinApp(tk.Tk):
         self._build_left(body); self._build_right(body)
         self._dev_toggle = DevModeToggle(self, bg=BG_DARK)
         self._dev_toggle.place(relx=0.0, rely=1.0, anchor="sw", x=16, y=-6)
+        self._license_lbl = tk.Label(
+            self,
+            text="软件有效期：未验证",
+            font=("Segoe UI", 10, "bold"),
+            fg=RED,
+            bg=BG_DARK,
+        )
+        self._license_lbl.place(relx=1.0, rely=1.0, anchor="se", x=-16, y=-6)
 
     def _build_topbar(self):
         bar=tk.Frame(self,bg=BG_PANEL,height=60)
@@ -782,17 +792,91 @@ class SheinApp(tk.Tk):
 
     def _verify_account(self, account: str) -> bool:
         """验证 SHEIN 账号是否已授权，通过后缓存结果。"""
+        account = (account or "").strip()
+        if not account:
+            return False
         if account in self._verified_accounts:
-            return True
+            start_raw, end_raw = self._account_auth_periods.get(account, ("", ""))
+            period_ok, period_msg = self._check_local_period(start_raw, end_raw)
+            self._update_license_text(start_raw, end_raw)
+            if period_ok:
+                return True
+            self.status_lbl.config(text='账号验证失败')
+            messagebox.showerror('账号验证失败', period_msg)
+            return False
+
         self.status_lbl.config(text='正在验证账号授权...')
-        ok, msg = verify_shein_account(account)
+        ok, msg, start_raw, end_raw = verify_shein_account_detail(account)
         if ok:
+            period_ok, period_msg = self._check_local_period(start_raw, end_raw)
+            self._update_license_text(start_raw, end_raw)
+            if not period_ok:
+                self.status_lbl.config(text='账号验证失败')
+                messagebox.showerror('账号验证失败', period_msg)
+                return False
             self._verified_accounts.add(account)
+            self._account_auth_periods[account] = (start_raw, end_raw)
             self.status_lbl.config(text='账号验证通过')
             return True
         self.status_lbl.config(text='账号验证失败')
         messagebox.showerror('账号验证失败', msg)
         return False
+
+    @staticmethod
+    def _parse_period_datetime(raw_value):
+        """解析服务端返回的 start/end 时间，兼容常见格式。"""
+        if raw_value is None:
+            return None
+        txt = str(raw_value).strip()
+        if not txt:
+            return None
+        txt = txt.replace("T", " ").replace("/", "-")
+        if txt.endswith("Z"):
+            txt = txt[:-1]
+        # 去掉毫秒（如 2026-12-21 23:59:59.000）
+        if "." in txt:
+            txt = txt.split(".", 1)[0]
+        fmts = (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+        )
+        for fmt in fmts:
+            try:
+                return datetime.strptime(txt, fmt)
+            except Exception:
+                continue
+        return None
+
+    def _check_local_period(self, start_raw, end_raw):
+        """
+        使用本机当前时间校验软件有效期。
+        返回 (True/False, message)。
+        """
+        start_dt = self._parse_period_datetime(start_raw)
+        end_dt = self._parse_period_datetime(end_raw)
+        if start_dt is None or end_dt is None:
+            return False, "账号有效期数据异常（缺少 start_time / end_time），请联系管理员"
+        now_dt = datetime.now()
+        if now_dt < start_dt or now_dt > end_dt:
+            return False, "当前时间不在软件有效期内，禁止使用。\n有效期：{} 至 {}".format(
+                start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
+        return True, ""
+
+    def _update_license_text(self, start_raw, end_raw):
+        """更新右下角有效期显示。"""
+        if not hasattr(self, "_license_lbl"):
+            return
+        start_dt = self._parse_period_datetime(start_raw)
+        end_dt = self._parse_period_datetime(end_raw)
+        if start_dt is None or end_dt is None:
+            txt = "软件有效期：未获取"
+        else:
+            txt = "软件有效期：{} 至 {}".format(
+                start_dt.strftime("%Y-%m-%d"),
+                end_dt.strftime("%Y-%m-%d"),
+            )
+        self._license_lbl.config(text=txt)
 
     def _open_shein(self):
         """打开 SHEIN 登录页面。"""
