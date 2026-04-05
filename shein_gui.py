@@ -1414,10 +1414,21 @@ class SheinApp(tk.Tk):
                 return
 
         try:
-            pub.driver.get(SHEIN_PUBLISH_URL)
+            now_url = (pub.driver.current_url or "").lower()
         except Exception:
-            pass
-        _t.sleep(1)
+            now_url = ""
+        already_publish_page = (
+            "followsales-pro/list" in now_url
+            and ("commoditiescategory" in now_url or "commodities-category" in now_url)
+        )
+        if not already_publish_page:
+            try:
+                pub.driver.get(SHEIN_PUBLISH_URL)
+            except Exception:
+                pass
+            _t.sleep(1)
+        else:
+            self._pub_log("登录后已在商品发布页，跳过重复刷新")
         try:
             dismiss_shein_user_guides(pub.driver, log_cb=self._pub_log, timeout=10, interval=1)
         except Exception as _guide_e:
