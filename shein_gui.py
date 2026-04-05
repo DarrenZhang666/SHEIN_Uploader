@@ -44,11 +44,13 @@ class SheinApp(tk.Tk):
         self._preview_inflight = set()
         self._active_publish_asin = None
         self._verified_accounts: set[str] = set()
+        self._app_closing = False
         
         # 初始化日志文件
         self._init_log_file()
         
         self._build_ui(); self._apply_styles()
+        self.protocol("WM_DELETE_WINDOW", self._on_app_close)
 
     def _init_log_file(self):
         """初始化日志目录（仅在开发者模式写日志时创建文件）。"""
@@ -1591,7 +1593,7 @@ class SheinApp(tk.Tk):
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
 
         except Exception as e:
-            if '用户已停止上品' in str(e):
+            if self._is_stop_requested(session_id=session_id) or '用户已停止上品' in str(e):
                 self._pub_log('[STOP] 用户已停止上品')
                 self._set_publish_status(target_asin, '已停止上品', "上品失败")
                 if target_asin:
@@ -2037,6 +2039,41 @@ class SheinApp(tk.Tk):
             return True
         except Exception:
             return False
+
+    def _shutdown_all_browsers(self, reason=""):
+        """关闭所有由本程序持有的浏览器与 webdriver 引用。"""
+        pubs = []
+        seen = set()
+        try:
+            if self._shein_publisher is not None:
+                pubs.append(self._shein_publisher)
+            with self._worker_publishers_lock:
+                for _p in self._worker_publishers.values():
+                    if _p is not None:
+                        pubs.append(_p)
+                self._worker_publishers = {}
+        except Exception:
+            pass
+
+        for pub in pubs:
+            try:
+                _id = id(pub)
+                if _id in seen:
+                    continue
+                seen.add(_id)
+                if hasattr(pub, "request_stop"):
+                    pub.request_stop(force_quit=True)
+                elif hasattr(pub, "quit"):
+                    pub.quit()
+                else:
+                    drv = getattr(pub, "driver", None)
+                    if drv is not None:
+                        drv.quit()
+            except Exception:
+                pass
+        self._shein_publisher = None
+        if reason:
+            self._pub_log("[STOP] 已关闭全部浏览器/driver: {}".format(reason))
   
 
     def _publish_worker(self,asins,max_workers=5,session_id=None):
@@ -2066,6 +2103,9 @@ class SheinApp(tk.Tk):
             _price_mult = 3.0
         # 同时启动过多浏览器会触发“授权中/网页无法访问”，限制到3更稳
         max_workers = min(max_workers, 3)
+        reusable_main_pub = self._shein_publisher if self._is_publisher_reusable(self._shein_publisher) else None
+        if reusable_main_pub is not None:
+            self._pub_log("[POOL] 复用主浏览器作为一个工作线程，减少额外driver进程")
         next_idx = 0
 
         def _next_asin():
@@ -2169,15 +2209,19 @@ class SheinApp(tk.Tk):
                 return False
 
             worker_account = '{}__w{}'.format(base_account, worker_idx)
-            pub = SheinPublisher(log_cb=_worker_log)
+            use_main_pub = (reusable_main_pub is not None and worker_idx == 1)
+            pub = reusable_main_pub if use_main_pub else SheinPublisher(log_cb=_worker_log)
             try:
-                # 先克隆已登录账号 profile，再补会话注入，尽量避免每个线程从登录页慢跳转
-                pub.start_browser(
-                    account=worker_account,
-                    clone_from_account=base_account,
-                    headless=(not is_dev_mode()),
-                    force_new=is_dev_mode(),
-                )
+                if not use_main_pub:
+                    # 先克隆已登录账号 profile，再补会话注入，尽量避免每个线程从登录页慢跳转
+                    pub.start_browser(
+                        account=worker_account,
+                        clone_from_account=base_account,
+                        headless=(not is_dev_mode()),
+                        force_new=is_dev_mode(),
+                    )
+                else:
+                    _worker_log("复用主浏览器实例")
                 with self._worker_publishers_lock:
                     self._worker_publishers[worker_idx] = pub
                 if not _ensure_publish_page(pub.driver):
@@ -2230,22 +2274,21 @@ class SheinApp(tk.Tk):
                             (session_id is not None and session_id != self._publish_session_id)
                         )
                         if stop_requested:
-                            if is_dev_mode():
-                                self._pub_log('[W{}] [DEV] 停止后保留当前页面'.format(worker_idx))
-                            else:
-                                try:
-                                    pub.cleanup_after_stop()
-                                except Exception:
-                                    pass
-                                try:
-                                    pub.driver.get(SHEIN_PUBLISH_URL)
-                                    self._pub_log('[W{}] [STOP] 已返回商品发布页'.format(worker_idx))
-                                except Exception as _stop_nav_e:
-                                    self._pub_log('[W{}] [STOP] 返回发布页失败: {}'.format(worker_idx, str(_stop_nav_e)[:60]))
+                            try:
+                                if hasattr(pub, "request_stop"):
+                                    pub.request_stop(force_quit=True)
+                                else:
+                                    pub.driver.quit()
+                            except Exception:
+                                pass
+                            self._pub_log('[W{}] [STOP] 已关闭浏览器与driver'.format(worker_idx))
                         elif is_dev_mode() and worker_has_failure:
                             self._pub_log('[W{}] [DEV] 检测到失败，保留当前浏览器页面用于排查'.format(worker_idx))
                         else:
-                            pub.driver.quit()
+                            if use_main_pub:
+                                self._pub_log('[W{}] [POOL] 主浏览器线程完成，保留主实例供后续复用'.format(worker_idx))
+                            else:
+                                pub.driver.quit()
                 except Exception:
                     pass
                 finally:
@@ -2269,11 +2312,11 @@ class SheinApp(tk.Tk):
 
     def _publish_done(self, success_list, fail_list, expected_total=None, show_popup=True):
         self.progress.stop()
-        self._stop_publish = False  # 重置停止标志，允许再次上品
         total = len(success_list) + len(fail_list)
         if expected_total is not None and total < expected_total:
             self.status_lbl.config(text="上品进行中：已完成 {}/{}，等待其余任务结束...".format(total, expected_total))
             return
+        self._stop_publish = False  # 全部线程结束后再重置，避免停止状态被过早清空
         msg = "上品完成！\n\n成功：{} 个\n失败：{} 个\n共计：{} 个".format(
             len(success_list), len(fail_list), total)
         if fail_list:
@@ -2289,119 +2332,41 @@ class SheinApp(tk.Tk):
     def _stop_publish_action(self):
         """停止上品进程。"""
         if not self._stop_publish:
-            stop_session_id = self._publish_session_id
             self._publish_session_id += 1  # 使当前会话立即失效，强制旧线程退出
             self._stop_publish = True
             self._reset_publishing_asins_to_unpublished()
-            stopped_pub = self._shein_publisher
-            with self._worker_publishers_lock:
-                worker_pubs = list(self._worker_publishers.values())
-            try:
-                if stopped_pub is not None:
-                    setattr(stopped_pub, '_stop_publish', True)
-            except Exception:
-                pass
-            for _wp in worker_pubs:
-                try:
-                    if _wp is not None:
-                        setattr(_wp, '_stop_publish', True)
-                except Exception:
-                    pass
+            self._shutdown_all_browsers(reason="用户点击停止")
             # 同时清理抓取线程
             self._fetch_thread = None
             self.progress.stop()
-            self.status_lbl.config(text="停止抓取信息...")
-
-            if worker_pubs:
-                def _stop_workers_after_stop():
-                    time.sleep(0.6)
-                    try:
-                        if stop_session_id != (self._publish_session_id - 1):
-                            return
-                        if is_dev_mode():
-                            self._pub_log("[DEV] 开发者模式：多线程停止后保留所有线程当前页面")
-                            self.after(0, lambda: self.status_lbl.config(
-                                text="已停止（开发者模式：线程页面保持不变）"))
-                            return
-                        self._pub_log("[STOP] 多线程停止：所有线程返回商品发布页...")
-                        with self._worker_publishers_lock:
-                            latest = list(self._worker_publishers.values())
-                        # 合并“停止瞬间快照”与“当前最新列表”，避免遗漏
-                        all_worker_pubs = []
-                        seen_ids = set()
-                        for wp in (worker_pubs + latest):
-                            if wp is None:
-                                continue
-                            _id = id(wp)
-                            if _id in seen_ids:
-                                continue
-                            seen_ids.add(_id)
-                            all_worker_pubs.append(wp)
-                        ok_cnt = 0
-                        total_cnt = len(all_worker_pubs)
-                        for i, wp in enumerate(all_worker_pubs, 1):
-                            try:
-                                drv = getattr(wp, "driver", None)
-                                if drv is None:
-                                    continue
-                                try:
-                                    wp.cleanup_after_stop()
-                                except Exception:
-                                    pass
-                                jumped = False
-                                for _ in range(2):
-                                    try:
-                                        drv.get(SHEIN_PUBLISH_URL)
-                                        jumped = True
-                                        break
-                                    except Exception:
-                                        time.sleep(0.4)
-                                if jumped:
-                                    ok_cnt += 1
-                                else:
-                                    self._pub_log("[STOP] 线程{}返回发布页失败: driver.get异常".format(i))
-                            except Exception as e:
-                                self._pub_log("[STOP] 线程{}返回发布页失败: {}".format(i, str(e)[:60]))
-                        self.after(0, lambda c=ok_cnt, t=total_cnt: self.status_lbl.config(
-                            text="已停止上品，{}/{} 个线程已返回商品发布页".format(c, t)))
-                    except Exception as e:
-                        self._pub_log("[STOP] 多线程停止收尾失败: {}".format(str(e)[:60]))
-
-                threading.Thread(target=_stop_workers_after_stop, daemon=True).start()
-                return
-
-            def _go_home_after_stop():
-                time.sleep(1.0)
-                try:
-                    if stop_session_id != (self._publish_session_id - 1):
-                        return
-
-                    pub = stopped_pub
-                    if pub is None or not pub.is_alive():
-                        return
-
-                    if is_dev_mode():
-                        self._pub_log("[DEV] 开发者模式：停留在当前页面，不做跳转")
-                        self.after(0, lambda: self.status_lbl.config(
-                            text="已停止（开发者模式：保持当前页面）"))
-                        return
-
-                    self._pub_log("[STOP] 停止后清理弹窗并返回主页...")
-                    try:
-                        pub.cleanup_after_stop()
-                    except Exception as e:
-                        self._pub_log("[STOP] 弹窗清理失败: {}".format(str(e)[:60]))
-
-                    if stop_session_id != (self._publish_session_id - 1):
-                        return
-                    pub.driver.get("https://www.geiwohuo.com/#/oversea-home")
-                    self.after(0, lambda: self.status_lbl.config(text="已停止抓取信息，已清理弹窗并返回主页"))
-                except Exception as e:
-                    self._pub_log("[STOP] 返回主页失败: {}".format(str(e)[:60]))
-
-            threading.Thread(target=_go_home_after_stop, daemon=True).start()
+            self.status_lbl.config(text="已停止上品：已立即终止所有任务")
+            self._pub_log("[STOP] 已强制停止：所有上品线程与浏览器实例已终止")
         else:
-            self.status_lbl.config(text="停止信号已发送，请稍候...")
+            self.status_lbl.config(text="已在停止中：任务终止信号已发送")
+
+    def _on_app_close(self):
+        """窗口关闭时确保回收全部浏览器与 driver。"""
+        if self._app_closing:
+            try:
+                self.destroy()
+            except Exception:
+                pass
+            return
+        self._app_closing = True
+        try:
+            self._stop_publish = True
+            self._publish_session_id += 1
+            self.progress.stop()
+        except Exception:
+            pass
+        try:
+            self._shutdown_all_browsers(reason="软件退出")
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
 
 
@@ -2502,7 +2467,10 @@ if __name__ == '__main__':
         pass
     finally:
         try:
-            app.destroy()
+            if hasattr(app, "_on_app_close"):
+                app._on_app_close()
+            else:
+                app.destroy()
         except Exception:
             pass
 

@@ -4187,6 +4187,30 @@ class SheinPublisher:
                 self.driver.quit()
         except Exception:
             pass
+        finally:
+            self.driver = None
+            self.wait = None
+            self.login_manager.driver = None
+            self.login_manager.wait = None
+
+    def request_stop(self, force_quit=False):
+        """
+        请求停止当前上品流程。
+        force_quit=True 时会强制关闭浏览器，以便尽快打断正在执行的 Selenium 动作。
+        """
+        self._stop_publish = True
+        if not force_quit:
+            return
+        try:
+            if self.driver:
+                self.driver.quit()
+        except Exception:
+            pass
+        finally:
+            self.driver = None
+            self.wait = None
+            self.login_manager.driver = None
+            self.login_manager.wait = None
     # ── 工具方法
 
     def _wait_click(self, by, sel, timeout=15):
