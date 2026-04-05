@@ -5,7 +5,12 @@ from shein_main import *
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from shein_developer_mode import DevModeToggle, is_dev_mode
 from shein_mysql import verify_shein_account_detail
-from shein_checkprice import open_shein_suggest_price_popup, dismiss_shein_user_guides
+from shein_checkprice import (
+    fetch_shein_pending_bargain_rows,
+    dismiss_shein_user_guides,
+    _extract_candidate_rows,
+    extract_todo_drawer_html,
+)
 from datetime import datetime
 
 class SheinApp(tk.Tk):
@@ -51,6 +56,7 @@ class SheinApp(tk.Tk):
         self._verified_accounts: set[str] = set()
         self._account_auth_periods = {}  # account -> (start_raw, end_raw)
         self._app_closing = False
+        self._bargain_rows = []
         
         # 初始化日志文件
         self._init_log_file()
@@ -309,11 +315,11 @@ class SheinApp(tk.Tk):
         if not self._verify_account(account):
             return
 
-        self.status_lbl.config(text='议价功能：正在打开商品列表并进入价格调整待确认...')
+        self.status_lbl.config(text='议价功能：正在抓取“待确认”数据...')
 
         def _run():
             try:
-                ok, msg, pub = open_shein_suggest_price_popup(
+                ok, msg, pub, rows = fetch_shein_pending_bargain_rows(
                     publisher=self._shein_publisher,
                     account=account,
                     log_cb=self._pub_log,
@@ -321,6 +327,8 @@ class SheinApp(tk.Tk):
                 )
                 self._shein_publisher = pub
                 self._shein_publisher_account = account
+                self._bargain_rows = rows or []
+                self.after(0, self._render_bargain_rows)
                 if ok:
                     self.after(0, lambda: self.status_lbl.config(text=msg))
                     self.after(0, lambda: messagebox.showinfo('议价', msg))
@@ -338,15 +346,145 @@ class SheinApp(tk.Tk):
         self.bargain_panel=tk.Frame(parent,bg=BG_PANEL)
         self.bargain_panel.grid(row=0,column=0,columnspan=2,sticky="nsew",pady=4)
         self.bargain_panel.grid_remove()
-        hint=tk.Label(
-            self.bargain_panel,
-            text="议价界面（预留区域）\n\n后续可在这里加入议价相关内容",
-            font=("Segoe UI",13),
+
+        top = tk.Frame(self.bargain_panel, bg=BG_PANEL)
+        top.pack(fill="x", padx=18, pady=(14,8))
+        tk.Label(
+            top,
+            text="议价待确认数据",
+            font=("Segoe UI", 12, "bold"),
+            fg=TEXT_MAIN,
+            bg=BG_PANEL,
+        ).pack(side="left")
+        self._bargain_count_lbl = tk.Label(
+            top,
+            text="0 条",
+            font=("Segoe UI", 10),
             fg=TEXT_SUB,
             bg=BG_PANEL,
-            justify="center"
         )
-        hint.pack(expand=True)
+        self._bargain_count_lbl.pack(side="left", padx=(8,0))
+        self._bargain_dump_btn = self._btn(top, "抓取页面信息", "#f59e0b", self._dump_bargain_page_info)
+        self._bargain_dump_btn.pack(side="right")
+
+        wrap = tk.Frame(self.bargain_panel, bg=BG_CARD)
+        wrap.pack(fill="both", expand=True, padx=18, pady=(0,14))
+
+        table_wrap = tk.Frame(wrap, bg=BG_CARD)
+        table_wrap.pack(fill="both", expand=True)
+
+        cols = ("supplier_no", "reason", "remaining_times", "sku_info", "sub_spec", "platform_price")
+        self._bargain_table = ttk.Treeview(
+            table_wrap,
+            columns=cols,
+            show="headings",
+            style="Bargain.Treeview",
+        )
+        self._bargain_table.heading("supplier_no", text="供方货号")
+        self._bargain_table.heading("reason", text="建议改价原因")
+        self._bargain_table.heading("remaining_times", text="剩余议价次数")
+        self._bargain_table.heading("sku_info", text="SKU信息")
+        self._bargain_table.heading("sub_spec", text="次规格")
+        self._bargain_table.heading("platform_price", text="平台建议价")
+
+        self._bargain_table.column("supplier_no", width=140, minwidth=120, anchor="w")
+        self._bargain_table.column("reason", width=220, minwidth=180, anchor="w")
+        self._bargain_table.column("remaining_times", width=100, minwidth=90, anchor="center")
+        self._bargain_table.column("sku_info", width=180, minwidth=150, anchor="w")
+        self._bargain_table.column("sub_spec", width=120, minwidth=100, anchor="w")
+        self._bargain_table.column("platform_price", width=120, minwidth=100, anchor="center")
+        # 统一使用「商品详情」区域同款底色，不做奇偶分色
+        self._bargain_table.tag_configure("odd", background=BG_CARD)
+        self._bargain_table.tag_configure("even", background=BG_CARD)
+
+        ysb = ttk.Scrollbar(table_wrap, orient="vertical", command=self._bargain_table.yview)
+        xsb = ttk.Scrollbar(table_wrap, orient="horizontal", command=self._bargain_table.xview)
+        self._bargain_table.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+
+        ysb.pack(side="right", fill="y")
+        xsb.pack(side="bottom", fill="x")
+        self._bargain_table.pack(side="left", fill="both", expand=True)
+
+        self._bargain_table.insert("", "end", values=("暂无数据，请点击顶部【抓取SHEIN建议价格】", "", "", "", "", ""), tags=("odd",))
+
+    def _render_bargain_rows(self):
+        rows = list(getattr(self, "_bargain_rows", []) or [])
+        table = getattr(self, "_bargain_table", None)
+        if table is None:
+            return
+
+        for iid in table.get_children():
+            table.delete(iid)
+
+        if not rows:
+            table.insert("", "end", values=("暂无“待确认”数据", "", "", "", "", ""), tags=("odd",))
+            if hasattr(self, "_bargain_count_lbl"):
+                self._bargain_count_lbl.config(text="0 条")
+            return
+
+        for i, r in enumerate(rows):
+            tag = "odd" if (i % 2 == 0) else "even"
+            table.insert(
+                "",
+                "end",
+                values=(
+                    r.get("supplier_no", ""),
+                    r.get("reason", ""),
+                    r.get("remaining_times", ""),
+                    r.get("sku_info", ""),
+                    r.get("sub_spec", ""),
+                    r.get("platform_price", ""),
+                ),
+                tags=(tag,),
+            )
+        if hasattr(self, "_bargain_count_lbl"):
+            self._bargain_count_lbl.config(text="{} 条".format(len(rows)))
+
+    def _dump_bargain_page_info(self):
+        pub = getattr(self, "_shein_publisher", None)
+        driver = getattr(pub, "driver", None) if pub else None
+        if driver is None:
+            messagebox.showwarning("议价", "请先登录SHEIN并打开议价页面")
+            return
+        try:
+            _ = driver.current_url
+        except Exception:
+            messagebox.showwarning("议价", "浏览器连接不可用，请重新登录SHEIN")
+            return
+
+        self.status_lbl.config(text="议价功能：正在抓取页面HTML到日志...")
+
+        def _run():
+            try:
+                # 先尝试清一次引导，减少遮挡
+                dismiss_shein_user_guides(driver, log_cb=self._pub_log, timeout=3, interval=0.5)
+
+                html = extract_todo_drawer_html(driver)
+                if not html:
+                    self.after(0, lambda: self.status_lbl.config(text="议价功能：未抓到页面HTML"))
+                    self.after(0, lambda: messagebox.showwarning("议价", "未抓取到页面HTML，请确认页面可见"))
+                    return
+
+                header = "===== 议价页面HTML开始（长度:{}） =====".format(len(html))
+                footer = "===== 议价页面HTML结束 ====="
+                self._pub_log(header)
+
+                # 分段写日志，避免一次写入过大导致UI阻塞
+                chunk_size = 4000
+                total = (len(html) + chunk_size - 1) // chunk_size
+                for i in range(total):
+                    chunk = html[i * chunk_size:(i + 1) * chunk_size]
+                    self._pub_log("[HTML分段 {}/{}] {}".format(i + 1, total, chunk))
+                self._pub_log(footer)
+
+                self.after(0, lambda: self.status_lbl.config(text="议价功能：页面HTML已写入日志（{}字符）".format(len(html))))
+                self.after(0, lambda: messagebox.showinfo("议价", "页面HTML已写入日志，可复制发给我继续优化"))
+            except Exception as e:
+                err = str(e)[:200]
+                self.after(0, lambda: self.status_lbl.config(text="议价功能：抓取页面信息失败"))
+                self.after(0, lambda: messagebox.showerror("议价", "抓取页面信息失败：{}".format(err)))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _toggle_main_panels_for_mode(self):
         if self.current_view_mode == "bargain":
@@ -467,6 +605,28 @@ class SheinApp(tk.Tk):
                      arrowcolor=TEXT_SUB,bordercolor=BG_PANEL)
         st.configure("TProgressbar",troughcolor=BG_CARD,background=ACCENT,
                      darkcolor=ACCENT,lightcolor=ACCENT2)
+        st.configure(
+            "Bargain.Treeview",
+            background=BG_CARD,
+            fieldbackground=BG_CARD,
+            foreground=TEXT_MAIN,
+            rowheight=28,
+            borderwidth=0,
+            relief="flat",
+            font=("Segoe UI", 10),
+        )
+        st.configure(
+            "Bargain.Treeview.Heading",
+            background=BG_CARD,
+            foreground=TEXT_MAIN,
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+        )
+        st.map(
+            "Bargain.Treeview",
+            background=[("selected", "#dbeafe")],
+            foreground=[("selected", TEXT_MAIN)],
+        )
 
     def _btn(self,parent,text,color,cmd):
         b=tk.Button(parent,text=text,bg=color,fg="white",
