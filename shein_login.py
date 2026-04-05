@@ -242,10 +242,25 @@ class SheinLoginManager:
 
     def start_browser(self, account="", clone_from_account="", headless=False, force_new=False):
         """启动浏览器。同一账号复用实例，不同账号用独立 profile 和端口。"""
-        import threading as _th
         import socket as _socket
         _t0 = time.time()
         self._disable_ie_esc_notice()
+
+        # 同一个 LoginManager 已有可用 driver 时，默认直接复用，避免重复拉起 driver 进程
+        try:
+            if self.driver is not None and (not force_new):
+                _ = self.driver.current_url
+                self.wait = WebDriverWait(self.driver, 20)
+                self.log("[OK] 复用当前浏览器会话 ({:.1f}s)".format(time.time() - _t0))
+                return
+        except Exception:
+            try:
+                if self.driver:
+                    self.driver.quit()
+            except Exception:
+                pass
+            self.driver = None
+            self.wait = None
 
         _port = self._get_debug_port(account)
         self.log("[DEBUG] 账号='{}' 调试端口={}".format(account or "(默认)", _port))
@@ -260,41 +275,29 @@ class SheinLoginManager:
             pass
 
         if _port_open and (not force_new):
-            # 端口有响应 → 并行尝试连接 Edge 和 Chrome
-            _edge_result = [None]
-            _chrome_result = [None]
-            def _try_edge():
-                try:
-                    _o = EdgeOptions()
-                    _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(_port))
-                    _d = webdriver.Edge(options=_o)
-                    _d.current_url
-                    _edge_result[0] = _d
-                except Exception:
-                    pass
-            def _try_chrome():
-                try:
-                    _o = Options()
-                    _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(_port))
-                    _d = webdriver.Chrome(options=_o)
-                    _d.current_url
-                    _chrome_result[0] = _d
-                except Exception:
-                    pass
-            _te = _th.Thread(target=_try_edge, daemon=True)
-            _tc = _th.Thread(target=_try_chrome, daemon=True)
-            _te.start(); _tc.start()
-            _te.join(timeout=3); _tc.join(timeout=3)
-            if _edge_result[0] is not None:
-                self.driver = _edge_result[0]
+            # 端口有响应 → 串行尝试连接，避免同一次调用额外拉起多个 driver 进程
+            try:
+                _o = EdgeOptions()
+                _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(_port))
+                _d = webdriver.Edge(options=_o)
+                _d.current_url
+                self.driver = _d
                 self.wait = WebDriverWait(self.driver, 20)
                 self.log("[OK] 已连接到现有 Edge ({:.1f}s)".format(time.time() - _t0))
                 return
-            if _chrome_result[0] is not None:
-                self.driver = _chrome_result[0]
+            except Exception:
+                pass
+            try:
+                _o = Options()
+                _o.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(_port))
+                _d = webdriver.Chrome(options=_o)
+                _d.current_url
+                self.driver = _d
                 self.wait = WebDriverWait(self.driver, 20)
                 self.log("[OK] 已连接到现有 Chrome ({:.1f}s)".format(time.time() - _t0))
                 return
+            except Exception:
+                pass
             self.log("[DEBUG] 端口{}有响应但连接失败，启动新浏览器".format(_port))
 
         # 启动新浏览器 — 每个账号独立的 profile 目录
@@ -431,6 +434,21 @@ class SheinLoginManager:
         """关闭浏览器"""
         try:
             if self.driver:
-                self.driver.quit()
+                _drv = self.driver
+                try:
+                    _drv.quit()
+                except Exception:
+                    pass
+                # 兜底：终止残留的 webdriver service 进程（若存在）
+                try:
+                    _svc = getattr(_drv, "service", None)
+                    _proc = getattr(_svc, "process", None) if _svc is not None else None
+                    if _proc is not None and _proc.poll() is None:
+                        _proc.terminate()
+                except Exception:
+                    pass
         except Exception:
             pass
+        finally:
+            self.driver = None
+            self.wait = None
