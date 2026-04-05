@@ -32,6 +32,7 @@ class SheinApp(tk.Tk):
         self._worker_publishers = {}  # 多线程worker浏览器实例 {worker_idx: publisher}
         self._worker_active_asins = {}  # 多线程worker当前处理ASIN {worker_idx: asin}
         self._worker_publishers_lock = threading.Lock()
+        self._stop_cleanup_running = False  # 避免重复触发停止清理线程
         self._login_cookies = []      # 登录会话快照：cookies
         self._login_storage = {}      # 登录会话快照：localStorage
         self._login_session_storage = {}  # 登录会话快照：sessionStorage
@@ -2437,14 +2438,27 @@ class SheinApp(tk.Tk):
             self._publish_session_id += 1  # 使当前会话立即失效，强制旧线程退出
             self._stop_publish = True
             self._reset_publishing_asins_to_unpublished()
-            self._shutdown_all_browsers(reason="用户点击停止")
-            # 同时清理抓取线程
+            # 关键优化：浏览器/driver 清理放到后台线程，避免主线程被 quit 阻塞导致界面卡死。
             self._fetch_thread = None
             self.progress.stop()
-            self.status_lbl.config(text="已停止上品：已立即终止所有任务")
-            self._pub_log("[STOP] 已强制停止：所有上品线程与浏览器实例已终止")
+            self.status_lbl.config(text="正在停止上品：后台清理浏览器与driver...")
+            self._pub_log("[STOP] 已发送停止信号，后台开始清理浏览器与driver")
+
+            if not self._stop_cleanup_running:
+                self._stop_cleanup_running = True
+                def _async_stop_cleanup():
+                    try:
+                        self._shutdown_all_browsers(reason="用户点击停止")
+                        self.after(0, lambda: self.status_lbl.config(text="已停止上品：所有任务已终止"))
+                        self._pub_log("[STOP] 停止完成：所有上品线程与浏览器实例已终止")
+                    finally:
+                        self._stop_cleanup_running = False
+                threading.Thread(target=_async_stop_cleanup, daemon=True).start()
         else:
-            self.status_lbl.config(text="已在停止中：任务终止信号已发送")
+            if self._stop_cleanup_running:
+                self.status_lbl.config(text="正在停止中：请稍候，浏览器清理进行中...")
+            else:
+                self.status_lbl.config(text="已在停止中：任务终止信号已发送")
 
     def _on_app_close(self):
         """窗口关闭时确保回收全部浏览器与 driver。"""
