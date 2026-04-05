@@ -22,6 +22,7 @@ class SheinApp(tk.Tk):
         self.fetch_workers=tk.StringVar(value="5")
         self.amazon_region=tk.StringVar(value="美国")
         self.shein_account=tk.StringVar(value="")
+        self.current_view_mode = "collect_publish"  # collect_publish / bargain
         self._fetch_thread=None; self._photo_ref=None
         self._launching_browser = False  # 防止重复点击登录按钮
         self._shein_publisher=None   # 持久化浏览器实例
@@ -173,6 +174,10 @@ class SheinApp(tk.Tk):
         body.columnconfigure(1,weight=1)
         body.rowconfigure(0,weight=1)
         self._build_left(body); self._build_right(body)
+
+
+        self._build_bargain_panel(body)
+        self._toggle_main_panels_for_mode()
         self._dev_toggle = DevModeToggle(self, bg=BG_DARK)
         self._dev_toggle.place(relx=0.0, rely=1.0, anchor="sw", x=16, y=-6)
         self._license_lbl = tk.Label(
@@ -189,7 +194,36 @@ class SheinApp(tk.Tk):
         bar.pack(fill="x"); bar.pack_propagate(False)
         lg=tk.Frame(bar,bg=BG_PANEL); lg.pack(side="left",padx=20)
         tk.Label(lg,text="SHEIN",font=("Segoe UI",18,"bold"),fg=ACCENT,bg=BG_PANEL).pack(side="left")
-        tk.Label(lg,text=" 商品采集 & 发布工具",font=("Segoe UI",13),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
+        mode_wrap = tk.Frame(lg, bg=BG_PANEL)
+        mode_wrap.pack(side="left", padx=(12,0))
+        self._mode_collect_btn = tk.Button(
+            mode_wrap,
+            text="商品采集&发布",
+            bg=ACCENT,
+            fg="white",
+            font=("Segoe UI",10,"bold"),
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=5,
+            cursor="hand2",
+            command=lambda: self._switch_view_mode("collect_publish")
+        )
+        self._mode_collect_btn.pack(side="left", padx=(0,6))
+        self._mode_bargain_btn = tk.Button(
+            mode_wrap,
+            text="议价",
+            bg=BG_CARD,
+            fg=TEXT_MAIN,
+            font=("Segoe UI",10,"bold"),
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=5,
+            cursor="hand2",
+            command=lambda: self._switch_view_mode("bargain")
+        )
+        self._mode_bargain_btn.pack(side="left")
         bf=tk.Frame(bar,bg=BG_PANEL); bf.pack(side="right",padx=20,pady=10)
         # 售价倍数输入框（在最后添加，寄弹出效果为最左侧）
         pm_frame=tk.Frame(bf,bg=BG_PANEL)
@@ -200,9 +234,13 @@ class SheinApp(tk.Tk):
         fw_frame.pack(side="left",padx=(0,10))
         tk.Label(fw_frame,text="运行线程:",font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         tk.Entry(fw_frame,textvariable=self.fetch_workers,width=4,font=("Segoe UI",10),bg=BG_CARD,fg=TEXT_MAIN,insertbackground=TEXT_MAIN,relief="flat",bd=2).pack(side="left",padx=(4,0))
-        self._btn(bf,"导入 ASIN 文本",ACCENT,self._import_txt).pack(side="left",padx=5)
-        self._btn(bf,"抓取选中商品","#2563eb",self._fetch_sel).pack(side="left",padx=5)
-        self._btn(bf,"开始上品","#7c3aed",self._open_publish_page).pack(side="left",padx=5)
+        self._import_btn = self._btn(bf,"导入 ASIN 文本",ACCENT,self._import_txt)
+        self._import_btn.pack(side="left",padx=5)
+        self._fetch_btn = self._btn(bf,"抓取选中商品","#2563eb",self._fetch_sel)
+        self._fetch_btn.pack(side="left",padx=5)
+        self._publish_btn = self._btn(bf,"开始上品","#7c3aed",self._open_publish_page)
+        self._publish_btn.pack(side="left",padx=5)
+        self._suggest_price_btn = self._btn(bf,"抓取SHEIN建议价格","#0ea5a4",self._fetch_shein_suggest_price)
         
         self._btn(bf,"停止","#dc2626",self._stop_publish_action).pack(side="left",padx=5)
         self._shein_login_btn = self._btn(bf,"登录 SHEIN","#059669",self._open_shein)
@@ -213,11 +251,94 @@ class SheinApp(tk.Tk):
         self._acct_combo = ttk.Combobox(acct_frame, textvariable=self.shein_account,
             width=18, font=("Segoe UI",10), values=self._load_account_history())
         self._acct_combo.pack(side="left",padx=(4,0))
+        self._apply_view_mode()
+        self._toggle_main_panels_for_mode()
+
+    def _switch_view_mode(self, mode):
+        if mode not in ("collect_publish", "bargain"):
+            return
+        if self.current_view_mode == mode:
+            return
+        self.current_view_mode = mode
+        self._apply_view_mode()
+        self._toggle_main_panels_for_mode()
+
+    def _apply_view_mode(self):
+        if not hasattr(self, "_mode_collect_btn"):
+            return
+
+        if self.current_view_mode == "bargain":
+            self._mode_collect_btn.config(bg=BG_CARD, fg=TEXT_MAIN)
+            self._mode_bargain_btn.config(bg=ACCENT, fg="white")
+
+            if hasattr(self, "_import_btn"):
+                self._import_btn.pack_forget()
+            if hasattr(self, "_fetch_btn"):
+                self._fetch_btn.pack_forget()
+            if hasattr(self, "_publish_btn"):
+                self._publish_btn.pack_forget()
+
+            if hasattr(self, "_suggest_price_btn"):
+                self._suggest_price_btn.pack(side="left", padx=5, before=self._shein_login_btn)
+
+            if hasattr(self, "status_lbl"):
+                self.status_lbl.config(text="当前为【议价】界面")
+        else:
+            self._mode_collect_btn.config(bg=ACCENT, fg="white")
+            self._mode_bargain_btn.config(bg=BG_CARD, fg=TEXT_MAIN)
+
+            if hasattr(self, "_suggest_price_btn"):
+                self._suggest_price_btn.pack_forget()
+
+            if hasattr(self, "_import_btn"):
+                self._import_btn.pack(side="left", padx=5, before=self._shein_login_btn)
+            if hasattr(self, "_fetch_btn"):
+                self._fetch_btn.pack(side="left", padx=5, before=self._shein_login_btn)
+            if hasattr(self, "_publish_btn"):
+                self._publish_btn.pack(side="left", padx=5, before=self._shein_login_btn)
+
+            if hasattr(self, "status_lbl"):
+                self.status_lbl.config(text="请先导入 ASIN 文件")
+
+    def _fetch_shein_suggest_price(self):
+        self.status_lbl.config(text="议价功能：抓取SHEIN建议价格（功能待实现）")
+        messagebox.showinfo("议价", "抓取SHEIN建议价格功能正在开发中。")
+
+    def _build_bargain_panel(self,parent):
+        self.bargain_panel=tk.Frame(parent,bg=BG_PANEL)
+        self.bargain_panel.grid(row=0,column=0,columnspan=2,sticky="nsew",pady=4)
+        self.bargain_panel.grid_remove()
+        hint=tk.Label(
+            self.bargain_panel,
+            text="议价界面（预留区域）\n\n后续可在这里加入议价相关内容",
+            font=("Segoe UI",13),
+            fg=TEXT_SUB,
+            bg=BG_PANEL,
+            justify="center"
+        )
+        hint.pack(expand=True)
+
+    def _toggle_main_panels_for_mode(self):
+        if self.current_view_mode == "bargain":
+            if hasattr(self, "left_panel"):
+                self.left_panel.grid_remove()
+            if hasattr(self, "right_panel"):
+                self.right_panel.grid_remove()
+            if hasattr(self, "bargain_panel"):
+                self.bargain_panel.grid()
+        else:
+            if hasattr(self, "bargain_panel"):
+                self.bargain_panel.grid_remove()
+            if hasattr(self, "left_panel"):
+                self.left_panel.grid()
+            if hasattr(self, "right_panel"):
+                self.right_panel.grid()
 
     def _build_left(self,parent):
-        f=tk.Frame(parent,bg=BG_PANEL,width=265)
-        f.grid(row=0,column=0,sticky="nsew",padx=(0,8),pady=4)
-        f.pack_propagate(False)
+        self.left_panel=tk.Frame(parent,bg=BG_PANEL,width=265)
+        f=self.left_panel
+        self.left_panel.grid(row=0,column=0,sticky="nsew",padx=(0,8),pady=4)
+        self.left_panel.pack_propagate(False)
         h=tk.Frame(f,bg=BG_PANEL); h.pack(fill="x",padx=12,pady=(12,4))
         tk.Label(h,text="ASIN 列表",font=("Segoe UI",11,"bold"),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         self.cnt_lbl=tk.Label(h,text="(0)",font=("Segoe UI",10),fg=TEXT_SUB,bg=BG_PANEL)
@@ -279,8 +400,9 @@ class SheinApp(tk.Tk):
         self.acv=cv
 
     def _build_right(self,parent):
-        f=tk.Frame(parent,bg=BG_PANEL)
-        f.grid(row=0,column=1,sticky="nsew",pady=4)
+        self.right_panel=tk.Frame(parent,bg=BG_PANEL)
+        f=self.right_panel
+        self.right_panel.grid(row=0,column=1,sticky="nsew",pady=4)
         tp=tk.Frame(f,bg=BG_PANEL); tp.pack(fill="x",padx=16,pady=(12,6))
         tk.Label(tp,text="商品详情",font=("Segoe UI",12,"bold"),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         self.status_lbl=tk.Label(tp,text="请先导入 ASIN 文件",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_PANEL)
