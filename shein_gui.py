@@ -30,6 +30,7 @@ class SheinApp(tk.Tk):
         self._publish_running=False   # 当前是否正在执行上品流程
         self._publish_session_id = 0  # 上品会话ID（用于中断旧线程）
         self._worker_publishers = {}  # 多线程worker浏览器实例 {worker_idx: publisher}
+        self._worker_active_asins = {}  # 多线程worker当前处理ASIN {worker_idx: asin}
         self._worker_publishers_lock = threading.Lock()
         self._login_cookies = []      # 登录会话快照：cookies
         self._login_storage = {}      # 登录会话快照：localStorage
@@ -391,6 +392,39 @@ class SheinApp(tk.Tk):
     def _route_asin_progress_from_log(self, msg):
         """从上传日志中提取更细阶段（例如第X张细节图）。"""
         m = str(msg or "")
+        # 多线程日志通常带 [Wn] 前缀，先按 worker->ASIN 映射到对应进度条
+        _wm = re.match(r"^\[W(\d+)\]\s*(.*)$", m)
+        if _wm:
+            try:
+                worker_idx = int(_wm.group(1))
+            except Exception:
+                worker_idx = None
+            worker_msg = _wm.group(2) or ""
+            target_asin = None
+            if worker_idx is not None:
+                try:
+                    with self._worker_publishers_lock:
+                        target_asin = self._worker_active_asins.get(worker_idx)
+                except Exception:
+                    target_asin = None
+            if target_asin:
+                # 与单线程一致：根据阶段文案更新进度条文字
+                self._update_publish_progress_by_msg(target_asin, worker_msg)
+                try:
+                    mm = re.search(r"图(\d+)已提交", worker_msg)
+                    if mm and ("SKU行" in worker_msg):
+                        img_idx = int(mm.group(1))
+                        pct = min(74, 68 + img_idx * 2)
+                        self._set_asin_progress(
+                            target_asin, pct, "上传第{}张细节图中".format(img_idx), state="running")
+                        return
+                    if "细节图上传完成" in worker_msg:
+                        self._set_asin_progress(target_asin, 75, "细节图上传完成", state="running")
+                        return
+                except Exception:
+                    pass
+            return
+
         asin = self._active_publish_asin or self.current_asin
         if not asin:
             return
@@ -2086,6 +2120,7 @@ class SheinApp(tk.Tk):
         self._stop_publish = False  # 确保开始时标志为 False
         with self._worker_publishers_lock:
             self._worker_publishers = {}
+            self._worker_active_asins = {}
 
         try:
             max_workers = int(max_workers)
@@ -2238,6 +2273,8 @@ class SheinApp(tk.Tk):
                     asin = _next_asin()
                     if asin is None:
                         return
+                    with self._worker_publishers_lock:
+                        self._worker_active_asins[worker_idx] = asin
                     self._log_publish_progress(asin, "开始上品")
                     self.after(0, lambda a=asin: self._set_asin_status(a, "publishing"))
                     self.after(0, lambda a=asin: self._set_asin_progress(a, 15, "上品中", state="running"))
@@ -2266,6 +2303,13 @@ class SheinApp(tk.Tk):
                     except Exception as e:
                         worker_has_failure = True
                         _record_result(asin, False, str(e))
+                    finally:
+                        try:
+                            with self._worker_publishers_lock:
+                                if self._worker_active_asins.get(worker_idx) == asin:
+                                    self._worker_active_asins.pop(worker_idx, None)
+                        except Exception:
+                            pass
             finally:
                 try:
                     if pub.driver:
@@ -2293,6 +2337,7 @@ class SheinApp(tk.Tk):
                     pass
                 finally:
                     with self._worker_publishers_lock:
+                        self._worker_active_asins.pop(worker_idx, None)
                         self._worker_publishers.pop(worker_idx, None)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
