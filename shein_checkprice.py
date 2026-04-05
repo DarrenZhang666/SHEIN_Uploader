@@ -451,19 +451,20 @@ def _pick_value(row_obj, keys):
 
 
 def _normalize_bargain_row(row_obj):
-    supplier_no = _pick_value(row_obj, ["供方货号", "供方货号/颜色", "商家货号", "货号"])
-    if not supplier_no:
+    supplier_no_raw = _pick_value(row_obj, ["供方货号", "供方货号/颜色", "商家货号", "货号"])
+    if not supplier_no_raw:
         basic_info = _pick_value(row_obj, ["基础信息"])
         if basic_info:
             m = re.search(r"供方货号\s*[:：]\s*([^\s\n，。,;；]+)", basic_info)
             if m:
-                supplier_no = _trim_text(m.group(1))
-    if not supplier_no:
+                supplier_no_raw = _trim_text(m.group(1))
+    if not supplier_no_raw:
         row_text = _trim_text(row_obj.get("_row_text", ""))
         m = re.search(r"供方货号\s*[:：]\s*([^\s\n，。,;；]+)", row_text)
         if m:
-            supplier_no = _trim_text(m.group(1))
-    supplier_no = re.sub(r"^(供方货号|货号)\s*[:：]\s*", "", supplier_no)
+            supplier_no_raw = _trim_text(m.group(1))
+    supplier_no_raw = re.sub(r"^(供方货号|货号)\s*[:：]\s*", "", supplier_no_raw)
+    supplier_no = supplier_no_raw
     supplier_no = re.sub(r"^XYZ-", "", supplier_no, flags=re.I)
 
     reason = _pick_value(row_obj, ["建议改价原因", "改价原因", "建议原因"])
@@ -507,6 +508,7 @@ def _normalize_bargain_row(row_obj):
             status = "已确认"
 
     return {
+        "supplier_no_raw": supplier_no_raw,
         "supplier_no": supplier_no,
         "reason": reason,
         "remaining_times": remaining_times,
@@ -518,7 +520,7 @@ def _normalize_bargain_row(row_obj):
     }
 
 
-def _wait_fetch_pending_bargain_rows(driver, log, timeout=14, interval=0.7, assume_pending=False):
+def _wait_fetch_pending_bargain_rows(driver, log, timeout=14, interval=0.7, assume_pending=False, xyz_only=True):
     end = time.time() + timeout
     max_seen = 0
 
@@ -545,7 +547,12 @@ def _wait_fetch_pending_bargain_rows(driver, log, timeout=14, interval=0.7, assu
             if not any([one.get("supplier_no"), one.get("reason"), one.get("sku_info"), one.get("platform_price")]):
                 continue
 
+            raw_no = _trim_text(one.get("supplier_no_raw", ""))
+            if xyz_only and (not raw_no.upper().startswith("XYZ-")):
+                continue
+
             results.append({
+                "supplier_no_raw": one.get("supplier_no_raw", ""),
                 "supplier_no": one.get("supplier_no", ""),
                 "reason": one.get("reason", ""),
                 "remaining_times": one.get("remaining_times", ""),
@@ -559,6 +566,120 @@ def _wait_fetch_pending_bargain_rows(driver, log, timeout=14, interval=0.7, assu
         time.sleep(interval)
 
     return []
+
+
+def _get_todo_pagination_state(driver):
+    """读取待办任务抽屉中的分页状态。"""
+    script = r"""
+const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const visible = (el) => {
+  if (!el) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (!st) return !!el.offsetParent;
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+let root = null;
+const drawers = Array.from(document.querySelectorAll('.soui-modal-panel,.soui-modal-wrapper,.soui-modal,.merchant-ui-drawer,[class*="drawer"]')).filter(visible);
+for (const d of drawers) {
+  const t = clean(d.innerText || '');
+  if (t.includes('待办任务')) { root = d; break; }
+}
+if (!root) return {page: 1, has_next: false, total_pages: 1, total_items: 0};
+
+let page = 1;
+const activeBtn = root.querySelector('.soui-pagination-buttons .soui-button-primary');
+if (activeBtn) {
+  const n = parseInt(clean(activeBtn.innerText || ''), 10);
+  if (!isNaN(n)) page = n;
+}
+
+let totalItems = 0;
+const totalEl = root.querySelector('.soui-pagination-section span');
+if (totalEl) {
+  const m = clean(totalEl.innerText || '').match(/共\s*(\d+)\s*条/);
+  if (m) totalItems = parseInt(m[1], 10) || 0;
+}
+
+let pageSize = 10;
+const sizeEl = root.querySelector('.soui-pagination-size-list .soui-select-ellipsis');
+if (sizeEl) {
+  const m = clean(sizeEl.innerText || '').match(/(\d+)\s*\/\s*页/);
+  if (m) pageSize = parseInt(m[1], 10) || 10;
+}
+const totalPages = totalItems > 0 ? Math.max(1, Math.ceil(totalItems / pageSize)) : 1;
+
+let hasNext = false;
+const btns = Array.from(root.querySelectorAll('.soui-pagination-buttons button'));
+if (btns.length >= 2) {
+  const nextBtn = btns[btns.length - 1];
+  const cls = (nextBtn.className || '').toString();
+  hasNext = !cls.includes('soui-button-disabled') && !nextBtn.disabled;
+}
+if (!hasNext && page < totalPages) hasNext = true;
+return {page, has_next: hasNext, total_pages: totalPages, total_items: totalItems};
+"""
+    try:
+        data = driver.execute_script(script) or {}
+        return {
+            "page": int(data.get("page", 1) or 1),
+            "has_next": bool(data.get("has_next", False)),
+            "total_pages": int(data.get("total_pages", 1) or 1),
+            "total_items": int(data.get("total_items", 0) or 0),
+        }
+    except Exception:
+        return {"page": 1, "has_next": False, "total_pages": 1, "total_items": 0}
+
+
+def _click_next_todo_page(driver, log, timeout=8):
+    """点击分页“>”按钮，返回是否成功翻页。"""
+    before = _get_todo_pagination_state(driver)
+    if not before.get("has_next"):
+        return False
+
+    clicked = False
+    script = r"""
+const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const visible = (el) => {
+  if (!el) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (!st) return !!el.offsetParent;
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+let root = null;
+const drawers = Array.from(document.querySelectorAll('.soui-modal-panel,.soui-modal-wrapper,.soui-modal,.merchant-ui-drawer,[class*="drawer"]')).filter(visible);
+for (const d of drawers) {
+  const t = clean(d.innerText || '');
+  if (t.includes('待办任务')) { root = d; break; }
+}
+if (!root) return false;
+const btns = Array.from(root.querySelectorAll('.soui-pagination-buttons button'));
+if (btns.length < 2) return false;
+const nextBtn = btns[btns.length - 1];
+const cls = (nextBtn.className || '').toString();
+if (nextBtn.disabled || cls.includes('soui-button-disabled')) return false;
+nextBtn.click();
+return true;
+"""
+    try:
+        clicked = bool(driver.execute_script(script))
+    except Exception:
+        clicked = False
+    if not clicked:
+        return False
+
+    end = time.time() + timeout
+    while time.time() < end:
+        now = _get_todo_pagination_state(driver)
+        if int(now.get("page", 1)) != int(before.get("page", 1)):
+            log("议价流程：已翻到第 {} 页".format(now.get("page", 1)))
+            time.sleep(0.5)
+            return True
+        time.sleep(0.3)
+    return False
 
 
 def open_shein_suggest_price_popup(publisher=None, account="", log_cb=None, headless=False):
@@ -624,15 +745,66 @@ def fetch_shein_pending_bargain_rows(publisher=None, account="", log_cb=None, he
     _dismiss_user_guide_next_buttons(driver, log, timeout=4, interval=0.8)
 
     clicked_pending = _click_pending_filter_button(driver, log, timeout=8)
-    rows = _wait_fetch_pending_bargain_rows(
-        driver,
-        log,
-        timeout=14,
-        interval=0.7,
-        assume_pending=clicked_pending,
-    )
-    if not rows:
-        return False, "已进入议价入口，但未抓到“待确认”数据；请确认已切换到“待确认”筛选并且表格中有记录", pub, []
+    state = _get_todo_pagination_state(driver)
+    total_pages_hint = state.get("total_pages", 1)
+    total_items_hint = state.get("total_items", 0)
+    log("议价流程：分页信息 页码 {}/{}，总条数 {}".format(state.get("page", 1), total_pages_hint, total_items_hint))
 
-    log("议价流程：抓取到待确认记录 {} 条".format(len(rows)))
-    return True, "已抓取“待确认”记录 {} 条".format(len(rows)), pub, rows
+    all_rows = []
+    seen = set()
+    visited_pages = set()
+    max_pages_guard = max(1, total_pages_hint or 1) + 5
+
+    for _ in range(max_pages_guard):
+        st = _get_todo_pagination_state(driver)
+        page_no = int(st.get("page", 1) or 1)
+        if page_no in visited_pages:
+            break
+        visited_pages.add(page_no)
+        log("议价流程：开始抓取第 {} 页".format(page_no))
+
+        page_rows = _wait_fetch_pending_bargain_rows(
+            driver,
+            log,
+            timeout=12,
+            interval=0.7,
+            assume_pending=clicked_pending,
+            xyz_only=True,
+        )
+
+        added = 0
+        for r in page_rows:
+            k = (
+                _trim_text(r.get("supplier_no_raw", "")),
+                _trim_text(r.get("sku_info", "")),
+                _trim_text(r.get("sub_spec", "")),
+                _trim_text(r.get("reason", "")),
+                _trim_text(r.get("platform_price", "")),
+                _trim_text(r.get("remaining_times", "")),
+            )
+            if k in seen:
+                continue
+            seen.add(k)
+            all_rows.append({
+                "supplier_no": r.get("supplier_no", ""),
+                "reason": r.get("reason", ""),
+                "remaining_times": r.get("remaining_times", ""),
+                "sku_info": r.get("sku_info", ""),
+                "sub_spec": r.get("sub_spec", ""),
+                "platform_price": r.get("platform_price", ""),
+            })
+            added += 1
+        log("议价流程：第 {} 页新增 {} 条，累计 {} 条（仅XYZ-）".format(page_no, added, len(all_rows)))
+
+        # 若已经是最后一页则结束
+        st_after = _get_todo_pagination_state(driver)
+        if (not st_after.get("has_next")) or (st_after.get("page", 1) >= st_after.get("total_pages", 1)):
+            break
+
+        if not _click_next_todo_page(driver, log, timeout=8):
+            break
+
+    if not all_rows:
+        return False, "已进入议价入口，但未抓到“待确认”数据（已按XYZ-筛选）", pub, []
+
+    return True, "已抓取“待确认”记录 {} 条（仅XYZ-，共{}页）".format(len(all_rows), max(visited_pages) if visited_pages else 1), pub, all_rows
