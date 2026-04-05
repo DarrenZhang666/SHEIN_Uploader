@@ -343,6 +343,24 @@ class SheinApp(tk.Tk):
                 def _progress_log(msg):
                     self._pub_log(msg)
                     t = str(msg or "")
+                    if "打开商品列表页面" in t:
+                        self.after(
+                            0,
+                            lambda: self._set_bargain_progress("进入议价界面（加载页面）", state="running", percent=30),
+                        )
+                        return
+                    if ("已点击“价格调整待确认，请及时处理”" in t) or ("重试后已点击“价格调整待确认，请及时处理”" in t):
+                        self.after(
+                            0,
+                            lambda: self._set_bargain_progress("进入议价界面（打开待办任务）", state="running", percent=38),
+                        )
+                        return
+                    if ("已点击“待确认”筛选按钮" in t) or ("已通过JS兜底点击“待确认”筛选按钮" in t):
+                        self.after(
+                            0,
+                            lambda: self._set_bargain_progress("抓取第1页数据", state="running", percent=45),
+                        )
+                        return
                     # 读取总页数：议价流程：分页信息 页码 1/4，总条数 37
                     m_total = re.search(r"页码\s*(\d+)\s*/\s*(\d+)", t)
                     if m_total:
@@ -350,7 +368,7 @@ class SheinApp(tk.Tk):
                         progress_state["total_pages"] = total_pages
                         self.after(
                             0,
-                            lambda: self._set_bargain_progress("进入议价界面", state="running", percent=25),
+                            lambda: self._set_bargain_progress("抓取第1页数据", state="running", percent=45),
                         )
                         return
                     # 抓取第N页
@@ -386,7 +404,7 @@ class SheinApp(tk.Tk):
                 if dev_mode:
                     self._shein_publisher = pub
                     self._shein_publisher_account = account
-                self._bargain_rows = rows or []
+                self._bargain_rows = self._enrich_bargain_rows_with_amazon(rows or [])
                 self.after(0, self._render_bargain_rows)
                 if ok:
                     self.after(0, lambda: self._set_bargain_progress("完毕", state="success", percent=100))
@@ -466,7 +484,16 @@ class SheinApp(tk.Tk):
         table_wrap = tk.Frame(wrap, bg=BG_CARD)
         table_wrap.pack(fill="both", expand=True)
 
-        cols = ("supplier_no", "reason", "remaining_times", "sku_info", "sub_spec", "platform_price")
+        cols = (
+            "supplier_no",
+            "reason",
+            "remaining_times",
+            "sku_info",
+            "sub_spec",
+            "platform_price",
+            "amazon_price",
+            "profit_rate",
+        )
         self._bargain_table = ttk.Treeview(
             table_wrap,
             columns=cols,
@@ -479,6 +506,8 @@ class SheinApp(tk.Tk):
         self._bargain_table.heading("sku_info", text="SKU信息")
         self._bargain_table.heading("sub_spec", text="次规格")
         self._bargain_table.heading("platform_price", text="平台建议价")
+        self._bargain_table.heading("amazon_price", text="亚马逊价格")
+        self._bargain_table.heading("profit_rate", text="利润率")
 
         self._bargain_table.column("supplier_no", width=140, minwidth=120, anchor="w")
         self._bargain_table.column("reason", width=220, minwidth=180, anchor="w")
@@ -486,6 +515,8 @@ class SheinApp(tk.Tk):
         self._bargain_table.column("sku_info", width=180, minwidth=150, anchor="w")
         self._bargain_table.column("sub_spec", width=120, minwidth=100, anchor="w")
         self._bargain_table.column("platform_price", width=120, minwidth=100, anchor="center")
+        self._bargain_table.column("amazon_price", width=120, minwidth=100, anchor="center")
+        self._bargain_table.column("profit_rate", width=120, minwidth=100, anchor="center")
         # 统一使用「商品详情」区域同款底色，不做奇偶分色
         self._bargain_table.tag_configure("odd", background=BG_CARD)
         self._bargain_table.tag_configure("even", background=BG_CARD)
@@ -498,7 +529,7 @@ class SheinApp(tk.Tk):
         xsb.pack(side="bottom", fill="x")
         self._bargain_table.pack(side="left", fill="both", expand=True)
 
-        self._bargain_table.insert("", "end", values=("暂无数据，请点击顶部【抓取SHEIN建议价格】", "", "", "", "", ""), tags=("odd",))
+        self._bargain_table.insert("", "end", values=("暂无数据，请点击顶部【抓取SHEIN建议价格】", "", "", "", "", "", "", ""), tags=("odd",))
 
     def _render_bargain_rows(self):
         rows = list(getattr(self, "_bargain_rows", []) or [])
@@ -510,7 +541,7 @@ class SheinApp(tk.Tk):
             table.delete(iid)
 
         if not rows:
-            table.insert("", "end", values=("暂无“待确认”数据", "", "", "", "", ""), tags=("odd",))
+            table.insert("", "end", values=("暂无“待确认”数据", "", "", "", "", "", "", ""), tags=("odd",))
             if hasattr(self, "_bargain_count_lbl"):
                 self._bargain_count_lbl.config(text="0 条")
             return
@@ -527,11 +558,107 @@ class SheinApp(tk.Tk):
                     r.get("sku_info", ""),
                     r.get("sub_spec", ""),
                     r.get("platform_price", ""),
+                    r.get("amazon_price", ""),
+                    r.get("profit_rate", ""),
                 ),
                 tags=(tag,),
             )
         if hasattr(self, "_bargain_count_lbl"):
             self._bargain_count_lbl.config(text="{} 条".format(len(rows)))
+
+    @staticmethod
+    def _parse_money_number(raw):
+        txt = str(raw or "").strip()
+        if not txt:
+            return None
+        txt = txt.replace(",", "")
+        m = re.search(r"(\d+(?:\.\d+)?)", txt)
+        if not m:
+            return None
+        try:
+            return float(m.group(1))
+        except Exception:
+            return None
+
+    def _enrich_bargain_rows_with_amazon(self, rows):
+        data = list(rows or [])
+        if not data:
+            return data
+
+        # 仅对有效 ASIN 做抓取，避免无意义请求。
+        asin_list = []
+        for r in data:
+            asin = str(r.get("supplier_no", "") or "").strip().upper()
+            if re.match(r"^B[A-Z0-9]{9}$", asin):
+                asin_list.append(asin)
+        unique_asins = list(dict.fromkeys(asin_list))
+        if not unique_asins:
+            for r in data:
+                r["amazon_price"] = "N/A"
+                r["profit_rate"] = "N/A"
+            return data
+
+        self._pub_log("议价流程：开始补充亚马逊价格（{}个ASIN）".format(len(unique_asins)))
+        self.after(0, lambda: self._set_bargain_progress("补充亚马逊价格", state="running"))
+        region = self.amazon_region.get() if hasattr(self, "amazon_region") else "美国"
+        max_workers = 5
+        try:
+            max_workers = max(1, min(6, int(self.fetch_workers.get())))
+        except Exception:
+            pass
+
+        price_map = {}
+
+        def _fetch_one(asin):
+            if self._stop_bargain_fetch:
+                return asin, None
+            cached = self.product_cache.get(asin) if isinstance(self.product_cache, dict) else None
+            if isinstance(cached, dict):
+                pv = self._parse_money_number(cached.get("price", ""))
+                if pv and pv > 0:
+                    return asin, pv
+            try:
+                info = fetch_amazon_product(asin, region=region)
+                p = self._parse_money_number((info or {}).get("price", ""))
+                if p and p > 0:
+                    try:
+                        if isinstance(self.product_cache, dict):
+                            old = self.product_cache.get(asin, {}) or {}
+                            old["price"] = "${:.2f}".format(p)
+                            self.product_cache[asin] = old
+                    except Exception:
+                        pass
+                    return asin, p
+            except Exception:
+                pass
+            return asin, None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_asin = {executor.submit(_fetch_one, a): a for a in unique_asins}
+            for future in as_completed(future_to_asin):
+                asin = future_to_asin[future]
+                try:
+                    _asin, price_val = future.result()
+                except Exception:
+                    _asin, price_val = asin, None
+                price_map[_asin] = price_val
+
+        for r in data:
+            asin = str(r.get("supplier_no", "") or "").strip().upper()
+            amazon_price_val = price_map.get(asin)
+            if amazon_price_val and amazon_price_val > 0:
+                r["amazon_price"] = "${:.2f}".format(amazon_price_val)
+                platform_price_val = self._parse_money_number(r.get("platform_price", ""))
+                if platform_price_val is not None and amazon_price_val > 0:
+                    ratio = platform_price_val / amazon_price_val
+                    r["profit_rate"] = "{:.2f}%".format(ratio * 100.0)
+                else:
+                    r["profit_rate"] = "N/A"
+            else:
+                r["amazon_price"] = "N/A"
+                r["profit_rate"] = "N/A"
+
+        return data
 
     def _draw_bargain_progress_bar(self, percent, color):
         cv = getattr(self, "_bargain_progress_canvas", None)

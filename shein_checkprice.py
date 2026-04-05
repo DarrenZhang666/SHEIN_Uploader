@@ -144,7 +144,7 @@ def _click_pending_filter_button(driver, log, timeout=8, should_stop=None):
                     continue
                 if _js_click(driver, el):
                     log("议价流程：已点击“待确认”筛选按钮")
-                    time.sleep(0.6)
+                    time.sleep(0.2)
                     return True
         time.sleep(0.4)
 
@@ -179,7 +179,7 @@ return false;
         )
         if ok:
             log("议价流程：已通过JS兜底点击“待确认”筛选按钮")
-            time.sleep(0.6)
+            time.sleep(0.2)
             return True
     except Exception:
         pass
@@ -193,6 +193,7 @@ def _dismiss_user_guide_next_buttons(driver, log, timeout=10, interval=1):
 
     start = time.time()
     clicked_total = 0
+    no_click_polls = 0
 
     while time.time() - start < timeout:
         clicked_in_poll = 0
@@ -240,7 +241,13 @@ def _dismiss_user_guide_next_buttons(driver, log, timeout=10, interval=1):
                 break
 
         if clicked_in_poll == 0:
-            time.sleep(interval)
+            no_click_polls += 1
+            # 无引导时尽快退出，避免白等满 timeout
+            if no_click_polls >= 2:
+                break
+            time.sleep(min(interval, 0.4))
+        else:
+            no_click_polls = 0
 
     if clicked_total > 0:
         log("议价流程：共关闭 {} 个引导步骤".format(clicked_total))
@@ -250,6 +257,37 @@ def _dismiss_user_guide_next_buttons(driver, log, timeout=10, interval=1):
 def dismiss_shein_user_guides(driver, log_cb=None, timeout=10, interval=1):
     log = log_cb or _noop_log
     return _dismiss_user_guide_next_buttons(driver, log, timeout=timeout, interval=interval)
+
+
+def _wait_todo_drawer_visible(driver, timeout=2.5, should_stop=None):
+    end = time.time() + timeout
+    script = r"""
+const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const visible = (el) => {
+  if (!el) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (!st) return !!el.offsetParent;
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+const drawers = Array.from(document.querySelectorAll('.soui-modal-panel,.soui-modal-wrapper,.soui-modal,.merchant-ui-drawer,[class*="drawer"]')).filter(visible);
+for (const d of drawers) {
+  const t = clean(d.innerText || '');
+  if (t.includes('待办任务')) return true;
+}
+return false;
+"""
+    while time.time() < end:
+        if _should_stop(should_stop):
+            return False
+        try:
+            if bool(driver.execute_script(script)):
+                return True
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return False
 
 
 def _extract_candidate_rows(driver):
@@ -667,7 +705,7 @@ return true;
         now = _get_todo_pagination_state(driver)
         if int(now.get("page", 1)) != int(before.get("page", 1)):
             log("议价流程：已翻到第 {} 页".format(now.get("page", 1)))
-            time.sleep(0.5)
+            time.sleep(0.2)
             return True
         time.sleep(0.3)
     return False
@@ -705,7 +743,7 @@ def open_shein_suggest_price_popup(
     _wait_ready(driver, timeout=15, should_stop=should_stop)
     if _should_stop(should_stop):
         return False, "用户已停止议价抓取", pub
-    time.sleep(1.2)
+    time.sleep(0.2)
 
     current_url = (driver.current_url or "").lower()
     if "login" in current_url:
@@ -720,7 +758,7 @@ def open_shein_suggest_price_popup(
             return False, "用户已停止议价抓取", pub
         if _click_todo_entrance(driver):
             log("议价流程：已点击“价格调整待确认，请及时处理”")
-            time.sleep(1.0)
+            _wait_todo_drawer_visible(driver, timeout=2.5, should_stop=should_stop)
             return True, "已打开议价入口，请在页面弹窗中查看建议价格", pub
         time.sleep(0.5)
 
@@ -734,7 +772,7 @@ def open_shein_suggest_price_popup(
             return False, "用户已停止议价抓取", pub
         if _click_todo_entrance(driver):
             log("议价流程：重试后已点击“价格调整待确认，请及时处理”")
-            time.sleep(1.0)
+            _wait_todo_drawer_visible(driver, timeout=2.5, should_stop=should_stop)
             return True, "已打开议价入口，请在页面弹窗中查看建议价格", pub
         time.sleep(0.5)
 
