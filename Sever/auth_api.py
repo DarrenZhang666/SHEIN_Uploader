@@ -12,6 +12,9 @@ import hmac
 import hashlib
 import threading
 import argparse
+import os
+import json
+from datetime import datetime
 from contextlib import contextmanager
 
 import pymysql
@@ -22,6 +25,9 @@ from pydantic import BaseModel, field_validator
 # ======================== 配置 ========================
 
 SECURE_KEY = "ShEiN_2025!@xKz9#Qm7$wPv"  # 客户端与服务端共享密钥，部署时务必修改
+ADMIN_KEY = "ChangeThis_AdminKey_2026"  # 管理端密钥，manager.py 需保持一致
+DELETE_PASSWORD = "qwertyuiop[]"       # 删除记录二次确认密码
+AUDIT_LOG_FILE = os.path.join(os.path.dirname(__file__), "admin_audit.log")
 
 DB_CONFIG = {
     "host": "127.0.0.1",
@@ -124,6 +130,42 @@ class CheckRequest(BaseModel):
             raise ValueError("shein_id 无效")
         return v
 
+
+class AdminUpsertRequest(BaseModel):
+    shein_id: str
+    start_time: str
+    end_time: str
+    operator: str = ""
+
+    @field_validator("shein_id")
+    @classmethod
+    def _validate_shein_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 120:
+            raise ValueError("shein_id 无效")
+        return v
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def _validate_date_text(cls, v: str) -> str:
+        v = v.strip()
+        datetime.strptime(v, "%Y-%m-%d")
+        return v
+
+
+class AdminDeleteRequest(BaseModel):
+    shein_id: str
+    delete_password: str
+    operator: str = ""
+
+    @field_validator("shein_id")
+    @classmethod
+    def _validate_shein_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 120:
+            raise ValueError("shein_id 无效")
+        return v
+
 def _make_sign(shein_id: str, timestamp: int) -> str:
     """HMAC-SHA256 签名：与客户端算法一致。"""
     message = f"{shein_id}:{timestamp}"
@@ -132,6 +174,38 @@ def _make_sign(shein_id: str, timestamp: int) -> str:
         message.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
+
+
+def _require_admin(request: Request) -> None:
+    key = request.headers.get("x-admin-key", "").strip()
+    if not key or not hmac.compare_digest(key, ADMIN_KEY):
+        raise HTTPException(status_code=403, detail="管理员认证失败")
+
+
+def _write_audit_log(
+    action: str,
+    shein_id: str,
+    operator: str,
+    client_ip: str,
+    success: bool,
+    detail: str,
+) -> None:
+    """写入管理操作审计日志（JSON Lines）。"""
+    log_item = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "action": action,
+        "shein_id": shein_id,
+        "operator": operator or "unknown",
+        "client_ip": client_ip or "unknown",
+        "success": bool(success),
+        "detail": detail[:200],
+    }
+    try:
+        with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_item, ensure_ascii=False) + "\n")
+    except Exception:
+        # 审计日志失败不影响主流程
+        pass
 
 @app.post("/check_auth")
 async def check_auth(req: CheckRequest, request: Request):
@@ -153,7 +227,7 @@ async def check_auth(req: CheckRequest, request: Request):
                 sql = (
                     "SELECT start_time, end_time FROM sheinuploader_software "
                     "WHERE shein_id = %s "
-                    "AND CURDATE() BETWEEN start_time AND end_time "
+                    "AND CURDATE() BETWEEN DATE(start_time) AND DATE(end_time) "
                     "LIMIT 1"
                 )
                 cur.execute(sql, (req.shein_id,))
@@ -169,6 +243,170 @@ async def check_auth(req: CheckRequest, request: Request):
         "start_time": str(row["start_time"]),
         "end_time": str(row["end_time"]),
     }
+
+
+@app.post("/admin/upsert_record")
+async def admin_upsert_record(req: AdminUpsertRequest, request: Request):
+    """新增或更新一条授权记录。"""
+    _require_admin(request)
+    client_ip = request.client.host if request.client else "unknown"
+    operator = (req.operator or "").strip()
+
+    try:
+        start_date = datetime.strptime(req.start_time, "%Y-%m-%d").date()
+        end_date = datetime.strptime(req.end_time, "%Y-%m-%d").date()
+    except Exception:
+        _write_audit_log("upsert", req.shein_id, operator, client_ip, False, "日期格式错误")
+        raise HTTPException(status_code=400, detail="日期格式必须为 YYYY-MM-DD")
+    if start_date > end_date:
+        _write_audit_log("upsert", req.shein_id, operator, client_ip, False, "开始时间晚于结束时间")
+        raise HTTPException(status_code=400, detail="开始时间不能晚于结束时间")
+    # 按需求统一写入 datetime，时间部分固定为 00:00:00
+    start_dt_text = "{} 00:00:00".format(req.start_time)
+    end_dt_text = "{} 00:00:00".format(req.end_time)
+
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM sheinuploader_software WHERE shein_id = %s LIMIT 1",
+                    (req.shein_id,),
+                )
+                exists = cur.fetchone() is not None
+                if exists:
+                    cur.execute(
+                        """
+                        UPDATE sheinuploader_software
+                        SET start_time = %s, end_time = %s
+                        WHERE shein_id = %s
+                        """,
+                        (start_dt_text, end_dt_text, req.shein_id),
+                    )
+                    action = "updated"
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO sheinuploader_software (shein_id, start_time, end_time)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (req.shein_id, start_dt_text, end_dt_text),
+                    )
+                    action = "inserted"
+    except Exception as e:
+        err = str(e)[:300]
+        _write_audit_log("upsert", req.shein_id, operator, client_ip, False, "数据库写入失败: {}".format(err))
+        raise HTTPException(status_code=500, detail="写入数据库失败: {}".format(err))
+
+    _write_audit_log("upsert", req.shein_id, operator, client_ip, True, action)
+
+    return {
+        "success": True,
+        "action": action,
+        "record": {
+            "shein_id": req.shein_id,
+            "start_time": start_dt_text,
+            "end_time": end_dt_text,
+        },
+    }
+
+
+@app.post("/admin/delete_record")
+async def admin_delete_record(req: AdminDeleteRequest, request: Request):
+    """按 shein_id 删除授权记录（需删除密码）。"""
+    _require_admin(request)
+    client_ip = request.client.host if request.client else "unknown"
+    operator = (req.operator or "").strip()
+    if not hmac.compare_digest(req.delete_password or "", DELETE_PASSWORD):
+        _write_audit_log("delete", req.shein_id, operator, client_ip, False, "删除密码错误")
+        raise HTTPException(status_code=403, detail="删除密码错误")
+
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM sheinuploader_software WHERE shein_id = %s",
+                    (req.shein_id,),
+                )
+                deleted = int(cur.rowcount or 0)
+    except Exception as e:
+        err = str(e)[:300]
+        _write_audit_log("delete", req.shein_id, operator, client_ip, False, "数据库删除失败: {}".format(err))
+        raise HTTPException(status_code=500, detail="删除数据库记录失败: {}".format(err))
+
+    _write_audit_log(
+        "delete",
+        req.shein_id,
+        operator,
+        client_ip,
+        True,
+        "deleted={}".format(deleted),
+    )
+
+    return {
+        "success": True,
+        "deleted": deleted,
+        "shein_id": req.shein_id,
+    }
+
+
+@app.get("/admin/list_records")
+async def admin_list_records(
+    request: Request,
+    shein_id: str = "",
+    limit: int = 100,
+    offset: int = 0,
+):
+    """查询记录（支持按 shein_id 精确过滤 + 分页）。"""
+    _require_admin(request)
+
+    limit = max(1, min(limit, 1000))
+    offset = max(0, offset)
+    shein_id = shein_id.strip()
+
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                if shein_id:
+                    cur.execute(
+                        "SELECT COUNT(1) AS cnt FROM sheinuploader_software WHERE shein_id = %s",
+                        (shein_id,),
+                    )
+                    total = int(cur.fetchone()["cnt"])
+                    cur.execute(
+                        """
+                        SELECT shein_id, start_time, end_time
+                        FROM sheinuploader_software
+                        WHERE shein_id = %s
+                        ORDER BY start_time DESC
+                        LIMIT %s OFFSET %s
+                        """,
+                        (shein_id, limit, offset),
+                    )
+                else:
+                    cur.execute("SELECT COUNT(1) AS cnt FROM sheinuploader_software")
+                    total = int(cur.fetchone()["cnt"])
+                    cur.execute(
+                        """
+                        SELECT shein_id, start_time, end_time
+                        FROM sheinuploader_software
+                        ORDER BY start_time DESC
+                        LIMIT %s OFFSET %s
+                        """,
+                        (limit, offset),
+                    )
+                rows = cur.fetchall()
+    except Exception:
+        raise HTTPException(status_code=500, detail="查询数据库失败")
+
+    items = [
+        {
+            "shein_id": str(r.get("shein_id", "")),
+            "start_time": str(r.get("start_time", "")),
+            "end_time": str(r.get("end_time", "")),
+        }
+        for r in rows
+    ]
+    return {"success": True, "total": total, "limit": limit, "offset": offset, "items": items}
 
 
 def _print_db_records(limit: int = 20, offset: int = 0) -> None:
