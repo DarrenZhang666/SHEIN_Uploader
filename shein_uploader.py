@@ -268,10 +268,95 @@ class SheinPublisher:
         self.driver = self.login_manager.driver
         self.wait = self.login_manager.wait
         return ok
+
+    def _has_identify_entry(self):
+        """检测当前页是否已出现“识图发品”入口。"""
+        try:
+            self._ensure_not_stopped()
+            if self.driver is None:
+                return False
+            xpaths = [
+                "//*[contains(normalize-space(.), '识图发品')]",
+                "//*[contains(normalize-space(.), '识图')]",
+            ]
+            for xp in xpaths:
+                try:
+                    for el in self.driver.find_elements(By.XPATH, xp):
+                        txt = (el.text or "").strip()
+                        if not txt:
+                            continue
+                        if ("识图" in txt) and el.is_displayed():
+                            return True
+                except Exception:
+                    continue
+        except Exception:
+            return False
+        return False
+
+    def _reopen_browser_to_publish_page(self):
+        """关闭当前浏览器并新开实例，重新进入商品发布页。"""
+        try:
+            try:
+                if self.driver:
+                    self.driver.quit()
+            except Exception:
+                pass
+            self.driver = None
+            self.wait = None
+            self.start_browser(
+                account=self._browser_account,
+                clone_from_account=self._clone_from_account,
+                headless=self._headless_mode,
+                force_new=(not self._headless_mode),
+            )
+            if self.driver is None:
+                return False
+            self.driver.get(self.PUBLISH_URL)
+            self._wait_ready_state(timeout=10)
+            try:
+                self._dismiss_announcements()
+            except Exception:
+                pass
+            self._wait_ready_state(timeout=3)
+            return True
+        except Exception as e:
+            self.log("[ERROR] 重开浏览器并打开商品发布页失败: {}".format(str(e)[:100]))
+            return False
+
+    def ensure_identify_entry_ready(self, timeout=10, interval=1):
+        """
+        确保“识图发品”入口可见：
+        - 先在 timeout 内每 interval 秒轮询
+        - 若仍未出现，自动重开浏览器并回到商品发布页，再轮询一次
+        """
+        self.log("[DEBUG] 检测'识图发品'入口是否出现（最多{}秒）...".format(int(timeout)))
+        if self._wait_until(
+            lambda: self._has_identify_entry(),
+            timeout=timeout,
+            interval=interval,
+            desc="识图发品入口出现",
+        ):
+            return True
+
+        self.log("[WARN] 10秒内未检测到'识图发品'入口，准备重开浏览器并回到商品发布页")
+        if not self._reopen_browser_to_publish_page():
+            return False
+
+        self.log("[DEBUG] 已重开浏览器，再次检测'识图发品'入口（最多{}秒）...".format(int(timeout)))
+        return self._wait_until(
+            lambda: self._has_identify_entry(),
+            timeout=timeout,
+            interval=interval,
+            desc="重开后识图发品入口出现",
+        )
+
     def click_identify_image_button(self):
         """点击'识图发品'按钮。"""
         try:
             self._ensure_not_stopped()
+            if not self.ensure_identify_entry_ready(timeout=10, interval=1):
+                self.log("[ERROR] 识图发品入口不可用：已尝试重开浏览器仍未出现")
+                return False
             self.log("[DEBUG] 查找'识图发品'按钮...")
             self._wait_ready_state(timeout=2)
             def _wait_upload_input():
