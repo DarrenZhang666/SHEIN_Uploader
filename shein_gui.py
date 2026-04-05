@@ -749,7 +749,7 @@ class SheinApp(tk.Tk):
                         row["amazon_price"] = "${:.2f}".format(amazon_price_val)
                         platform_price_val = self._parse_money_number(row.get("platform_price", ""))
                         if platform_price_val is not None and amazon_price_val > 0:
-                            ratio = platform_price_val / amazon_price_val
+                            ratio = (platform_price_val - amazon_price_val - 2.99) / amazon_price_val
                             row["profit_rate"] = "{:.2f}%".format(ratio * 100.0)
                         else:
                             row["profit_rate"] = "N/A"

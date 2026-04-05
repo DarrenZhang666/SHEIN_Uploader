@@ -659,9 +659,39 @@ return {page, has_next: hasNext, total_pages: totalPages, total_items: totalItem
         return {"page": 1, "has_next": False, "total_pages": 1, "total_items": 0}
 
 
+def _get_todo_table_signature(driver):
+    """读取当前待办任务表格签名，用于判断翻页后数据是否已刷新。"""
+    script = r"""
+const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const visible = (el) => {
+  if (!el) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (!st) return !!el.offsetParent;
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+let root = null;
+const drawers = Array.from(document.querySelectorAll('.soui-modal-panel,.soui-modal-wrapper,.soui-modal,.merchant-ui-drawer,[class*="drawer"]')).filter(visible);
+for (const d of drawers) {
+  const t = clean(d.innerText || '');
+  if (t.includes('待办任务')) { root = d; break; }
+}
+if (!root) return '';
+const rows = Array.from(root.querySelectorAll('tbody tr')).filter(visible).slice(0, 8);
+const texts = rows.map(r => clean(r.innerText || '')).filter(Boolean);
+return texts.join('||');
+"""
+    try:
+        return _trim_text(driver.execute_script(script) or "")
+    except Exception:
+        return ""
+
+
 def _click_next_todo_page(driver, log, timeout=8, should_stop=None):
     """点击分页“>”按钮，返回是否成功翻页。"""
     before = _get_todo_pagination_state(driver)
+    before_sig = _get_todo_table_signature(driver)
     if not before.get("has_next"):
         return False
 
@@ -699,15 +729,26 @@ return true;
         return False
 
     end = time.time() + timeout
+    page_changed = False
     while time.time() < end:
         if _should_stop(should_stop):
             return False
         now = _get_todo_pagination_state(driver)
         if int(now.get("page", 1)) != int(before.get("page", 1)):
-            log("议价流程：已翻到第 {} 页".format(now.get("page", 1)))
-            time.sleep(0.2)
-            return True
+            page_changed = True
+            now_sig = _get_todo_table_signature(driver)
+            # 页码变化且表格内容签名变化，认为翻页数据已刷新完成
+            if now_sig and now_sig != before_sig:
+                log("议价流程：已翻到第 {} 页（数据已刷新）".format(now.get("page", 1)))
+                time.sleep(0.2)
+                return True
+            # 允许继续轮询，等待数据刷新完成
         time.sleep(0.3)
+    if page_changed:
+        # 页码已变化但签名未及时更新：给一个兜底短等待，尽量避免读到旧数据
+        log("议价流程：页码已变化，等待表格刷新超时，采用兜底继续")
+        time.sleep(0.8)
+        return True
     return False
 
 
