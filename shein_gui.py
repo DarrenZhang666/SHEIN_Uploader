@@ -893,6 +893,11 @@ class SheinApp(tk.Tk):
             relief="flat",
         )
         st.map(
+            "Bargain.Treeview.Heading",
+            background=[("active", "#365f5a"), ("pressed", "#365f5a")],
+            foreground=[("active", "#f4fffc"), ("pressed", "#f4fffc")],
+        )
+        st.map(
             "Bargain.Treeview",
             background=[("selected", "#365f5a")],
             foreground=[("selected", "#f4fffc")],
