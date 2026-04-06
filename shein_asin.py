@@ -833,6 +833,17 @@ def fetch_amazon_product(asin, region="美国"):
            "description": "", "features": [], "url": url,
            "description_images": [], "main_images": [], "sku_list": [], "other_specs": {}}
     try:
+        def _is_low_stock_message(_text):
+            t = str(_text or "").strip().lower()
+            if not t:
+                return False
+            # 例如：Only 12 left in stock - order soon.
+            return bool(re.search(r"\bonly\s+\d+\s+left\s+in\s+stock\b", t))
+
+        def _has_in_stock_message(_text):
+            t = str(_text or "").strip().lower()
+            return "in stock" in t
+
         # 三层抓取策略：cloudscraper > requests > Selenium
         # 第1层：cloudscraper（内置 JS 挑战绕过）
         if _CLOUDSCRAPER_OK:
@@ -969,6 +980,36 @@ def fetch_amazon_product(asin, region="美国"):
                         pass
 
         res["description_images"] = desc_images[:5]
+
+        # 库存门槛：库存告急(Only X left in stock - order soon.)时直接停止后续抓取
+        availability_text = ""
+        try:
+            availability_candidates = [
+                s.select_one("#availabilityInsideBuyBox_feature_div #availability"),
+                s.select_one("#availability #availability"),
+                s.select_one("#availability"),
+                s.select_one("#availabilityInsideBuyBox_feature_div"),
+            ]
+            for node in availability_candidates:
+                if node:
+                    availability_text = " ".join(node.get_text(" ", strip=True).split())
+                    if availability_text:
+                        break
+        except Exception:
+            availability_text = ""
+        if not availability_text:
+            try:
+                availability_text = " ".join((s.get_text(" ", strip=True) or "").split())
+            except Exception:
+                availability_text = ""
+
+        if _is_low_stock_message(availability_text):
+            res["stock_low"] = True
+            res["stock_text"] = availability_text
+            res["sku_list"] = []
+            return res
+        if _has_in_stock_message(availability_text):
+            res["stock_ok"] = True
 
         sku_list = []
         sku_seen = set()

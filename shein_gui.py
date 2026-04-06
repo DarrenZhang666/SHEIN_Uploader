@@ -1341,6 +1341,7 @@ class SheinApp(tk.Tk):
             "fetch_success": "#38bdf8",
             "fetch_fail": RED,
             "sku_too_many": RED,
+            "stock_low": RED,
             "publishing": YELLOW,
             "success": GREEN,
             "fail": RED,
@@ -1351,6 +1352,8 @@ class SheinApp(tk.Tk):
         if hint:
             if status == "sku_too_many":
                 hint.config(text="SKU过多，不做爬取", fg=RED)
+            elif status == "stock_low":
+                hint.config(text="亚马逊库存告急", fg=RED)
             else:
                 hint.config(text="", fg=dot.cget("bg"))
         if status in ("imported", "pending", "fetch_success"):
@@ -1361,6 +1364,8 @@ class SheinApp(tk.Tk):
             self._set_asin_progress(asin, 100, "上品成功", state="success")
         elif status == "sku_too_many":
             self._set_asin_progress(asin, 100, "SKU过多，不做爬取", state="fail")
+        elif status == "stock_low":
+            self._set_asin_progress(asin, 100, "亚马逊库存告急", state="fail")
         elif status == "fail":
             self._set_asin_progress(asin, 100, "上品失败", state="fail")
         elif status == "fetch_fail":
@@ -3000,7 +3005,12 @@ return false;
                         self.after(0, lambda d=done, t=total, a=asin: self.status_lbl.config(text="抓取完成 {}/{}：{}".format(d, t, a)))
                     except RuntimeError:
                         pass
-                    if info and info.get("sku_too_many"):
+                    if info and info.get("stock_low"):
+                        try:
+                            self.after(0, lambda a=asin: self._set_asin_status(a, "stock_low"))
+                        except RuntimeError:
+                            pass
+                    elif info and info.get("sku_too_many"):
                         try:
                             self.after(0, lambda a=asin: self._set_asin_status(a, "sku_too_many"))
                         except RuntimeError:
@@ -3096,6 +3106,15 @@ return false;
         sku_list = info.get("sku_list", [])
         tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=10)
         tk.Label(self.df,text="商品详情页 · SKU 信息（每个SKU图片前5张，Ctrl+点击打开）",font=("Segoe UI",11,"bold"),fg=ACCENT2,bg=BG_PANEL).pack(anchor="w",padx=20)
+        if info.get("stock_low"):
+            tk.Label(
+                self.df,
+                text="亚马逊库存告急，不做抓取",
+                font=("Segoe UI",10,"bold"),
+                fg=RED,
+                bg=BG_PANEL,
+                anchor="w"
+            ).pack(anchor="w",padx=24,pady=(2,6))
         if info.get("sku_too_many"):
             sku_count = int(info.get("sku_count") or 0)
             tip = "SKU过多，不做爬取"
