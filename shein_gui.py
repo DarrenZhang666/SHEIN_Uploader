@@ -3741,14 +3741,17 @@ return false;
                             (session_id is not None and session_id != self._publish_session_id)
                         )
                         if stop_requested:
-                            try:
-                                if hasattr(pub, "request_stop"):
-                                    pub.request_stop(force_quit=True)
-                                else:
-                                    pub.driver.quit()
-                            except Exception:
-                                pass
-                            self._pub_log('[W{}] [STOP] 已关闭浏览器与driver'.format(worker_idx))
+                            if is_dev_mode():
+                                self._pub_log('[W{}] [STOP][DEV] 已停止任务，保留当前页面用于继续调试'.format(worker_idx))
+                            else:
+                                try:
+                                    if hasattr(pub, "request_stop"):
+                                        pub.request_stop(force_quit=True)
+                                    else:
+                                        pub.driver.quit()
+                                except Exception:
+                                    pass
+                                self._pub_log('[W{}] [STOP] 已关闭浏览器与driver'.format(worker_idx))
                         elif is_dev_mode() and worker_has_failure:
                             self._pub_log('[W{}] [DEV] 检测到失败，保留当前浏览器页面用于排查'.format(worker_idx))
                         else:
@@ -3797,8 +3800,27 @@ return false;
         if show_popup:
             messagebox.showinfo("上品结果", msg)
 
+    def _signal_stop_to_all_publishers(self):
+        """向所有已持有的发布实例发送停止标志，不强制关闭浏览器。"""
+        try:
+            if self._shein_publisher is not None:
+                setattr(self._shein_publisher, "_stop_publish", True)
+        except Exception:
+            pass
+        try:
+            with self._worker_publishers_lock:
+                for _pub in self._worker_publishers.values():
+                    if _pub is not None:
+                        try:
+                            setattr(_pub, "_stop_publish", True)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
     def _stop_publish_action(self):
         """停止上品进程。"""
+        dev_mode = bool(is_dev_mode())
         if getattr(self, "_bargain_fetch_running", False):
             self._stop_bargain_fetch = True
             self._set_bargain_progress("正在停止...", state="fail")
@@ -3815,11 +3837,13 @@ return false;
                 try:
                     pub = self._bargain_runtime_publisher
                     # 非开发者模式：议价抓取使用临时后台浏览器，停止时立即关闭实例与进程
-                    if is_temp_runtime and pub is not None:
+                    if (not dev_mode) and is_temp_runtime and pub is not None:
                         self._close_publisher_instance(pub, reason="用户停止议价抓取")
                 finally:
-                    if is_temp_runtime:
+                    if (not dev_mode) and is_temp_runtime:
                         self.after(0, lambda: self.status_lbl.config(text="已停止议价抓取，后台浏览器已关闭"))
+                    elif dev_mode:
+                        self.after(0, lambda: self.status_lbl.config(text="开发者模式：已暂停议价抓取，保留当前页面"))
                     else:
                         self.after(0, lambda: self.status_lbl.config(text="已停止议价抓取"))
 
@@ -3830,10 +3854,15 @@ return false;
         if not self._stop_publish:
             self._publish_session_id += 1  # 使当前会话立即失效，强制旧线程退出
             self._stop_publish = True
+            self._signal_stop_to_all_publishers()
             self._reset_publishing_asins_to_unpublished()
-            # 关键优化：浏览器/driver 清理放到后台线程，避免主线程被 quit 阻塞导致界面卡死。
             self._fetch_thread = None
             self.progress.stop()
+            if dev_mode:
+                self.status_lbl.config(text="开发者模式：已暂停上品任务，保留当前页面")
+                self._pub_log("[STOP][DEV] 已发送停止信号，暂停当前任务并保留浏览器页面")
+                return
+            # 非开发者模式：继续执行后台清理，确保进程与资源被及时回收。
             self.status_lbl.config(text="正在停止上品：后台清理浏览器与driver...")
             self._pub_log("[STOP] 已发送停止信号，后台开始清理浏览器与driver")
 
