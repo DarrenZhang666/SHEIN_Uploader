@@ -1352,12 +1352,8 @@ class SheinApp(tk.Tk):
         dot.config(fg=color_map.get(status, "#ffffff"))
         hint = getattr(self, "asin_hints", {}).get(asin)
         if hint:
-            if status == "sku_too_many":
-                hint.config(text="SKU过多，不做爬取", fg=RED)
-            elif status == "stock_low":
-                hint.config(text="亚马逊库存告急", fg=RED)
-            else:
-                hint.config(text="", fg=dot.cget("bg"))
+            # 警告文案统一显示在进度文案区域，避免与 hint 文案叠加。
+            hint.config(text="", fg=dot.cget("bg"))
         if status in ("imported", "pending", "fetch_success"):
             self._set_asin_progress(asin, 0, "未上品", state="idle")
         elif status == "publishing":
@@ -1401,7 +1397,12 @@ class SheinApp(tk.Tk):
         width = 110
         bar.coords(fill_id, 0, 0, int(width * pct / 100.0), 6)
         bar.itemconfig(fill_id, fill=fill_color, outline=fill_color)
-        txt_lbl.config(text=text, fg=fill_color if state in ("success", "fail") else TEXT_SUB)
+        txt_font = ("Segoe UI", 7) if state == "fail" else ("Segoe UI", 8)
+        txt_lbl.config(
+            text=text,
+            fg=fill_color if state in ("success", "fail") else TEXT_SUB,
+            font=txt_font
+        )
         self.asin_progress[asin] = {"pct": pct, "text": text, "state": state}
 
     def _update_publish_progress_by_msg(self, asin, msg):
@@ -1614,7 +1615,7 @@ class SheinApp(tk.Tk):
             ws["cb"].config(bg=bg, activebackground=bg)
             ws["lbl"].config(bg=bg, fg=fg)
             ws["dot"].config(bg=bg)
-            ws["hint"].config(bg=bg, fg=(TEXT_SUB if is_selected else bg))
+            ws["hint"].config(bg=bg, fg=bg)
             if ws.get("prog_wrap"): ws["prog_wrap"].config(bg=bg)
             if ws.get("prog_text"): ws["prog_text"].config(bg=bg)
             if ws.get("prog_canvas"): ws["prog_canvas"].config(bg=bg)
