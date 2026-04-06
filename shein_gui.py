@@ -64,6 +64,7 @@ class SheinApp(tk.Tk):
         self._bargain_runtime_publisher = None
         self._bargain_runtime_is_temp = False
         self._bargain_action_running = False
+        self._bargain_batch_running = False
         self._bargain_action_lock = threading.Lock()
         # 开关：是否在议价界面补充“亚马逊价格/利润率”
         self._enable_bargain_amazon_metrics = True
@@ -505,6 +506,50 @@ class SheinApp(tk.Tk):
             fg=ACCENT2,
             bg=BG_PANEL,
         ).pack(side="left", padx=(28, 0))
+        action_wrap = tk.Frame(top, bg=BG_PANEL)
+        action_wrap.pack(side="left", padx=(18, 0))
+        self._bargain_bulk_agree_btn = tk.Button(
+            action_wrap,
+            text="同意平台建议价",
+            bg="#16a34a",
+            fg="white",
+            font=("Segoe UI", 9, "bold"),
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            command=lambda: self._trigger_bargain_batch_action("同意平台建议价"),
+        )
+        self._bargain_bulk_agree_btn.pack(side="left", padx=(0, 6))
+        self._bargain_bulk_requote_btn = tk.Button(
+            action_wrap,
+            text="重新报价",
+            bg="#2563eb",
+            fg="white",
+            font=("Segoe UI", 9, "bold"),
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            command=lambda: self._trigger_bargain_batch_action("重新报价"),
+        )
+        self._bargain_bulk_requote_btn.pack(side="left", padx=(0, 6))
+        self._bargain_bulk_reject_btn = tk.Button(
+            action_wrap,
+            text="拒绝，放弃上新",
+            bg="#dc2626",
+            fg="white",
+            font=("Segoe UI", 9, "bold"),
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            command=lambda: self._trigger_bargain_batch_action("拒绝，放弃上新"),
+        )
+        self._bargain_bulk_reject_btn.pack(side="left")
         prog_wrap = tk.Frame(top, bg=BG_PANEL)
         prog_wrap.pack(side="right", padx=(12, 0))
         self._bargain_progress_lbl = tk.Label(
@@ -797,13 +842,7 @@ class SheinApp(tk.Tk):
 
         def _run_action():
             try:
-                ok, msg = trigger_shein_pending_bargain_action(
-                    publisher=pub,
-                    row=row,
-                    action_label=action_label,
-                    log_cb=self._pub_log,
-                    should_stop=lambda: bool(self._app_closing),
-                )
+                ok, msg = self._execute_bargain_action(row, action_label)
                 if ok:
                     self.after(0, lambda r=row: self._remove_bargain_row_after_action(r))
                     self.after(0, lambda: self.status_lbl.config(text="议价功能：{}".format(msg)))
@@ -820,6 +859,69 @@ class SheinApp(tk.Tk):
                     self._bargain_action_running = False
 
         threading.Thread(target=_run_action, daemon=True).start()
+
+    def _execute_bargain_action(self, row, action_label):
+        pub = getattr(self, "_bargain_runtime_publisher", None) or getattr(self, "_shein_publisher", None)
+        if pub is None:
+            return False, "未找到可用浏览器实例，请先抓取“待确认”数据。"
+        return trigger_shein_pending_bargain_action(
+            publisher=pub,
+            row=row,
+            action_label=action_label,
+            log_cb=self._pub_log,
+            should_stop=lambda: bool(self._app_closing),
+        )
+
+    def _trigger_bargain_batch_action(self, action_label):
+        rows = list(getattr(self, "_bargain_rows", []) or [])
+        selected = [dict(r) for r in rows if bool(r.get("_selected", False))]
+        if not selected:
+            messagebox.showinfo("议价", "请先勾选要处理的商品。")
+            return
+        with self._bargain_action_lock:
+            if self._bargain_action_running or self._bargain_batch_running:
+                self.status_lbl.config(text="议价功能：已有操作正在执行，请稍候")
+                return
+            self._bargain_action_running = True
+            self._bargain_batch_running = True
+
+        self.status_lbl.config(text="议价功能：批量执行「{}」准备中...".format(action_label))
+        self._pub_log("议价批量：开始执行 [{}]，共 {} 条".format(action_label, len(selected)))
+
+        def _run_batch():
+            total = len(selected)
+            ok_count = 0
+            fail_count = 0
+            try:
+                for i, row in enumerate(selected, start=1):
+                    if self._app_closing:
+                        break
+                    self.after(0, lambda idx=i, t=total: self.status_lbl.config(
+                        text="议价功能：批量执行「{}」 {}/{}".format(action_label, idx, t)
+                    ))
+                    ok, msg = self._execute_bargain_action(row, action_label)
+                    if ok:
+                        ok_count += 1
+                        self.after(0, lambda r=row: self._remove_bargain_row_after_action(r))
+                    else:
+                        fail_count += 1
+                        self._pub_log("议价批量：第 {} 条失败 - {}".format(i, msg))
+                    # 按需求：执行完成一个后，等待1秒再执行下一个
+                    if i < total:
+                        time.sleep(1.0)
+            finally:
+                with self._bargain_action_lock:
+                    self._bargain_batch_running = False
+                    self._bargain_action_running = False
+                self.after(0, lambda: self.status_lbl.config(
+                    text="议价功能：批量完成，成功 {} 条，失败 {} 条".format(ok_count, fail_count)
+                ))
+                self.after(0, lambda: messagebox.showinfo(
+                    "议价",
+                    "批量操作完成\n动作：{}\n成功：{}\n失败：{}".format(action_label, ok_count, fail_count),
+                ))
+
+        threading.Thread(target=_run_batch, daemon=True).start()
 
     def _remove_bargain_row_after_action(self, row_snapshot):
         """网页操作成功后，从GUI中移除对应行。"""
