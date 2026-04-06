@@ -16,7 +16,7 @@ from datetime import datetime
 class SheinApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SHEIN 商品采集 & 发布工具V1.0")
+        self.title("SHEIN 商品采集 & 发布工具V1.35")
         self.geometry("1280x800"); self.minsize(1000,680)
         self.configure(bg=BG_DARK)
         self.asin_list=[]; self.asin_vars={}; self.asin_dots={}; self.asin_status={}
@@ -28,7 +28,7 @@ class SheinApp(tk.Tk):
         self.fetch_workers=tk.StringVar(value="5")
         self.amazon_region=tk.StringVar(value="美国")
         self.shein_account=tk.StringVar(value="")
-        self.current_view_mode = "collect_publish"  # collect_publish / bargain
+        self.current_view_mode = "collect_publis1h"  # collect_publish / bargain
         self._fetch_thread=None; self._photo_ref=None
         self._launching_browser = False  # 防止重复点击登录按钮
         self._shein_publisher=None   # 持久化浏览器实例
@@ -68,8 +68,16 @@ class SheinApp(tk.Tk):
         self._bargain_action_running = False
         self._bargain_batch_running = False
         self._bargain_action_lock = threading.Lock()
+        self._bargain_row_uid_seq = 1
+        self._bargain_rowid_to_index = {}
+        self._bargain_sort_column = ""
+        self._bargain_sort_desc = True
+        self._bargain_filter_platform_var = tk.StringVar(value="")
+        self._bargain_filter_amazon_var = tk.StringVar(value="")
+        self._bargain_filter_profit_var = tk.StringVar(value="")
         # 开关：是否在议价界面补充“亚马逊价格/利润率”
         self._enable_bargain_amazon_metrics = True
+        self._load_bargain_table_prefs()
         
         # 初始化日志文件
         self._init_log_file()
@@ -471,7 +479,8 @@ class SheinApp(tk.Tk):
         self.bargain_panel.grid_remove()
 
         top = tk.Frame(self.bargain_panel, bg=BG_PANEL)
-        top.pack(fill="x", padx=18, pady=(14,8))
+        # 顶部信息行留出上方空位，给 debug 进度日志显示
+        top.pack(fill="x", padx=18, pady=(20,4))
         self._bargain_select_all_var = tk.BooleanVar(value=False)
         self._bargain_select_all_chk = tk.Checkbutton(
             top,
@@ -501,6 +510,53 @@ class SheinApp(tk.Tk):
             bg=BG_PANEL,
         )
         self._bargain_count_lbl.pack(side="left", padx=(8,0))
+        # 筛选工具单独放到下一行，避免挤占顶部进度/调试展示区域
+        filter_row = tk.Frame(self.bargain_panel, bg=BG_PANEL)
+        filter_row.pack(fill="x", padx=18, pady=(0, 8))
+        filter_wrap = tk.Frame(filter_row, bg=BG_PANEL)
+        # 与“全选”复选框左边缘对齐
+        filter_wrap.pack(side="left", padx=(0, 0))
+        tk.Label(
+            filter_wrap, text="筛选:", font=("Segoe UI", 9, "bold"),
+            fg=TEXT_SUB, bg=BG_PANEL
+        ).pack(side="left", padx=(0, 4))
+        tk.Label(
+            filter_wrap, text="平台建议价", font=("Segoe UI", 9),
+            fg=TEXT_SUB, bg=BG_PANEL
+        ).pack(side="left")
+        self._bargain_filter_platform_entry = tk.Entry(
+            filter_wrap, textvariable=self._bargain_filter_platform_var,
+            width=8, font=("Segoe UI", 9), relief="flat", bd=0
+        )
+        self._bargain_filter_platform_entry.pack(side="left", padx=(4, 8), ipady=2)
+        tk.Label(
+            filter_wrap, text="亚马逊价格", font=("Segoe UI", 9),
+            fg=TEXT_SUB, bg=BG_PANEL
+        ).pack(side="left")
+        self._bargain_filter_amazon_entry = tk.Entry(
+            filter_wrap, textvariable=self._bargain_filter_amazon_var,
+            width=8, font=("Segoe UI", 9), relief="flat", bd=0
+        )
+        self._bargain_filter_amazon_entry.pack(side="left", padx=(4, 8), ipady=2)
+        tk.Label(
+            filter_wrap, text="利润率", font=("Segoe UI", 9),
+            fg=TEXT_SUB, bg=BG_PANEL
+        ).pack(side="left")
+        self._bargain_filter_profit_entry = tk.Entry(
+            filter_wrap, textvariable=self._bargain_filter_profit_var,
+            width=8, font=("Segoe UI", 9), relief="flat", bd=0
+        )
+        self._bargain_filter_profit_entry.pack(side="left", padx=(4, 6), ipady=2)
+        tk.Button(
+            filter_wrap, text="应用", font=("Segoe UI", 9), relief="flat", bd=0,
+            bg="#334155", fg="white", padx=8, pady=2, cursor="hand2",
+            command=self._apply_bargain_filters
+        ).pack(side="left", padx=(0, 4))
+        tk.Button(
+            filter_wrap, text="清空", font=("Segoe UI", 9), relief="flat", bd=0,
+            bg="#475569", fg="white", padx=8, pady=2, cursor="hand2",
+            command=self._clear_bargain_filters
+        ).pack(side="left")
         tk.Label(
             top,
             text="Ctrl+点击亚马逊链接打开",
@@ -601,14 +657,14 @@ class SheinApp(tk.Tk):
         self._bargain_table.heading("pick", text="勾选", anchor="center")
         self._bargain_table.heading("supplier_no", text="供方货号", anchor="w")
         self._bargain_table.heading("sku_info", text="SKU信息", anchor="w")
-        self._bargain_table.heading("platform_price", text="平台建议价", anchor="w")
+        self._bargain_table.heading("platform_price", text="平台建议价", anchor="w", command=lambda: self._on_bargain_sort_click("platform_price"))
         self._bargain_table.heading("operation", text="操作", anchor="w")
         if "amazon_url" in cols:
             self._bargain_table.heading("amazon_url", text="亚马逊链接", anchor="w")
         if "amazon_price" in cols:
-            self._bargain_table.heading("amazon_price", text="亚马逊价格", anchor="w")
+            self._bargain_table.heading("amazon_price", text="亚马逊价格", anchor="w", command=lambda: self._on_bargain_sort_click("amazon_price"))
         if "profit_rate" in cols:
-            self._bargain_table.heading("profit_rate", text="利润率", anchor="w")
+            self._bargain_table.heading("profit_rate", text="利润率", anchor="w", command=lambda: self._on_bargain_sort_click("profit_rate"))
 
         self._bargain_table.column("pick", width=54, minwidth=50, anchor="center")
         self._bargain_table.column("supplier_no", width=140, minwidth=120, anchor="w")
@@ -633,6 +689,13 @@ class SheinApp(tk.Tk):
         xsb.pack(side="bottom", fill="x")
         self._bargain_table.pack(side="left", fill="both", expand=True)
         self._bargain_table.bind("<ButtonRelease-1>", self._on_bargain_table_click)
+        for _e in (
+            self._bargain_filter_platform_entry,
+            self._bargain_filter_amazon_entry,
+            self._bargain_filter_profit_entry,
+        ):
+            _e.bind("<Return>", lambda _evt: self._apply_bargain_filters())
+        self._refresh_bargain_sort_headings()
 
         empty_row = [""] * len(cols)
         if empty_row:
@@ -641,21 +704,27 @@ class SheinApp(tk.Tk):
 
     def _render_bargain_rows(self):
         rows = list(getattr(self, "_bargain_rows", []) or [])
+        self._ensure_bargain_row_uids(rows)
+        display_rows = self._get_bargain_display_rows(rows)
         table = getattr(self, "_bargain_table", None)
         if table is None:
             return
 
+        self._bargain_rowid_to_index = {}
         for iid in table.get_children():
             table.delete(iid)
 
-        if not rows:
+        if not display_rows:
             cols = tuple(getattr(self, "_bargain_table_columns", ()) or ())
             empty_row = [""] * len(cols)
             if empty_row:
                 empty_row[0] = "暂无“待确认”数据"
             table.insert("", "end", values=tuple(empty_row), tags=("odd",))
             if hasattr(self, "_bargain_count_lbl"):
-                self._bargain_count_lbl.config(text="0 条")
+                if rows:
+                    self._bargain_count_lbl.config(text="0 / {} 条".format(len(rows)))
+                else:
+                    self._bargain_count_lbl.config(text="0 条")
             return
 
         cols = tuple(getattr(self, "_bargain_table_columns", ()) or ())
@@ -679,22 +748,207 @@ class SheinApp(tk.Tk):
             "amazon_price": lambda r: r.get("amazon_price", ""),
             "profit_rate": lambda r: r.get("profit_rate", ""),
         }
-        for i, r in enumerate(rows):
+        source_index_map = {int(r.get("_row_uid", -1)): idx for idx, r in enumerate(rows)}
+        for i, r in enumerate(display_rows):
             tag = "odd" if (i % 2 == 0) else "even"
             values = tuple(value_getter.get(c, lambda _x: "")(r) for c in cols)
+            row_uid = int(r.get("_row_uid", -1))
+            iid = "br_{}".format(row_uid if row_uid >= 0 else i)
             table.insert(
                 "",
                 "end",
+                iid=iid,
                 values=values,
                 tags=(tag,),
             )
+            self._bargain_rowid_to_index[iid] = source_index_map.get(row_uid, i)
         if hasattr(self, "_bargain_count_lbl"):
-            self._bargain_count_lbl.config(text="{} 条".format(len(rows)))
-        self._sync_bargain_select_all_checkbox(rows)
+            if len(display_rows) == len(rows):
+                self._bargain_count_lbl.config(text="{} 条".format(len(rows)))
+            else:
+                self._bargain_count_lbl.config(text="{} / {} 条".format(len(display_rows), len(rows)))
+        self._sync_bargain_select_all_checkbox(display_rows)
+
+    _BARGAIN_TABLE_PREF_FILE = os.path.join(
+        os.path.expanduser("~"), ".shein_profiles", "bargain_table_pref.json"
+    )
+
+    def _load_bargain_table_prefs(self):
+        try:
+            if not os.path.isfile(self._BARGAIN_TABLE_PREF_FILE):
+                return
+            with open(self._BARGAIN_TABLE_PREF_FILE, "r", encoding="utf-8") as f:
+                obj = json.load(f) or {}
+            flt = obj.get("filters", {}) if isinstance(obj, dict) else {}
+            self._bargain_filter_platform_var.set(str(flt.get("platform_price", "") or ""))
+            self._bargain_filter_amazon_var.set(str(flt.get("amazon_price", "") or ""))
+            self._bargain_filter_profit_var.set(str(flt.get("profit_rate", "") or ""))
+            srt = obj.get("sort", {}) if isinstance(obj, dict) else {}
+            col = str(srt.get("column", "") or "").strip()
+            if col in ("platform_price", "amazon_price", "profit_rate"):
+                self._bargain_sort_column = col
+                self._bargain_sort_desc = bool(srt.get("desc", True))
+        except Exception:
+            pass
+
+    def _save_bargain_table_prefs(self):
+        try:
+            os.makedirs(os.path.dirname(self._BARGAIN_TABLE_PREF_FILE), exist_ok=True)
+            obj = {
+                "filters": {
+                    "platform_price": str(self._bargain_filter_platform_var.get() or "").strip(),
+                    "amazon_price": str(self._bargain_filter_amazon_var.get() or "").strip(),
+                    "profit_rate": str(self._bargain_filter_profit_var.get() or "").strip(),
+                },
+                "sort": {
+                    "column": str(self._bargain_sort_column or ""),
+                    "desc": bool(self._bargain_sort_desc),
+                },
+            }
+            with open(self._BARGAIN_TABLE_PREF_FILE, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _ensure_bargain_row_uids(self, rows):
+        if not rows:
+            return
+        for r in rows:
+            try:
+                uid = int(r.get("_row_uid", 0))
+            except Exception:
+                uid = 0
+            if uid > 0:
+                continue
+            r["_row_uid"] = int(self._bargain_row_uid_seq)
+            self._bargain_row_uid_seq += 1
+
+    @staticmethod
+    def _parse_percent_number(raw):
+        txt = str(raw or "").strip().replace("%", "")
+        if not txt:
+            return None
+        m = re.search(r"(-?\d+(?:\.\d+)?)", txt)
+        if not m:
+            return None
+        try:
+            return float(m.group(1))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_numeric_filter(expr):
+        text = str(expr or "").strip()
+        if not text:
+            return None
+        text = text.replace(" ", "").replace("％", "%")
+        if text.endswith("%"):
+            text = text[:-1]
+        m = re.match(r"^(>=|<=|>|<|==|=)?(-?\d+(?:\.\d+)?)$", text)
+        if not m:
+            return None
+        op = m.group(1) or ">="
+        if op == "=":
+            op = "=="
+        try:
+            val = float(m.group(2))
+        except Exception:
+            return None
+        return op, val
+
+    @staticmethod
+    def _compare_with_operator(actual, rule):
+        if rule is None:
+            return True
+        if actual is None:
+            return False
+        op, val = rule
+        if op == ">":
+            return actual > val
+        if op == ">=":
+            return actual >= val
+        if op == "<":
+            return actual < val
+        if op == "<=":
+            return actual <= val
+        return abs(actual - val) < 1e-9
+
+    def _on_bargain_sort_click(self, column):
+        if column not in ("platform_price", "amazon_price", "profit_rate"):
+            return
+        if self._bargain_sort_column == column:
+            self._bargain_sort_desc = not bool(self._bargain_sort_desc)
+        else:
+            # 首次点击按需求默认倒序
+            self._bargain_sort_column = column
+            self._bargain_sort_desc = True
+        self._save_bargain_table_prefs()
+        self._refresh_bargain_sort_headings()
+        self._render_bargain_rows()
+
+    def _refresh_bargain_sort_headings(self):
+        table = getattr(self, "_bargain_table", None)
+        if table is None:
+            return
+        defs = {
+            "platform_price": "平台建议价",
+            "amazon_price": "亚马逊价格",
+            "profit_rate": "利润率",
+        }
+        for col, title in defs.items():
+            if col not in getattr(self, "_bargain_table_columns", ()):
+                continue
+            suffix = ""
+            if self._bargain_sort_column == col:
+                suffix = " ▼" if self._bargain_sort_desc else " ▲"
+            table.heading(col, text=title + suffix, anchor="w", command=lambda c=col: self._on_bargain_sort_click(c))
+
+    def _apply_bargain_filters(self):
+        self._save_bargain_table_prefs()
+        self._render_bargain_rows()
+
+    def _clear_bargain_filters(self):
+        self._bargain_filter_platform_var.set("")
+        self._bargain_filter_amazon_var.set("")
+        self._bargain_filter_profit_var.set("")
+        self._save_bargain_table_prefs()
+        self._render_bargain_rows()
+
+    def _get_bargain_display_rows(self, rows):
+        rows = list(rows or [])
+        if not rows:
+            return []
+        f_platform = self._parse_numeric_filter(self._bargain_filter_platform_var.get())
+        f_amazon = self._parse_numeric_filter(self._bargain_filter_amazon_var.get())
+        f_profit = self._parse_numeric_filter(self._bargain_filter_profit_var.get())
+
+        filtered = []
+        for r in rows:
+            p1 = self._parse_money_number(r.get("platform_price", ""))
+            p2 = self._parse_money_number(r.get("amazon_price", ""))
+            p3 = self._parse_percent_number(r.get("profit_rate", ""))
+            if not self._compare_with_operator(p1, f_platform):
+                continue
+            if not self._compare_with_operator(p2, f_amazon):
+                continue
+            if not self._compare_with_operator(p3, f_profit):
+                continue
+            filtered.append(r)
+
+        sort_col = str(self._bargain_sort_column or "").strip()
+        if sort_col in ("platform_price", "amazon_price", "profit_rate"):
+            def _key(item):
+                if sort_col == "profit_rate":
+                    v = self._parse_percent_number(item.get(sort_col, ""))
+                else:
+                    v = self._parse_money_number(item.get(sort_col, ""))
+                return (v is None, v if v is not None else float("-inf"))
+            filtered.sort(key=_key, reverse=bool(self._bargain_sort_desc))
+        return filtered
 
     def _sync_bargain_select_all_checkbox(self, rows=None):
         if rows is None:
-            rows = list(getattr(self, "_bargain_rows", []) or [])
+            rows = self._get_bargain_display_rows(list(getattr(self, "_bargain_rows", []) or []))
         if not hasattr(self, "_bargain_select_all_var"):
             return
         if not rows:
@@ -708,9 +962,15 @@ class SheinApp(tk.Tk):
         if not rows:
             self._bargain_select_all_var.set(False)
             return
+        display_rows = self._get_bargain_display_rows(rows)
+        if not display_rows:
+            self._bargain_select_all_var.set(False)
+            return
+        display_uids = {int(r.get("_row_uid", -1)) for r in display_rows}
         checked = bool(self._bargain_select_all_var.get())
         for r in rows:
-            r["_selected"] = checked
+            if int(r.get("_row_uid", -1)) in display_uids:
+                r["_selected"] = checked
         self._bargain_rows = rows
         self._render_bargain_rows()
 
@@ -737,10 +997,7 @@ class SheinApp(tk.Tk):
             col_name = cols[col_idx] if 0 <= col_idx < len(cols) else ""
             ctrl_pressed = bool(getattr(_event, "state", 0) & 0x0004)
             if col_name == "pick":
-                try:
-                    row_idx = int(table.index(row_id))
-                except Exception:
-                    row_idx = -1
+                row_idx = int(getattr(self, "_bargain_rowid_to_index", {}).get(row_id, -1))
                 rows = list(getattr(self, "_bargain_rows", []) or [])
                 if 0 <= row_idx < len(rows):
                     rows[row_idx]["_selected"] = not bool(rows[row_idx].get("_selected", False))
@@ -758,10 +1015,7 @@ class SheinApp(tk.Tk):
                 if not bbox:
                     return
                 rel_x = float(x - bbox[0])
-                try:
-                    row_idx = int(table.index(row_id))
-                except Exception:
-                    row_idx = -1
+                row_idx = int(getattr(self, "_bargain_rowid_to_index", {}).get(row_id, -1))
                 actions = self._get_bargain_row_actions(row_idx)
                 if not actions:
                     return
