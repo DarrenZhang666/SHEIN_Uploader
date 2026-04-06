@@ -1579,10 +1579,10 @@ class SheinApp(tk.Tk):
         text = "请先抓取成功"
         if "库存" in reason:
             text = "亚马逊库存告急"
-        elif "SKU" in reason.upper():
-            text = "SKU过多，不做爬取"
         elif "无合适SKU" in reason:
             text = "无合适SKU"
+        elif "SKU" in reason.upper():
+            text = "SKU过多，不做爬取"
         elif "抓取失败" in reason:
             text = "抓取失败，请重新抓取"
         elif "颜色非标准" in reason:
@@ -3551,7 +3551,21 @@ return false;
             _price_mult = 3.0
         # 同时启动过多浏览器会触发“授权中/网页无法访问”，限制到3更稳
         max_workers = min(max_workers, 3)
+        dev_mode_now = bool(is_dev_mode())
         reusable_main_pub = self._shein_publisher if self._is_publisher_reusable(self._shein_publisher) else None
+        # 开发者模式要求可视化：若当前主实例是无界面浏览器，禁止复用并重建可视实例。
+        if dev_mode_now and reusable_main_pub is not None:
+            old_headless = bool(getattr(reusable_main_pub, "_headless_mode", False))
+            if old_headless:
+                self._pub_log("[DEV] 检测到主实例为无界面模式，重建可视浏览器")
+                try:
+                    if getattr(reusable_main_pub, "driver", None):
+                        reusable_main_pub.driver.quit()
+                except Exception:
+                    pass
+                if self._shein_publisher is reusable_main_pub:
+                    self._shein_publisher = None
+                reusable_main_pub = None
         if reusable_main_pub is not None:
             self._pub_log("[POOL] 复用主浏览器作为一个工作线程，减少额外driver进程")
         next_idx = 0
