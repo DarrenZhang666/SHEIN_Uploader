@@ -19,7 +19,7 @@ except ImportError:
 from bs4 import BeautifulSoup
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from shein_sensitive_clean import SENSITIVE_WORDS, _filter_sensitive, _filter_title
+from shein_sensitive_clean import SENSITIVE_WORDS, _filter_title
 
 AMAZON_PRODUCT_URL = "https://www.amazon.com/dp/{asin}"
 
@@ -939,6 +939,75 @@ def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_wor
     return results
 
 
+_SENSITIVE_REPLACEMENT_MAP = {
+    "sales": "popular",
+    "on sale": "special offer",
+    "clearance": "special selection",
+    "flash sale": "limited offer",
+    "cheapest": "affordable",
+    "lowest price": "great value",
+    "free": "included",
+    "best seller": "customer favorite",
+    "bestselling": "popular",
+    "top": "high-quality",
+    "best": "quality",
+    "no.1": "leading",
+    "first": "premium",
+    "only": "selected",
+    "perfect": "well-made",
+    "ultimate": "enhanced",
+    "extreme": "strong",
+    "100%": "high",
+    "never": "rarely",
+    "unique": "distinctive",
+    "eco-friendly": "environment-conscious",
+    "organic": "natural-style",
+    "handmade": "carefully crafted",
+    "medical": "wellness",
+    "therapeutic": "comfort",
+    "cure": "help",
+    "treat": "care for",
+    "heal": "soothe",
+    "weight loss": "lightweight support",
+    "slimming": "streamlined fit",
+    "whitening": "brightening",
+    "anti-aging": "care",
+    "anti-wrinkle": "smooth-look",
+}
+
+
+def _replace_sensitive_words(text):
+    """将敏感词替换为中性表达，避免整句删除导致文案缺失。"""
+    if not text:
+        return ""
+    result = str(text)
+    for word in sorted(SENSITIVE_WORDS, key=len, reverse=True):
+        w = str(word or "").strip()
+        if not w:
+            continue
+        replacement = _SENSITIVE_REPLACEMENT_MAP.get(w.lower(), "quality")
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9]){}(?![A-Za-z0-9])".format(re.escape(w)),
+            re.IGNORECASE
+        )
+        result = pattern.sub(replacement, result)
+    result = re.sub(r"\s+([,.;:!?])", r"\1", result)
+    result = re.sub(r"\s{2,}", " ", result).strip(" ,;-\n\t")
+    return result
+
+
+def _build_intro_from_title(title):
+    """当无商品特点时，根据标题生成一句简短介绍。"""
+    clean_title = _replace_sensitive_words(_filter_title(title or ""))
+    clean_title = re.sub(r"\s{2,}", " ", clean_title).strip(" -_,.;")
+    if not clean_title:
+        return "Designed for everyday use with comfortable and practical details."
+    short_title = " ".join(clean_title.split()[:12]).strip()
+    if not short_title:
+        return "Designed for everyday use with comfortable and practical details."
+    return "{} with practical details for everyday comfort and easy styling.".format(short_title)
+
+
 def fetch_amazon_product(asin, region="美国"):
     _REGION_DOMAINS = {
         "美国": "www.amazon.com",
@@ -1130,12 +1199,35 @@ def fetch_amazon_product(asin, region="美国"):
         feats = [li.get_text(strip=True)
                  for li in s.select("#feature-bullets li span.a-list-item")
                  if li.get_text(strip=True)]
-        feats = [f for f in feats if not any(w.lower() in f.lower() for w in SENSITIVE_WORDS)]
-        res["features"] = feats[:6]
+        cleaned_feats = []
+        seen_feat = set()
+        for f in feats:
+            cleaned = _replace_sensitive_words(f)
+            cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" -_;,")
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen_feat:
+                continue
+            seen_feat.add(key)
+            cleaned_feats.append(cleaned[:220])
+        res["features"] = cleaned_feats[:6]
 
         d = s.select_one("#productDescription p")
         if d:
-            res["description"] = _filter_sensitive(d.get_text(strip=True))[:300]
+            res["description"] = _replace_sensitive_words(d.get_text(strip=True))[:300]
+        if not res["description"]:
+            if res["features"]:
+                desc = " ".join(res["features"][:2]).strip()
+                if desc and desc[-1] not in ".!?":
+                    desc += "."
+                res["description"] = desc[:300]
+            else:
+                res["description"] = _build_intro_from_title(res.get("title", ""))[:300]
+        if not res["features"]:
+            fallback_intro = res["description"] or _build_intro_from_title(res.get("title", ""))
+            if fallback_intro:
+                res["features"] = [fallback_intro[:220]]
 
         desc_images = []
         h2_tags = s.select("h2")

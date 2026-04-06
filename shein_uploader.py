@@ -2147,9 +2147,12 @@ class SheinPublisher:
             def _normalize_key(txt):
                 t = (txt or "").strip().lower()
                 t = t.replace(" ", "")
+                t = t.replace("（", "").replace("）", "").replace("(", "").replace(")", "")
+                t = t.replace(":", "").replace("：", "")
                 t = t.replace("colour", "color")
                 t = t.replace("颜色", "color")
                 t = t.replace("色彩", "color")
+                t = t.replace("重要", "")
                 t = t.replace("款式", "style")
                 t = t.replace("型号", "model")
                 t = t.replace("尺寸", "size")
@@ -2185,6 +2188,10 @@ class SheinPublisher:
                 sku_attrs = str(first_sku.get("sku_attributes") or "").strip()
                 if sku_attrs and sku_attrs != "默认规格":
                     first_part = sku_attrs.split("/")[0].strip()
+                    if ":" in first_part:
+                        first_part = first_part.split(":", 1)[1].strip()
+                    elif "：" in first_part:
+                        first_part = first_part.split("：", 1)[1].strip()
                     if first_part:
                         return first_part
                 return ""
@@ -2251,10 +2258,22 @@ class SheinPublisher:
                     preferred_basis = _collect_preferred_basis()
                     if preferred_basis:
                         norm_basis_set = set(_normalize_key(x) for x in preferred_basis if _normalize_key(x))
+                        def _is_basis_match(candidate_norm):
+                            if not candidate_norm:
+                                return False
+                            for _b in norm_basis_set:
+                                if not _b:
+                                    continue
+                                if candidate_norm == _b:
+                                    return True
+                                # 允许包含匹配，兼容“颜色Color 重要”等额外标签词
+                                if _b in candidate_norm or candidate_norm in _b:
+                                    return True
+                            return False
                         picked_norm = _normalize_key(picked)
                         if len(options) == 1:
                             # 只有一个选项也必须核对分类依据，不匹配则进入 A/B/C 兜底
-                            attr_match_success = bool(picked_norm and picked_norm in norm_basis_set)
+                            attr_match_success = _is_basis_match(picked_norm)
                             if attr_match_success:
                                 self.log("[OK] 主规格属性仅1项且已匹配分类依据: {} (依据: {})".format(
                                     picked, " / ".join(preferred_basis)))
@@ -2265,7 +2284,7 @@ class SheinPublisher:
                             matched = None
                             for opt in options:
                                 opt_text = (opt.text or "").strip().replace("\n", " ")
-                                if _normalize_key(opt_text) in norm_basis_set:
+                                if _is_basis_match(_normalize_key(opt_text)):
                                     matched = opt
                                     break
                             if matched is not None:

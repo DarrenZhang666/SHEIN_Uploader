@@ -16,7 +16,7 @@ from datetime import datetime
 class SheinApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SHEIN 商品采集 & 发布工具V1.35")
+        self.title("SHEIN 商品采集 & 发布工具V1.25")
         self.geometry("1280x800"); self.minsize(1000,680)
         self.configure(bg=BG_DARK)
         self.asin_list=[]; self.asin_vars={}; self.asin_dots={}; self.asin_status={}
@@ -3479,12 +3479,6 @@ return false;
                 tk.Label(fr,text=">",fg=ACCENT,bg=BG_PANEL,font=("Segoe UI",10)).pack(side="left")
                 tk.Label(fr,text=ft,font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL,
                     wraplength=660,justify="left",anchor="w").pack(side="left",padx=6)
-        desc=info.get("description","")
-        if desc:
-            tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=6)
-            tk.Label(self.df,text="商品描述",font=("Segoe UI",11,"bold"),fg=ACCENT2,bg=BG_PANEL).pack(anchor="w",padx=20)
-            tk.Label(self.df,text=desc,font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL,
-                wraplength=700,justify="left",anchor="w").pack(fill="x",padx=24,pady=4)
         tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=10)
         self._btn(self.df,"发布此商品到 SHEIN",ACCENT,
             lambda i=info:self._publish_direct(i)).pack(anchor="w",padx=20,pady=(0,16))
