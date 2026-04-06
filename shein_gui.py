@@ -1342,6 +1342,7 @@ class SheinApp(tk.Tk):
             # 抓取成功使用与界面主蓝区分的亮蓝色
             "fetch_success": "#38bdf8",
             "fetch_fail": RED,
+            "no_suitable_sku": RED,
             "sku_too_many": RED,
             "stock_low": RED,
             "publishing": YELLOW,
@@ -1364,6 +1365,8 @@ class SheinApp(tk.Tk):
             self._set_asin_progress(asin, 100, "SKU过多，不做爬取", state="fail")
         elif status == "stock_low":
             self._set_asin_progress(asin, 100, "亚马逊库存告急", state="fail")
+        elif status == "no_suitable_sku":
+            self._set_asin_progress(asin, 100, "无合适SKU", state="fail")
         elif status == "fail":
             self._set_asin_progress(asin, 100, "上品失败", state="fail")
         elif status == "fetch_fail":
@@ -1542,6 +1545,8 @@ class SheinApp(tk.Tk):
             return "stock_low"
         if bool(product_info.get("sku_too_many")):
             return "sku_too_many"
+        if bool(product_info.get("no_suitable_sku")):
+            return "no_suitable_sku"
         if self._is_failed_fetch_info(product_info):
             return "fetch_fail"
         return "fetch_success"
@@ -1554,6 +1559,7 @@ class SheinApp(tk.Tk):
             reason_map = {
                 "stock_low": "亚马逊库存告急",
                 "sku_too_many": "SKU过多",
+                "no_suitable_sku": "无合适SKU",
                 "fetch_fail": "抓取失败",
             }
             return False, reason_map.get(inferred, "未抓取成功")
@@ -1568,13 +1574,15 @@ class SheinApp(tk.Tk):
         if not asin:
             return
         status = str(self.asin_status.get(asin, "") or "")
-        if status not in ("stock_low", "sku_too_many", "fetch_fail"):
+        if status not in ("stock_low", "sku_too_many", "fetch_fail", "no_suitable_sku"):
             self._set_asin_status(asin, "fetch_fail")
         text = "请先抓取成功"
         if "库存" in reason:
             text = "亚马逊库存告急"
         elif "SKU" in reason.upper():
             text = "SKU过多，不做爬取"
+        elif "无合适SKU" in reason:
+            text = "无合适SKU"
         elif "抓取失败" in reason:
             text = "抓取失败，请重新抓取"
         elif "颜色非标准" in reason:
@@ -3142,6 +3150,11 @@ return false;
                     elif info and info.get("sku_too_many"):
                         try:
                             self.after(0, lambda a=asin: self._set_asin_status(a, "sku_too_many"))
+                        except RuntimeError:
+                            pass
+                    elif info and info.get("no_suitable_sku"):
+                        try:
+                            self.after(0, lambda a=asin: self._set_asin_status(a, "no_suitable_sku"))
                         except RuntimeError:
                             pass
                     elif is_fail:

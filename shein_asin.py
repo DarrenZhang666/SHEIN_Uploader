@@ -9,6 +9,7 @@ import io
 import json
 import time
 import os
+import difflib
 import requests
 try:
     import cloudscraper
@@ -603,6 +604,10 @@ def _split_color_candidates(color_name):
 
     candidates = []
     for part in amp_parts:
+        # 先加入整段连写词，提升“相近标准色”匹配准确率（如 dusty purple -> dustypurple）
+        packed = re.sub(r"[^a-z0-9]", "", part)
+        if packed and packed not in candidates:
+            candidates.append(packed)
         # 将其它连接符统一为空格
         norm = re.sub(r"[/|,+\-]+", " ", part)
         tokens = [t for t in re.split(r"\s+", norm) if t]
@@ -680,18 +685,30 @@ def _canonicalize_shein_color(color_token):
     for token in _SHEIN_STANDARD_COLOR_TOKENS:
         if (len(key) >= 4 and token.startswith(key)) or (len(token) >= 4 and key.startswith(token)):
             return token
+    # 相近词匹配：处理拼写误差/截断/连接词差异（如 chocola... -> chocolatebrown）
+    best_token = ""
+    best_score = 0.0
+    for token in _SHEIN_STANDARD_COLOR_TOKENS:
+        score = difflib.SequenceMatcher(None, key, token).ratio()
+        if score > best_score:
+            best_score = score
+            best_token = token
+    if best_token and best_score >= 0.74:
+        return best_token
     return ""
 
 
 def _filter_nonstandard_color_skus(sku_list):
     """
     仅保留颜色在 SHEIN 标准色白名单中的 SKU。
-    返回：(filtered_sku_list, removed_count)
+    返回：(filtered_sku_list, removed_count, replaced_count)
     """
     if not sku_list:
-        return sku_list, 0
+        return sku_list, 0, 0
     kept = []
     removed = 0
+    replaced = 0
+    used_standard_colors = set()
     for sku in sku_list:
         basis = [str(b).lower() for b in (sku.get("dimension_basis") or [])]
         is_color_sku = any("color" in b or "colour" in b for b in basis)
@@ -700,20 +717,32 @@ def _filter_nonstandard_color_skus(sku_list):
             continue
         raw_color = _extract_color_from_attrs(sku.get("sku_attributes", ""))
         cands = _split_color_candidates(raw_color)
+        # 追加整句归一化候选，避免仅按首词导致误匹配
+        packed_raw = _normalize_color_token(raw_color)
+        if packed_raw and packed_raw not in cands:
+            cands.append(packed_raw)
         if not cands and raw_color:
-            cands = [_normalize_color_token(raw_color)]
+            cands = [packed_raw] if packed_raw else []
         canon = ""
         for c in cands:
             canon = _canonicalize_shein_color(c)
             if canon:
                 break
         if canon:
+            # 标准化后再次保证“一个颜色仅一个 SKU”
+            if canon in used_standard_colors:
+                removed += 1
+                continue
             sku2 = dict(sku)
+            old_raw = _normalize_color_token(raw_color)
             sku2["sku_attributes"] = "Color: {}".format(canon)
+            if old_raw and old_raw != canon:
+                replaced += 1
             kept.append(sku2)
+            used_standard_colors.add(canon)
         else:
             removed += 1
-    return kept, removed
+    return kept, removed, replaced
 
 
 def _extract_color_from_attrs(attr_text):
@@ -1270,12 +1299,15 @@ def fetch_amazon_product(asin, region="美国"):
 
         # 主规格含 color 时：过滤掉非 SHEIN 标准颜色 SKU
         if _main_spec_has_color:
-            sku_list, _removed_nonstandard = _filter_nonstandard_color_skus(sku_list)
+            sku_list, _removed_nonstandard, _replaced_to_standard = _filter_nonstandard_color_skus(sku_list)
+            if _replaced_to_standard > 0:
+                res["standard_color_replaced"] = int(_replaced_to_standard)
             if _removed_nonstandard > 0:
                 res["nonstandard_color_filtered"] = int(_removed_nonstandard)
                 # 若页面 color SKU 全被过滤，避免回退默认规格导致误上品
                 if not sku_list:
                     res["nonstandard_color_only"] = True
+                    res["no_suitable_sku"] = True
 
         if not sku_list and not bool(res.get("nonstandard_color_only")):
             sku_list.append({
