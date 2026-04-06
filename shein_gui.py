@@ -503,7 +503,6 @@ class SheinApp(tk.Tk):
         base_cols = (
             "supplier_no",
             "reason",
-            "remaining_times",
             "sku_info",
             "amazon_url",
             "platform_price",
@@ -522,7 +521,6 @@ class SheinApp(tk.Tk):
         )
         self._bargain_table.heading("supplier_no", text="供方货号", anchor="w")
         self._bargain_table.heading("reason", text="建议改价原因", anchor="w")
-        self._bargain_table.heading("remaining_times", text="剩余议价次数", anchor="w")
         self._bargain_table.heading("sku_info", text="SKU信息", anchor="w")
         self._bargain_table.heading("platform_price", text="平台建议价", anchor="w")
         if "amazon_url" in cols:
@@ -534,7 +532,6 @@ class SheinApp(tk.Tk):
 
         self._bargain_table.column("supplier_no", width=140, minwidth=120, anchor="w")
         self._bargain_table.column("reason", width=180, minwidth=150, anchor="w")
-        self._bargain_table.column("remaining_times", width=110, minwidth=90, anchor="w")
         self._bargain_table.column("sku_info", width=150, minwidth=130, anchor="w")
         self._bargain_table.column("platform_price", width=100, minwidth=90, anchor="w")
         if "amazon_url" in cols:
@@ -584,7 +581,6 @@ class SheinApp(tk.Tk):
         value_getter = {
             "supplier_no": lambda r: r.get("supplier_no", ""),
             "reason": lambda r: r.get("reason", ""),
-            "remaining_times": lambda r: r.get("remaining_times", ""),
             "sku_info": lambda r: r.get("sku_info", ""),
             "platform_price": lambda r: r.get("platform_price", ""),
             "amazon_url": lambda r: r.get("amazon_url", ""),

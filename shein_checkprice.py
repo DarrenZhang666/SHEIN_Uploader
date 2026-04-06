@@ -372,7 +372,6 @@ def _extract_rows_from_todo_drawer_table(driver):
         "_row_text": "...",
         "基础信息": "...",
         "建议改价原因": "...",
-        "剩余议价次数": "...",
         "SKU信息": "...",
         "平台建议价": "...",
         "状态": "...",
@@ -418,7 +417,6 @@ if (!headers.length) return [];
 const idx = (name) => headers.findIndex(h => h.includes(name));
 const iBase = idx('基础信息');
 const iReason = idx('建议改价原因');
-const iTimes = idx('剩余议价次数');
 const iSku = idx('SKU信息');
 const iPrice = headers.findIndex(h => h.includes('平台建议价') || h.includes('建议价'));
 const iStatus = idx('状态');
@@ -432,7 +430,6 @@ for (const tr of trs) {
   one['_row_text'] = clean(tr.innerText || '');
   if (iBase >= 0 && tds[iBase]) one['基础信息'] = clean(tds[iBase].innerText || '');
   if (iReason >= 0 && tds[iReason]) one['建议改价原因'] = clean(tds[iReason].innerText || '');
-  if (iTimes >= 0 && tds[iTimes]) one['剩余议价次数'] = clean(tds[iTimes].innerText || '');
   if (iSku >= 0 && tds[iSku]) one['SKU信息'] = clean(tds[iSku].innerText || '');
   if (iPrice >= 0 && tds[iPrice]) one['平台建议价'] = clean(tds[iPrice].innerText || '');
   if (iStatus >= 0 && tds[iStatus]) one['状态'] = clean(tds[iStatus].innerText || '');
@@ -493,7 +490,6 @@ def _normalize_bargain_row(row_obj):
     supplier_no = re.sub(r"^XYZ-", "", supplier_no, flags=re.I)
 
     reason = _pick_value(row_obj, ["建议改价原因", "改价原因", "建议原因"])
-    remaining_times = _pick_value(row_obj, ["剩余议价次数", "可议价次数", "剩余次数"])
     raw_sku_info = _pick_value(row_obj, ["SKU信息", "SKU", "规格", "颜色/尺码", "颜色尺码"])
     if not raw_sku_info:
         row_text_for_sku = _trim_text(row_obj.get("_row_text", ""))
@@ -536,7 +532,6 @@ def _normalize_bargain_row(row_obj):
         "supplier_no_raw": supplier_no_raw,
         "supplier_no": supplier_no,
         "reason": reason,
-        "remaining_times": remaining_times,
         "sku_info": sku_info,
         "sub_spec": sub_spec,
         "platform_price": platform_price,
@@ -582,7 +577,6 @@ def _wait_fetch_pending_bargain_rows(driver, log, timeout=14, interval=0.7, assu
                 "supplier_no_raw": one.get("supplier_no_raw", ""),
                 "supplier_no": one.get("supplier_no", ""),
                 "reason": one.get("reason", ""),
-                "remaining_times": one.get("remaining_times", ""),
                 "sku_info": one.get("sku_info", ""),
                 "sub_spec": one.get("sub_spec", ""),
                 "platform_price": one.get("platform_price", ""),
@@ -888,7 +882,6 @@ def fetch_shein_pending_bargain_rows(
                 _trim_text(r.get("sub_spec", "")),
                 _trim_text(r.get("reason", "")),
                 _trim_text(r.get("platform_price", "")),
-                _trim_text(r.get("remaining_times", "")),
             )
             if k in seen:
                 continue
@@ -896,7 +889,6 @@ def fetch_shein_pending_bargain_rows(
             all_rows.append({
                 "supplier_no": r.get("supplier_no", ""),
                 "reason": r.get("reason", ""),
-                "remaining_times": r.get("remaining_times", ""),
                 "sku_info": r.get("sku_info", ""),
                 "sub_spec": r.get("sub_spec", ""),
                 "platform_price": r.get("platform_price", ""),
