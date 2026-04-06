@@ -1596,6 +1596,7 @@ class SheinApp(tk.Tk):
             # 抓取成功使用与界面主蓝区分的亮蓝色
             "fetch_success": "#38bdf8",
             "fetch_fail": RED,
+            "no_price": RED,
             "no_suitable_sku": RED,
             "sku_too_many": RED,
             "stock_low": RED,
@@ -1625,6 +1626,8 @@ class SheinApp(tk.Tk):
             self._set_asin_progress(asin, 100, "上品失败", state="fail")
         elif status == "fetch_fail":
             self._set_asin_progress(asin, 100, "抓取失败", state="fail")
+        elif status == "no_price":
+            self._set_asin_progress(asin, 100, "No price， stop", state="fail")
 
     def _set_asin_progress(self, asin, pct=None, text=None, state="running"):
         """更新 ASIN 行内简化进度条与文字。"""
@@ -1803,6 +1806,8 @@ class SheinApp(tk.Tk):
             return "no_suitable_sku"
         if self._is_failed_fetch_info(product_info):
             return "fetch_fail"
+        if not self._has_publishable_price(product_info):
+            return "no_price"
         return "fetch_success"
 
     def _is_asin_fetch_ready(self, asin):
@@ -1815,6 +1820,7 @@ class SheinApp(tk.Tk):
                 "sku_too_many": "SKU过多",
                 "no_suitable_sku": "无合适SKU",
                 "fetch_fail": "抓取失败",
+                "no_price": "No price， stop",
             }
             return False, reason_map.get(inferred, "未抓取成功")
         if bool(info.get("nonstandard_color_only")):
@@ -1828,7 +1834,7 @@ class SheinApp(tk.Tk):
         if not asin:
             return
         status = str(self.asin_status.get(asin, "") or "")
-        if status not in ("stock_low", "sku_too_many", "fetch_fail", "no_suitable_sku"):
+        if status not in ("stock_low", "sku_too_many", "fetch_fail", "no_suitable_sku", "no_price"):
             self._set_asin_status(asin, "fetch_fail")
         text = "请先抓取成功"
         if "库存" in reason:
@@ -1839,6 +1845,8 @@ class SheinApp(tk.Tk):
             text = "SKU过多，不做爬取"
         elif "抓取失败" in reason:
             text = "抓取失败，请重新抓取"
+        elif "No price" in reason:
+            text = "No price， stop"
         elif "颜色非标准" in reason:
             text = "颜色非标准，已过滤"
         elif "图片" in reason:
@@ -1850,9 +1858,46 @@ class SheinApp(tk.Tk):
         """标记 ASIN 因无价格无法上品（红色进度）。"""
         if not asin:
             return
-        self._set_asin_status(asin, "fail")
-        self._set_asin_progress(asin, 100, "No price，stop", state="fail")
+        self._set_asin_status(asin, "no_price")
+        self._set_asin_progress(asin, 100, "No price， stop", state="fail")
         self._pub_log("[SKIP] {} 无价格，无法上品".format(asin))
+
+    def _save_manual_price(self, asin, raw_price):
+        """保存手动价格到缓存，后续上品直接使用该值。"""
+        asin = str(asin or "").strip()
+        if not asin:
+            return
+        info = self.product_cache.get(asin)
+        if not isinstance(info, dict):
+            info = {"asin": asin}
+            self.product_cache[asin] = info
+        price_text = str(raw_price or "").strip()
+        if not price_text:
+            price_text = "N/A"
+        info["price"] = price_text
+
+        inferred = self._infer_fetch_status(info)
+        status_map = {
+            "fetch_success": "fetch_success",
+            "stock_low": "stock_low",
+            "sku_too_many": "sku_too_many",
+            "no_suitable_sku": "no_suitable_sku",
+            "fetch_fail": "fetch_fail",
+            "no_price": "no_price",
+        }
+        cur_status = str(self.asin_status.get(asin, "") or "")
+        if cur_status in ("", "imported", "pending", "fetching", "fetch_success", "fetch_fail", "no_price", "fail"):
+            self._set_asin_status(asin, status_map.get(inferred, "fetch_fail"))
+        elif cur_status in ("stock_low", "sku_too_many", "no_suitable_sku"):
+            # 保持更高优先级失败态，不因手工改价覆盖库存/SKU类错误。
+            pass
+
+        if self.current_asin == asin:
+            if inferred == "no_price":
+                self.status_lbl.config(text="No price， stop")
+            else:
+                # 恢复为与正常抓取一致的状态文案，清除 no price 提示
+                self.status_lbl.config(text="抓取完成，共缓存 {} 个商品".format(len(self.product_cache)))
 
     def _import_txt(self):
         path=filedialog.askopenfilename(title="选择 ASIN 文本文件",
@@ -2680,7 +2725,7 @@ return false;
                 if not_ready_asins and no_price_asins:
                     self.status_lbl.config(text="所选商品未抓取成功/无价格，已自动跳过")
                 elif no_price_asins:
-                    self.status_lbl.config(text="No price, stop")
+                    self.status_lbl.config(text="No price， stop")
                 elif not_ready_asins:
                     self.status_lbl.config(text="所选商品未抓取成功，已自动跳过")
                 else:
@@ -3319,6 +3364,7 @@ return false;
         
         # 重置停止标志，允许新的抓取任务开始
         self._stop_publish = False
+        self._last_fetch_no_price_asins = []
         
         # 分离已成功缓存 和 需要重新抓取 的 ASIN
         need_fetch = []
@@ -3365,6 +3411,7 @@ return false;
         if already_cached is None:
             already_cached = []
         total = len(asins)
+        no_price_asins = []
         region = self.amazon_region.get()
         for asin in asins:
             # 抓取进行中：黄色
@@ -3416,6 +3463,13 @@ return false;
                             self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_fail"))
                         except RuntimeError:
                             pass
+                    elif not self._has_publishable_price(info):
+                        no_price_asins.append(asin)
+                        try:
+                            self.after(0, lambda a=asin: self._set_asin_status(a, "no_price"))
+                            self.after(0, lambda: self.status_lbl.config(text="No price， stop"))
+                        except RuntimeError:
+                            pass
                     else:
                         try:
                             self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_success"))
@@ -3429,21 +3483,26 @@ return false;
                 except Exception:
                     pass
         try:
-            self.after(0, lambda ac=already_cached: self._done(ac))
+            self.after(0, lambda ac=already_cached, np=list(no_price_asins): self._done(ac, np))
         except RuntimeError:
             pass  # 主线程已退出
 
-    def _done(self, already_cached=None):
+    def _done(self, already_cached=None, no_price_asins=None):
         if already_cached is None:
             already_cached = []
+        if no_price_asins is None:
+            no_price_asins = []
         self.progress.stop()
         # 清理线程对象，允许下次抓取
         self._fetch_thread = None
+        self._last_fetch_no_price_asins = list(no_price_asins)
         cached_count = len(already_cached)
         total_cached = len(self.product_cache)
         msg = "抓取完成，共缓存 {} 个商品".format(total_cached)
         if cached_count > 0:
             msg += "（其中 {} 个为已缓存）".format(cached_count)
+        if no_price_asins:
+            msg = "No price， stop"
         self.status_lbl.config(text=msg)
         if self.current_asin and self.current_asin in self.product_cache:
             self._show_current_asin_now()
@@ -3463,7 +3522,42 @@ return false;
         row(info.get("title",""),13,TEXT_MAIN,True)
         row("ASIN: {}  货号: XYZ-{}".format(info.get("asin",""), info.get("asin","")),10,TEXT_SUB)
         row("品牌: {}".format(info.get("brand","N/A")),10,YELLOW)
-        row("价格: {}".format(info.get("price","N/A")),12,GREEN,True)
+        asin = str(info.get("asin", "") or "").strip()
+        price_frame = tk.Frame(inf, bg=BG_PANEL)
+        price_frame.pack(fill="x", padx=4, pady=2)
+        tk.Label(
+            price_frame,
+            text="价格:",
+            font=("Segoe UI", 12, "bold"),
+            fg=GREEN,
+            bg=BG_PANEL
+        ).pack(side="left")
+        price_var = tk.StringVar(value=str(info.get("price", "N/A") or "N/A"))
+        price_entry = tk.Entry(
+            price_frame,
+            textvariable=price_var,
+            width=18,
+            font=("Segoe UI", 12, "bold"),
+            fg=GREEN,
+            bg=BG_CARD,
+            insertbackground=GREEN,
+            relief="flat",
+            bd=2,
+        )
+        price_entry.pack(side="left", padx=(6, 8))
+        tk.Label(
+            price_frame,
+            text="可手动修改",
+            font=("Segoe UI", 9),
+            fg=TEXT_SUB,
+            bg=BG_PANEL
+        ).pack(side="left")
+
+        def _commit_price(_event=None, _asin=asin, _var=price_var):
+            self._save_manual_price(_asin, _var.get())
+
+        price_entry.bind("<FocusOut>", _commit_price)
+        price_entry.bind("<Return>", lambda e: (_commit_price(), "break")[1])
         row("评分: {}  评论数: {}".format(info.get("rating","N/A"),info.get("reviews","N/A")),10,TEXT_SUB)
         url=info.get("url","")
         if url:
