@@ -993,10 +993,21 @@ def fetch_amazon_product(asin, region="美国"):
             other_specs = _extract_non_color_specs(s)
         res["other_specs"] = other_specs
 
+        # SKU 过多时跳过 SKU 明细抓取，仅保留主信息
+        max_sku_fetch = 10
+        def _mark_sku_too_many(count):
+            res["sku_too_many"] = True
+            res["sku_count"] = int(count or 0)
+            res["sku_list"] = []
+
         # 优先从 HTML 直接解析 color 维度的 ASIN（#inline-twister-row-color_name）
         _color_asins_from_html = _extract_color_only_asins(s) if _color_only_mode else []
 
         if _color_only_mode and _color_asins_from_html:
+            unique_color_asins = {str(a).strip() for a, _ in _color_asins_from_html if str(a or "").strip()}
+            if len(unique_color_asins) > max_sku_fetch:
+                _mark_sku_too_many(len(unique_color_asins))
+                return res
             # 路径 A：HTML 解析到 color ASIN 列表，直接使用
             sku_asin_list = [a for a, _ in _color_asins_from_html if a and a != asin]
             sku_image_cache = _fetch_all_sku_images_concurrently(
@@ -1071,6 +1082,9 @@ def fetch_amazon_product(asin, region="美国"):
                             continue
                     sku_seen.add(sku_asin)
                     candidate_entries.append((dim_key, sku_asin, basis))
+            if len(candidate_entries) > max_sku_fetch:
+                _mark_sku_too_many(len(candidate_entries))
+                return res
 
             # style 依据时，仅保留前 3 个 SKU 并在后续将规格重写为 A/B/C
             style_mode = any(_basis_has_style(_basis) for _, _, _basis in candidate_entries)

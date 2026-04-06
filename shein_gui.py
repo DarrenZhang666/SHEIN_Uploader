@@ -1350,7 +1350,7 @@ class SheinApp(tk.Tk):
         hint = getattr(self, "asin_hints", {}).get(asin)
         if hint:
             if status == "sku_too_many":
-                hint.config(text="sku\u8fc7\u591a\u4e0d\u722c\u53d6", fg=RED)
+                hint.config(text="SKU过多，不做爬取", fg=RED)
             else:
                 hint.config(text="", fg=dot.cget("bg"))
         if status in ("imported", "pending", "fetch_success"):
@@ -1359,7 +1359,9 @@ class SheinApp(tk.Tk):
             self._set_asin_progress(asin, 10, "上品中", state="running")
         elif status == "success":
             self._set_asin_progress(asin, 100, "上品成功", state="success")
-        elif status in ("fail", "sku_too_many"):
+        elif status == "sku_too_many":
+            self._set_asin_progress(asin, 100, "SKU过多，不做爬取", state="fail")
+        elif status == "fail":
             self._set_asin_progress(asin, 100, "上品失败", state="fail")
         elif status == "fetch_fail":
             self._set_asin_progress(asin, 100, "抓取失败", state="fail")
@@ -3094,6 +3096,19 @@ return false;
         sku_list = info.get("sku_list", [])
         tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=10)
         tk.Label(self.df,text="商品详情页 · SKU 信息（每个SKU图片前5张，Ctrl+点击打开）",font=("Segoe UI",11,"bold"),fg=ACCENT2,bg=BG_PANEL).pack(anchor="w",padx=20)
+        if info.get("sku_too_many"):
+            sku_count = int(info.get("sku_count") or 0)
+            tip = "SKU过多，不做爬取"
+            if sku_count > 0:
+                tip = "SKU过多，不做爬取（共{}个）".format(sku_count)
+            tk.Label(
+                self.df,
+                text=tip,
+                font=("Segoe UI",10,"bold"),
+                fg=RED,
+                bg=BG_PANEL,
+                anchor="w"
+            ).pack(anchor="w",padx=24,pady=(2,6))
         other_specs = info.get("other_specs", {})
         if other_specs:
             parts = ["{}：{}".format(k, "，".join(str(v) for v in vals)) for k, vals in other_specs.items()]
