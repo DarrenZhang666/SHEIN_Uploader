@@ -1502,8 +1502,11 @@ class SheinApp(tk.Tk):
         try:
             for asin, st in list(self.asin_status.items()):
                 if st == "publishing":
-                    self._set_asin_status(asin, "fetch_success")
-                    self._set_asin_progress(asin, 0, "未上品", state="idle")
+                    info = self.product_cache.get(asin) or {}
+                    fetch_st = self._infer_fetch_status(info)
+                    self._set_asin_status(asin, fetch_st)
+                    if fetch_st == "fetch_success":
+                        self._set_asin_progress(asin, 0, "未上品", state="idle")
         except Exception:
             pass
 
@@ -1519,6 +1522,63 @@ class SheinApp(tk.Tk):
         if norm in ("NA", "N/A", "NONE", "NULL", "-", "--"):
             return False
         return bool(re.search(r"\d", raw))
+
+    @staticmethod
+    def _is_failed_fetch_info(product_info):
+        """根据抓取结果内容判断是否属于抓取失败数据。"""
+        if not isinstance(product_info, dict):
+            return True
+        title = str(product_info.get("title", "") or "").strip()
+        if not title:
+            return True
+        fail_prefixes = ("获取失败", "HTTP ", "错误:", "被亚马逊反爬", "Error")
+        return any(title.startswith(p) for p in fail_prefixes)
+
+    def _infer_fetch_status(self, product_info):
+        """从商品信息推断抓取状态，避免仅靠 UI 状态误判。"""
+        if not isinstance(product_info, dict) or not product_info:
+            return "fetch_fail"
+        if bool(product_info.get("stock_low")):
+            return "stock_low"
+        if bool(product_info.get("sku_too_many")):
+            return "sku_too_many"
+        if self._is_failed_fetch_info(product_info):
+            return "fetch_fail"
+        return "fetch_success"
+
+    def _is_asin_fetch_ready(self, asin):
+        """上品前校验：必须抓取成功。"""
+        info = self.product_cache.get(asin) or {}
+        inferred = self._infer_fetch_status(info)
+        if inferred != "fetch_success":
+            reason_map = {
+                "stock_low": "亚马逊库存告急",
+                "sku_too_many": "SKU过多",
+                "fetch_fail": "抓取失败",
+            }
+            return False, reason_map.get(inferred, "未抓取成功")
+        if not info.get("image_url"):
+            return False, "缺少图片信息"
+        return True, ""
+
+    def _mark_asin_not_fetch_ready(self, asin, reason=""):
+        """标记 ASIN 未抓取成功，禁止开始上品。"""
+        if not asin:
+            return
+        status = str(self.asin_status.get(asin, "") or "")
+        if status not in ("stock_low", "sku_too_many", "fetch_fail"):
+            self._set_asin_status(asin, "fetch_fail")
+        text = "请先抓取成功"
+        if "库存" in reason:
+            text = "亚马逊库存告急"
+        elif "SKU" in reason.upper():
+            text = "SKU过多，不做爬取"
+        elif "抓取失败" in reason:
+            text = "抓取失败，请重新抓取"
+        elif "图片" in reason:
+            text = "缺少图片，请重新抓取"
+        self._set_asin_progress(asin, 100, text, state="fail")
+        self._pub_log("[SKIP] {} 未抓取成功（{}），已跳过上品".format(asin, reason or "未知原因"))
 
     def _mark_asin_no_price(self, asin):
         """标记 ASIN 因无价格无法上品（红色进度）。"""
@@ -2328,9 +2388,15 @@ return false;
             skipped_success = [a for a in selected_asins if self.asin_status.get(a) == "success"]
             publish_asins = [a for a in selected_asins if self.asin_status.get(a) != "success"]
             no_price_asins = []
+            not_ready_asins = []
             filtered_asins = []
             for asin in publish_asins:
                 info = self.product_cache.get(asin) or {}
+                is_ready, reason = self._is_asin_fetch_ready(asin)
+                if not is_ready:
+                    not_ready_asins.append(asin)
+                    self._mark_asin_not_fetch_ready(asin, reason)
+                    continue
                 if self._has_publishable_price(info):
                     filtered_asins.append(asin)
                 else:
@@ -2342,9 +2408,15 @@ return false;
                 self._pub_log("[SKIP] 已过滤 {} 个已上品成功 ASIN".format(len(skipped_success)))
             if no_price_asins:
                 self._pub_log("[SKIP] 已过滤 {} 个无价格 ASIN".format(len(no_price_asins)))
+            if not_ready_asins:
+                self._pub_log("[SKIP] 已过滤 {} 个未抓取成功 ASIN".format(len(not_ready_asins)))
             if not publish_asins:
-                if no_price_asins:
+                if not_ready_asins and no_price_asins:
+                    self.status_lbl.config(text="所选商品未抓取成功/无价格，已自动跳过")
+                elif no_price_asins:
                     self.status_lbl.config(text="No price, stop")
+                elif not_ready_asins:
+                    self.status_lbl.config(text="所选商品未抓取成功，已自动跳过")
                 else:
                     self.status_lbl.config(text="所选商品均已上品成功，已自动跳过")
                 return
@@ -2381,6 +2453,14 @@ return false;
 
         # 同步当前 ASIN，后续流程统一使用 current_asin
         self.current_asin = target_asin
+
+        # 必须抓取成功才允许上品
+        is_ready, reason = self._is_asin_fetch_ready(target_asin)
+        if not is_ready:
+            self._mark_asin_not_fetch_ready(target_asin, reason)
+            self.status_lbl.config(text="ASIN {} 未抓取成功，已跳过上品".format(target_asin))
+            messagebox.showwarning('提示', 'ASIN {} 未抓取成功（{}），请先重新抓取'.format(target_asin, reason))
+            return
 
         # 检查商品是否有图片
         product_info = self.product_cache.get(target_asin)
@@ -2542,6 +2622,10 @@ return false;
 
             product_info = self.product_cache.get(target_asin)
             dot = self.asin_dots.get(target_asin)
+            is_ready, reason = self._is_asin_fetch_ready(target_asin)
+            if not is_ready:
+                self.after(0, lambda a=target_asin, r=reason: self._mark_asin_not_fetch_ready(a, r))
+                return
             if not product_info or not product_info.get('image_url'):
                 if dot:
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
@@ -2973,12 +3057,11 @@ return false;
         # 分离已成功缓存 和 需要重新抓取 的 ASIN
         need_fetch = []
         already_cached = []
-        _fail_prefixes = ("获取失败", "HTTP ", "错误:", "被亚马逊反爬", "Error")
         for asin in sel:
             if asin in self.product_cache:
                 cached_info = self.product_cache[asin]
-                title = str(cached_info.get("title", ""))
-                is_cached_ok = bool(title) and not any(title.startswith(p) for p in _fail_prefixes)
+                inferred = self._infer_fetch_status(cached_info)
+                is_cached_ok = (inferred == "fetch_success")
                 if is_cached_ok:
                     already_cached.append(asin)
                 else:
@@ -3609,17 +3692,23 @@ return false;
                         return
                     with self._worker_publishers_lock:
                         self._worker_active_asins[worker_idx] = asin
-                    self._log_publish_progress(asin, "开始上品")
-                    self.after(0, lambda a=asin: self._set_asin_status(a, "publishing"))
-                    self.after(0, lambda a=asin: self._set_asin_progress(a, 15, "上品中", state="running"))
-
                     info = self.product_cache.get(asin, {})
+                    is_ready, not_ready_reason = self._is_asin_fetch_ready(asin)
+                    if not is_ready:
+                        self.after(0, lambda a=asin, r=not_ready_reason: self._mark_asin_not_fetch_ready(a, r))
+                        worker_has_failure = True
+                        _record_result(asin, False, "未抓取成功: {}".format(not_ready_reason))
+                        continue
                     if not info or not info.get('image_url'):
+                        self.after(0, lambda a=asin: self._mark_asin_not_fetch_ready(a, "缺少图片信息"))
                         worker_has_failure = True
                         _record_result(asin, False, '缺少商品图片')
                         continue
 
                     try:
+                        self._log_publish_progress(asin, "开始上品")
+                        self.after(0, lambda a=asin: self._set_asin_status(a, "publishing"))
+                        self.after(0, lambda a=asin: self._set_asin_progress(a, 15, "上品中", state="running"))
                         self._log_publish_progress(asin, "上品中")
                         if not _ensure_publish_page(pub.driver):
                             worker_has_failure = True
