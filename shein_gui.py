@@ -1557,6 +1557,8 @@ class SheinApp(tk.Tk):
                 "fetch_fail": "抓取失败",
             }
             return False, reason_map.get(inferred, "未抓取成功")
+        if bool(info.get("nonstandard_color_only")):
+            return False, "颜色非标准"
         if not info.get("image_url"):
             return False, "缺少图片信息"
         return True, ""
@@ -1575,6 +1577,8 @@ class SheinApp(tk.Tk):
             text = "SKU过多，不做爬取"
         elif "抓取失败" in reason:
             text = "抓取失败，请重新抓取"
+        elif "颜色非标准" in reason:
+            text = "颜色非标准，已过滤"
         elif "图片" in reason:
             text = "缺少图片，请重新抓取"
         self._set_asin_progress(asin, 100, text, state="fail")

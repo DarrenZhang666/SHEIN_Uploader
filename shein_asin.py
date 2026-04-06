@@ -619,6 +619,103 @@ def _split_color_candidates(color_name):
     return candidates
 
 
+def _normalize_color_token(txt):
+    """颜色词标准化：去空格/连接符/非字母数字并转小写。"""
+    t = str(txt or "").strip().lower()
+    if not t:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", t)
+
+
+# SHEIN 标准颜色（英文规范词），用于过滤非标准颜色 SKU。
+# 说明：包含用户提供的标准色及常见别名/连写形式，统一按标准化后匹配。
+_SHEIN_STANDARD_COLOR_TOKENS = {
+    # 基础色
+    "apricot", "black", "white", "grey", "gray", "red", "blue", "green", "yellow",
+    "pink", "purple", "brown", "orange", "gold", "silver", "beige", "khaki",
+    "camel", "clear", "multicolor", "maroon",
+    # 组合/深浅/常见扩展
+    "blackand", "redand", "blueand", "blackandwhite",
+    "darkgrey", "lightgrey", "darkgreen", "navyblue", "tealblue", "mintblue",
+    "mintgreen", "babypink", "babyblue", "dustyblue", "dustypink",
+    "dustypurple", "rose", "rosered", "hotpink", "coralpink", "coralorange",
+    "armygreen", "royalblue", "olivegreen", "limegreen",
+    "burgundy", "ginger", "burntorange", "redwood", "lilacpurple", "violetpurple",
+    "mauvepurple", "mustardyellow", "rustbrown", "rustyrose", "redviolet",
+    "coffeebrown", "chocolatebrown", "mochabrown", "champagne", "bronze",
+    "cadetblue", "watermelonpink",
+}
+
+# 颜色别名（键=归一化后的候选词，值=归一化后的标准词）
+_SHEIN_COLOR_ALIASES = {
+    "blackandwhite": "blackand",
+    "darkgray": "darkgrey",
+    "lightgray": "lightgrey",
+    "navy": "navyblue",
+    "teal": "tealblue",
+    "mint": "mintgreen",
+    "baby": "babypink",
+    "dusty": "dustypink",
+    "lilac": "lilacpurple",
+    "violet": "violetpurple",
+    "mauve": "mauvepurple",
+    "mustard": "mustardyellow",
+    "coffee": "coffeebrown",
+    "chocolate": "chocolatebrown",
+    "mocha": "mochabrown",
+    "coral": "coralpink",
+    "burntora": "burntorange",
+}
+
+
+def _canonicalize_shein_color(color_token):
+    """将颜色候选词映射为 SHEIN 标准颜色词；非标准返回空字符串。"""
+    key = _normalize_color_token(color_token)
+    if not key:
+        return ""
+    key = _SHEIN_COLOR_ALIASES.get(key, key)
+    if key in _SHEIN_STANDARD_COLOR_TOKENS:
+        return key
+    # 前缀兼容：处理页面省略号截断（如 lilac pur... / waterm...）
+    for token in _SHEIN_STANDARD_COLOR_TOKENS:
+        if (len(key) >= 4 and token.startswith(key)) or (len(token) >= 4 and key.startswith(token)):
+            return token
+    return ""
+
+
+def _filter_nonstandard_color_skus(sku_list):
+    """
+    仅保留颜色在 SHEIN 标准色白名单中的 SKU。
+    返回：(filtered_sku_list, removed_count)
+    """
+    if not sku_list:
+        return sku_list, 0
+    kept = []
+    removed = 0
+    for sku in sku_list:
+        basis = [str(b).lower() for b in (sku.get("dimension_basis") or [])]
+        is_color_sku = any("color" in b or "colour" in b for b in basis)
+        if not is_color_sku:
+            kept.append(sku)
+            continue
+        raw_color = _extract_color_from_attrs(sku.get("sku_attributes", ""))
+        cands = _split_color_candidates(raw_color)
+        if not cands and raw_color:
+            cands = [_normalize_color_token(raw_color)]
+        canon = ""
+        for c in cands:
+            canon = _canonicalize_shein_color(c)
+            if canon:
+                break
+        if canon:
+            sku2 = dict(sku)
+            sku2["sku_attributes"] = "Color: {}".format(canon)
+            kept.append(sku2)
+        else:
+            removed += 1
+    return kept, removed
+
+
 def _extract_color_from_attrs(attr_text):
     """从 sku_attributes 中抽取颜色值文本。"""
     t = str(attr_text or "").strip()
@@ -1026,6 +1123,7 @@ def fetch_amazon_product(asin, region="美国"):
         _has_color = any("color" in d or "colour" in d for d in _all_dim_names_lower)
         _has_size  = any("size" in d for d in _all_dim_names_lower)
         _color_only_mode = _has_color and _has_size
+        _main_spec_has_color = _has_color
 
         # 提取「其他规格」：color_only_mode 下，收集非 color 维度的所有选项值
         # 格式：{"size": ["65L", "96L"], ...}
@@ -1170,7 +1268,16 @@ def fetch_amazon_product(asin, region="美国"):
         # 对所有 color SKU 执行统一颜色唯一化（覆盖所有构建路径）
         sku_list = _enforce_unique_color_skus(sku_list)
 
-        if not sku_list:
+        # 主规格含 color 时：过滤掉非 SHEIN 标准颜色 SKU
+        if _main_spec_has_color:
+            sku_list, _removed_nonstandard = _filter_nonstandard_color_skus(sku_list)
+            if _removed_nonstandard > 0:
+                res["nonstandard_color_filtered"] = int(_removed_nonstandard)
+                # 若页面 color SKU 全被过滤，避免回退默认规格导致误上品
+                if not sku_list:
+                    res["nonstandard_color_only"] = True
+
+        if not sku_list and not bool(res.get("nonstandard_color_only")):
             sku_list.append({
                 "sku_asin": asin,
                 "sku_attributes": "默认规格",
