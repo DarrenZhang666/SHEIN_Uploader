@@ -52,6 +52,8 @@ class SheinApp(tk.Tk):
         self._preview_cache_lock = threading.Lock()
         self._current_preview_url = ""
         self._preview_inflight = set()
+        self._sku_render_after_id = None
+        self._detail_switch_after_id = None
         self._active_publish_asin = None
         self._verified_accounts: set[str] = set()
         self._account_auth_periods = {}  # account -> (start_raw, end_raw)
@@ -1593,17 +1595,21 @@ class SheinApp(tk.Tk):
         self._upd_cnt(); self.select_all_var.set(False)
         self._update_asin_row_styles()
 
-    def _update_asin_row_styles(self):
-        """高亮当前选中的 ASIN 行，让定位更清晰。"""
+    def _apply_asin_row_style(self, asin):
+        """仅刷新单个 ASIN 行样式，避免切换时全量遍历。"""
+        if not asin:
+            return
+        ws = self.asin_row_widgets.get(asin)
+        if not ws:
+            return
         selected_bg = "#243447"
         selected_fg = "#EAF3FF"
-        for asin, ws in self.asin_row_widgets.items():
-            idx = ws.get("idx", 0)
-            normal_bg = BG_CARD if idx % 2 == 0 else BG_PANEL
-            is_selected = (asin == self.current_asin)
-            bg = selected_bg if is_selected else normal_bg
-            fg = selected_fg if is_selected else TEXT_MAIN
-
+        idx = ws.get("idx", 0)
+        normal_bg = BG_CARD if idx % 2 == 0 else BG_PANEL
+        is_selected = (asin == self.current_asin)
+        bg = selected_bg if is_selected else normal_bg
+        fg = selected_fg if is_selected else TEXT_MAIN
+        try:
             ws["row"].config(bg=bg)
             ws["cb"].config(bg=bg, activebackground=bg)
             ws["lbl"].config(bg=bg, fg=fg)
@@ -1612,12 +1618,46 @@ class SheinApp(tk.Tk):
             if ws.get("prog_wrap"): ws["prog_wrap"].config(bg=bg)
             if ws.get("prog_text"): ws["prog_text"].config(bg=bg)
             if ws.get("prog_canvas"): ws["prog_canvas"].config(bg=bg)
+        except Exception:
+            pass
+
+    def _update_asin_row_styles(self, changed_asins=None):
+        """高亮当前选中的 ASIN 行，让定位更清晰。"""
+        if changed_asins is None:
+            for asin in self.asin_row_widgets.keys():
+                self._apply_asin_row_style(asin)
+            return
+        seen = set()
+        for asin in changed_asins:
+            if asin and asin not in seen:
+                seen.add(asin)
+                self._apply_asin_row_style(asin)
 
     def _click(self,asin):
+        prev_asin = self.current_asin
         self.current_asin=asin
-        self._update_asin_row_styles()
-        if asin in self.product_cache: self._show(self.product_cache[asin])
-        else: self._placeholder(asin)
+        self._update_asin_row_styles(changed_asins=[prev_asin, asin])
+        self._schedule_show_current_asin()
+
+    def _schedule_show_current_asin(self, delay_ms=16):
+        """切换时合并高频点击，避免重复重绘详情面板。"""
+        if self._detail_switch_after_id:
+            try:
+                self.after_cancel(self._detail_switch_after_id)
+            except Exception:
+                pass
+            self._detail_switch_after_id = None
+        self._detail_switch_after_id = self.after(delay_ms, self._show_current_asin_now)
+
+    def _show_current_asin_now(self):
+        self._detail_switch_after_id = None
+        asin = self.current_asin
+        if not asin:
+            return
+        if asin in self.product_cache:
+            self._show(self.product_cache[asin])
+        else:
+            self._placeholder(asin)
 
     def _dbl_select_asin(self, asin):
         """双击 ASIN 行时直接勾选该 ASIN。"""
@@ -1671,6 +1711,7 @@ class SheinApp(tk.Tk):
         self.status_lbl.config(text="已定位 ASIN: {}".format(matched))
 
     def _placeholder(self,asin):
+        self._cancel_pending_sku_render()
         for w in self.df.winfo_children(): w.destroy()
         tk.Label(self.df,text="ASIN: {}\n\n尚未抓取。\n请勾选后点击【抓取选中商品】。".format(asin),
             font=("Segoe UI",12),fg=TEXT_SUB,bg=BG_PANEL,justify="center").pack(pady=60)
@@ -3027,7 +3068,7 @@ return false;
                             pass
                     if self.current_asin == asin:
                         try:
-                            self.after(0, lambda inf=info: self._show(inf))
+                            self.after(0, self._show_current_asin_now)
                         except RuntimeError:
                             pass
                 except Exception:
@@ -3050,9 +3091,10 @@ return false;
             msg += "（其中 {} 个为已缓存）".format(cached_count)
         self.status_lbl.config(text=msg)
         if self.current_asin and self.current_asin in self.product_cache:
-            self._show(self.product_cache[self.current_asin])
+            self._show_current_asin_now()
 
     def _show(self,info):
+        self._cancel_pending_sku_render()
         for w in self.df.winfo_children(): w.destroy()
         top=tk.Frame(self.df,bg=BG_PANEL); top.pack(fill="x",pady=(16,8))
         imgf=tk.Frame(top,bg=BG_CARD,width=220,height=220)
@@ -3133,31 +3175,63 @@ return false;
             parts = ["{}：{}".format(k, "，".join(str(v) for v in vals)) for k, vals in other_specs.items()]
             tk.Label(self.df,text="其他规格：" + "  /  ".join(parts),font=("Segoe UI",10),fg=TEXT_SUB,bg=BG_PANEL,anchor="w",wraplength=700,justify="left").pack(anchor="w",padx=24,pady=(0,6))
         if sku_list:
-            for idx, sku in enumerate(sku_list):
-                sku_asin = sku.get("sku_asin", "")
-                sku_attrs = sku.get("sku_attributes", "默认规格")
-                sku_images = sku.get("images", [])[:5]
-                sku_basis = sku.get("dimension_basis", [])
-
-                card=tk.Frame(self.df,bg=BG_CARD)
-                card.pack(fill="x",padx=20,pady=4)
-                tk.Label(card,text="SKU {}: {}".format(idx+1, sku_asin),font=("Consolas",10,"bold"),fg=TEXT_MAIN,bg=BG_CARD,anchor="w").pack(fill="x",padx=10,pady=(8,2))
-                tk.Label(card,text="规格: {}".format(sku_attrs),font=("Segoe UI",9),fg=YELLOW,bg=BG_CARD,anchor="w",wraplength=680,justify="left").pack(fill="x",padx=10,pady=(0,2))
-                basis_text = " / ".join(sku_basis) if sku_basis else "未识别"
-                tk.Label(card,text="分类依据: {}".format(basis_text),font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_CARD,anchor="w",wraplength=680,justify="left").pack(fill="x",padx=10,pady=(0,6))
-
-                if sku_images:
-                    for img_idx, img_url in enumerate(sku_images):
-                        fr=tk.Frame(card,bg=BG_CARD); fr.pack(fill="x",padx=10,pady=(0,2))
-                        tk.Label(fr,text="图{}:".format(img_idx+1),fg=TEXT_SUB,bg=BG_CARD,font=("Segoe UI",9)).pack(side="left")
-                        link_lbl=tk.Label(fr,text=img_url[:78]+("..." if len(img_url) > 78 else ""),fg=ACCENT,bg=BG_CARD,font=("Segoe UI",9),
-                            wraplength=620,justify="left",anchor="w",cursor="hand2")
-                        link_lbl.pack(side="left",padx=6)
-                        link_lbl.bind("<Control-Button-1>",lambda e,url=img_url:webbrowser.open(url))
-                else:
-                    tk.Label(card,text="该SKU暂无图片",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_CARD,anchor="w").pack(fill="x",padx=10,pady=(0,8))
+            sku_holder = tk.Frame(self.df, bg=BG_PANEL)
+            sku_holder.pack(fill="x")
+            self._render_sku_cards_chunked(sku_holder, sku_list, start_idx=0, batch_size=8)
         else:
             tk.Label(self.df,text="暂无 SKU 数据",font=("Segoe UI",10),fg=TEXT_SUB,bg=BG_PANEL).pack(anchor="w",padx=24,pady=4)
+
+    def _cancel_pending_sku_render(self):
+        if self._sku_render_after_id:
+            try:
+                self.after_cancel(self._sku_render_after_id)
+            except Exception:
+                pass
+            self._sku_render_after_id = None
+
+    def _render_sku_cards_chunked(self, container, sku_list, start_idx=0, batch_size=8):
+        """分批渲染 SKU 卡片，避免一次性创建大量控件导致切换卡顿。"""
+        if container is None:
+            return
+        try:
+            if not int(container.winfo_exists()):
+                return
+        except Exception:
+            return
+
+        end_idx = min(len(sku_list), start_idx + batch_size)
+        for idx in range(start_idx, end_idx):
+            sku = sku_list[idx] or {}
+            sku_asin = sku.get("sku_asin", "")
+            sku_attrs = sku.get("sku_attributes", "默认规格")
+            sku_images = sku.get("images", [])[:5]
+            sku_basis = sku.get("dimension_basis", [])
+
+            card=tk.Frame(container,bg=BG_CARD)
+            card.pack(fill="x",padx=20,pady=4)
+            tk.Label(card,text="SKU {}: {}".format(idx+1, sku_asin),font=("Consolas",10,"bold"),fg=TEXT_MAIN,bg=BG_CARD,anchor="w").pack(fill="x",padx=10,pady=(8,2))
+            tk.Label(card,text="规格: {}".format(sku_attrs),font=("Segoe UI",9),fg=YELLOW,bg=BG_CARD,anchor="w",wraplength=680,justify="left").pack(fill="x",padx=10,pady=(0,2))
+            basis_text = " / ".join(sku_basis) if sku_basis else "未识别"
+            tk.Label(card,text="分类依据: {}".format(basis_text),font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_CARD,anchor="w",wraplength=680,justify="left").pack(fill="x",padx=10,pady=(0,6))
+
+            if sku_images:
+                for img_idx, img_url in enumerate(sku_images):
+                    fr=tk.Frame(card,bg=BG_CARD); fr.pack(fill="x",padx=10,pady=(0,2))
+                    tk.Label(fr,text="图{}:".format(img_idx+1),fg=TEXT_SUB,bg=BG_CARD,font=("Segoe UI",9)).pack(side="left")
+                    link_lbl=tk.Label(fr,text=img_url[:78]+("..." if len(img_url) > 78 else ""),fg=ACCENT,bg=BG_CARD,font=("Segoe UI",9),
+                        wraplength=620,justify="left",anchor="w",cursor="hand2")
+                    link_lbl.pack(side="left",padx=6)
+                    link_lbl.bind("<Control-Button-1>",lambda e,url=img_url:webbrowser.open(url))
+            else:
+                tk.Label(card,text="该SKU暂无图片",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_CARD,anchor="w").pack(fill="x",padx=10,pady=(0,8))
+
+        if end_idx < len(sku_list):
+            self._sku_render_after_id = self.after(
+                1,
+                lambda c=container, s=sku_list, n=end_idx, b=batch_size: self._render_sku_cards_chunked(c, s, n, b)
+            )
+        else:
+            self._sku_render_after_id = None
 
     def _get_cached_preview_photo(self, url):
         with self._preview_cache_lock:
