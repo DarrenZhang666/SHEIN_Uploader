@@ -1020,18 +1020,95 @@ def fetch_amazon_product(asin, region="美国"):
         if t:
             res["title"] = _filter_title(t.get_text(strip=True))
 
-        price_raw = "N/A"
-        for sel in ["#priceblock_ourprice", ".a-price .a-offscreen",
-                    "#priceblock_dealprice", ".apexPriceToPay .a-offscreen"]:
-            p = s.select_one(sel)
-            if p:
-                price_raw = p.get_text(strip=True)
-                break
-        if price_raw != "N/A":
-            price_match = re.search(r'[\d,]+\.?\d*', price_raw.replace(',', ''))
-            res["price"] = "${:.2f}".format(float(price_match.group())) if price_match else "N/A"
-        else:
-            res["price"] = "N/A"
+        def _parse_usd_from_text(_txt):
+            t = str(_txt or "").strip()
+            if not t:
+                return None
+            # 仅提取 $ 后面的数字，兼容 "$12.99" / "US$ 12.99" / "$1,299.00"
+            m = re.search(r"(?:US)?\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", t, flags=re.I)
+            if not m:
+                return None
+            try:
+                return float(m.group(1).replace(",", ""))
+            except Exception:
+                return None
+
+        def _extract_price_usd(_soup, _html):
+            # 1) 先走高优先级价格节点（避免抓到划线价/原价）
+            primary_selectors = [
+                "#corePrice_feature_div .a-price .a-offscreen",
+                "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
+                ".apexPriceToPay .a-offscreen",
+                "#priceblock_dealprice",
+                "#priceblock_saleprice",
+                "#priceblock_ourprice",
+                "#price_inside_buybox",
+                "#tp_price_block_total_price_ww .a-offscreen",
+                ".reinventPricePriceToPayMargin .a-price .a-offscreen",
+                ".a-price.aok-align-center.reinventPricePriceToPayMargin .a-offscreen",
+            ]
+            for sel in primary_selectors:
+                node = _soup.select_one(sel)
+                if not node:
+                    continue
+                v = _parse_usd_from_text(node.get_text(" ", strip=True))
+                if v is not None:
+                    return v
+
+            # 2) 处理价格被拆成 whole/fraction 的结构
+            whole_nodes = _soup.select(
+                "#corePrice_feature_div .a-price-whole, "
+                "#corePriceDisplay_desktop_feature_div .a-price-whole, "
+                ".apexPriceToPay .a-price-whole, "
+                "#tp_price_block_total_price_ww .a-price-whole"
+            )
+            for wn in whole_nodes:
+                whole = re.sub(r"[^\d]", "", wn.get_text(" ", strip=True) or "")
+                if not whole:
+                    continue
+                parent = wn.find_parent(class_=lambda c: c and "a-price" in c)
+                frac_node = parent.select_one(".a-price-fraction") if parent else None
+                frac = re.sub(r"[^\d]", "", frac_node.get_text(" ", strip=True) if frac_node else "")
+                frac = (frac[:2] if frac else "00").ljust(2, "0")
+                try:
+                    return float("{}.{}".format(whole, frac))
+                except Exception:
+                    pass
+
+            # 3) 页面文本兜底：优先从价格相关区域提取 $ 数字
+            fallback_regions = [
+                "#corePrice_feature_div",
+                "#corePriceDisplay_desktop_feature_div",
+                ".apexPriceToPay",
+                "#buybox",
+                "#centerCol",
+            ]
+            for reg in fallback_regions:
+                box = _soup.select_one(reg)
+                if not box:
+                    continue
+                v = _parse_usd_from_text(box.get_text(" ", strip=True))
+                if v is not None:
+                    return v
+
+            # 4) 最后兜底：从脚本/整页 HTML 里提取 displayPrice / priceAmount 等字段
+            text_blob = str(_html or "")
+            for pat in [
+                r'"displayPrice"\s*:\s*"(?:US)?\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"',
+                r'"priceToPay"\s*:\s*"(?:US)?\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"',
+                r'"priceAmount"\s*:\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)',
+            ]:
+                mm = re.search(pat, text_blob, flags=re.I)
+                if not mm:
+                    continue
+                try:
+                    return float(mm.group(1).replace(",", ""))
+                except Exception:
+                    continue
+            return None
+
+        price_value = _extract_price_usd(s, page_html)
+        res["price"] = "${:.2f}".format(price_value) if price_value is not None else "N/A"
 
         rt = s.select_one("span[data-hook='rating-out-of-text']")
         if rt:
