@@ -469,6 +469,20 @@ class SheinApp(tk.Tk):
 
         top = tk.Frame(self.bargain_panel, bg=BG_PANEL)
         top.pack(fill="x", padx=18, pady=(14,8))
+        self._bargain_select_all_var = tk.BooleanVar(value=False)
+        self._bargain_select_all_chk = tk.Checkbutton(
+            top,
+            variable=self._bargain_select_all_var,
+            command=self._toggle_bargain_select_all,
+            bg=BG_PANEL,
+            activebackground=BG_PANEL,
+            selectcolor=BG_CARD,
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
+            cursor="hand2",
+        )
+        self._bargain_select_all_chk.pack(side="left", padx=(0, 6))
         tk.Label(
             top,
             text="议价待确认数据",
@@ -519,6 +533,7 @@ class SheinApp(tk.Tk):
         table_wrap.pack(fill="both", expand=True)
 
         base_cols = (
+            "pick",
             "supplier_no",
             "sku_info",
             "amazon_url",
@@ -536,6 +551,7 @@ class SheinApp(tk.Tk):
             style="Bargain.Treeview",
             selectmode="browse",
         )
+        self._bargain_table.heading("pick", text="勾选", anchor="center")
         self._bargain_table.heading("supplier_no", text="供方货号", anchor="w")
         self._bargain_table.heading("sku_info", text="SKU信息", anchor="w")
         self._bargain_table.heading("platform_price", text="平台建议价", anchor="w")
@@ -547,6 +563,7 @@ class SheinApp(tk.Tk):
         if "profit_rate" in cols:
             self._bargain_table.heading("profit_rate", text="利润率", anchor="w")
 
+        self._bargain_table.column("pick", width=54, minwidth=50, anchor="center")
         self._bargain_table.column("supplier_no", width=140, minwidth=120, anchor="w")
         self._bargain_table.column("sku_info", width=150, minwidth=130, anchor="w")
         self._bargain_table.column("platform_price", width=100, minwidth=90, anchor="w")
@@ -605,6 +622,7 @@ class SheinApp(tk.Tk):
             return gap.join(chunks)
 
         value_getter = {
+            "pick": lambda r: "☑" if bool(r.get("_selected", False)) else "☐",
             "supplier_no": lambda r: r.get("supplier_no", ""),
             "reason": lambda r: r.get("reason", ""),
             "sku_info": lambda r: r.get("sku_info", ""),
@@ -625,6 +643,29 @@ class SheinApp(tk.Tk):
             )
         if hasattr(self, "_bargain_count_lbl"):
             self._bargain_count_lbl.config(text="{} 条".format(len(rows)))
+        self._sync_bargain_select_all_checkbox(rows)
+
+    def _sync_bargain_select_all_checkbox(self, rows=None):
+        if rows is None:
+            rows = list(getattr(self, "_bargain_rows", []) or [])
+        if not hasattr(self, "_bargain_select_all_var"):
+            return
+        if not rows:
+            self._bargain_select_all_var.set(False)
+            return
+        all_selected = all(bool(r.get("_selected", False)) for r in rows)
+        self._bargain_select_all_var.set(bool(all_selected))
+
+    def _toggle_bargain_select_all(self):
+        rows = list(getattr(self, "_bargain_rows", []) or [])
+        if not rows:
+            self._bargain_select_all_var.set(False)
+            return
+        checked = bool(self._bargain_select_all_var.get())
+        for r in rows:
+            r["_selected"] = checked
+        self._bargain_rows = rows
+        self._render_bargain_rows()
 
     def _on_bargain_table_click(self, _event=None):
         table = getattr(self, "_bargain_table", None)
@@ -648,6 +689,17 @@ class SheinApp(tk.Tk):
             cols = list(getattr(self, "_bargain_table_columns", ()) or ())
             col_name = cols[col_idx] if 0 <= col_idx < len(cols) else ""
             ctrl_pressed = bool(getattr(_event, "state", 0) & 0x0004)
+            if col_name == "pick":
+                try:
+                    row_idx = int(table.index(row_id))
+                except Exception:
+                    row_idx = -1
+                rows = list(getattr(self, "_bargain_rows", []) or [])
+                if 0 <= row_idx < len(rows):
+                    rows[row_idx]["_selected"] = not bool(rows[row_idx].get("_selected", False))
+                    self._bargain_rows = rows
+                    self._render_bargain_rows()
+                return
             if ctrl_pressed and col_name == "amazon_url":
                 vals = table.item(row_id, "values") or ()
                 url = str(vals[col_idx]).strip() if 0 <= col_idx < len(vals) else ""
