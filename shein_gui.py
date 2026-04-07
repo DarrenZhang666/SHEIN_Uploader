@@ -204,7 +204,12 @@ class SheinApp(tk.Tk):
         self._build_topbar()
         body=tk.Frame(self,bg=BG_DARK)
         body.pack(fill="both",expand=True,padx=12,pady=(0,12))
-        body.columnconfigure(0,weight=0,minsize=265)
+        self._main_body = body
+        self._left_panel_min_width = 280
+        self._left_panel_max_width = 720
+        self._left_panel_default_width = 320
+        self._left_resize_hotzone = 12
+        body.columnconfigure(0,weight=0,minsize=self._left_panel_min_width)
         body.columnconfigure(1,weight=1)
         body.rowconfigure(0,weight=1)
         self._build_left(body); self._build_right(body)
@@ -1446,10 +1451,43 @@ class SheinApp(tk.Tk):
                 self.right_panel.grid()
 
     def _build_left(self,parent):
-        self.left_panel=tk.Frame(parent,bg=BG_PANEL,width=265)
-        f=self.left_panel
+        left_w = int(getattr(self, "_left_panel_default_width", 320))
+        self.left_panel=tk.Frame(parent,bg=BG_PANEL,width=left_w)
         self.left_panel.grid(row=0,column=0,sticky="nsew",padx=(0,8),pady=4)
         self.left_panel.pack_propagate(False)
+        self.left_panel.bind("<Motion>", self._on_left_panel_motion)
+        self.left_panel.bind("<Leave>", self._on_left_panel_leave)
+        self.left_panel.bind("<Button-1>", self._on_left_panel_press)
+        self.left_panel.bind("<B1-Motion>", self._drag_left_panel_resize)
+        self.left_panel.bind("<ButtonRelease-1>", self._end_left_panel_resize)
+        self._left_content = tk.Frame(self.left_panel,bg=BG_PANEL)
+        self._left_content.pack(side="left",fill="both",expand=True)
+        self._left_content.bind("<Motion>", self._on_left_panel_motion)
+        self._left_content.bind("<Leave>", self._on_left_panel_leave)
+        self._left_content.bind("<Button-1>", self._on_left_panel_press)
+        self._left_content.bind("<B1-Motion>", self._drag_left_panel_resize)
+        self._left_content.bind("<ButtonRelease-1>", self._end_left_panel_resize)
+        self._left_resize_handle = tk.Frame(
+            self.left_panel,
+            bg=BG_PANEL,
+            width=8,
+            cursor="sb_h_double_arrow",
+        )
+        self._left_resize_handle.pack(side="right",fill="y")
+        self._left_resize_handle.pack_propagate(False)
+        self._left_resize_indicator = tk.Frame(
+            self._left_resize_handle,
+            bg="#94a3b8",
+            width=1,
+        )
+        self._left_resize_indicator.pack(side="left", fill="y", padx=3, pady=6)
+        self._left_resize_indicator.bind("<Button-1>", self._start_left_panel_resize)
+        self._left_resize_indicator.bind("<B1-Motion>", self._drag_left_panel_resize)
+        self._left_resize_indicator.bind("<ButtonRelease-1>", self._end_left_panel_resize)
+        self._left_resize_handle.bind("<Button-1>", self._start_left_panel_resize)
+        self._left_resize_handle.bind("<B1-Motion>", self._drag_left_panel_resize)
+        self._left_resize_handle.bind("<ButtonRelease-1>", self._end_left_panel_resize)
+        f=self._left_content
         h=tk.Frame(f,bg=BG_PANEL); h.pack(fill="x",padx=12,pady=(12,4))
         tk.Label(h,text="ASIN 列表",font=("Segoe UI",11,"bold"),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         self.cnt_lbl=tk.Label(h,text="(0)",font=("Segoe UI",10),fg=TEXT_SUB,bg=BG_PANEL)
@@ -1522,6 +1560,59 @@ class SheinApp(tk.Tk):
         cv.bind("<Configure>",lambda e:cv.itemconfig(self._lw,width=e.width))
         cv.bind_all("<MouseWheel>",lambda e:cv.yview_scroll(int(-1*(e.delta/120)),"units"))
         self.acv=cv
+        self.after(0, self._sync_left_resize_handle_height)
+
+    def _start_left_panel_resize(self, event):
+        self._left_resize_active = True
+        self._left_resize_anchor_x = int(event.x_root)
+        self._left_resize_origin_width = int(self.left_panel.winfo_width())
+
+    def _drag_left_panel_resize(self, event):
+        if not getattr(self, "_left_resize_active", False):
+            return
+        delta = int(event.x_root) - int(getattr(self, "_left_resize_anchor_x", event.x_root))
+        target_w = int(getattr(self, "_left_resize_origin_width", self.left_panel.winfo_width())) + delta
+        min_w = int(getattr(self, "_left_panel_min_width", 280))
+        max_w = int(getattr(self, "_left_panel_max_width", 720))
+        target_w = max(min_w, min(max_w, target_w))
+        self.left_panel.config(width=target_w)
+        if hasattr(self, "_main_body"):
+            self._main_body.columnconfigure(0, minsize=target_w)
+
+    def _end_left_panel_resize(self, _event):
+        self._left_resize_active = False
+
+    def _on_left_panel_motion(self, event):
+        if getattr(self, "_left_resize_active", False):
+            self.left_panel.configure(cursor="sb_h_double_arrow")
+            return
+        if self._is_near_left_panel_right_edge(event):
+            self.left_panel.configure(cursor="sb_h_double_arrow")
+        else:
+            self.left_panel.configure(cursor="")
+
+    def _on_left_panel_leave(self, _event):
+        if not getattr(self, "_left_resize_active", False):
+            self.left_panel.configure(cursor="")
+
+    def _on_left_panel_press(self, event):
+        if self._is_near_left_panel_right_edge(event):
+            self._start_left_panel_resize(event)
+
+    def _is_near_left_panel_right_edge(self, event):
+        try:
+            x = int(event.x)
+            panel_w = int(self.left_panel.winfo_width())
+            hotzone = int(getattr(self, "_left_resize_hotzone", 10))
+            return x >= max(0, panel_w - hotzone)
+        except Exception:
+            return False
+
+    def _sync_left_resize_handle_height(self):
+        try:
+            self._left_resize_handle.lift()
+        except Exception:
+            pass
 
     def _build_right(self,parent):
         self.right_panel=tk.Frame(parent,bg=BG_PANEL)
