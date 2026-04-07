@@ -938,7 +938,7 @@ def _fetch_page_with_selenium(url, timeout=20):
         return None
 
 
-def _fetch_sku_images(session, domain, sku_asin, headers):
+def _fetch_sku_images(session, domain, sku_asin, headers, max_count=5):
     """拉取单个 SKU 页面的主图，失败时返回空列表。"""
     try:
         sku_url = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, sku_asin)
@@ -949,7 +949,7 @@ def _fetch_sku_images(session, domain, sku_asin, headers):
             r = session.get(sku_url, headers=_hdrs, timeout=10)
             if r and not _is_blocked(r.status_code, r.text):
                 sku_soup = BeautifulSoup(r.text, "html.parser")
-                imgs = _collect_main_images_from_soup(sku_soup, max_count=5)
+                imgs = _collect_main_images_from_soup(sku_soup, max_count=max_count)
                 if imgs:
                     return imgs
         except Exception:
@@ -959,19 +959,19 @@ def _fetch_sku_images(session, domain, sku_asin, headers):
         if r2 is None:
             return []
         sku_soup = BeautifulSoup(r2.text, "html.parser")
-        return _collect_main_images_from_soup(sku_soup, max_count=5)
+        return _collect_main_images_from_soup(sku_soup, max_count=max_count)
     except Exception:
         return []
 
 
-def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_workers=6):
+def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_workers=6, max_count=5):
     """并发拉取多个 SKU 的图片，返回 {sku_asin: [img_url, ...]} 字典。"""
     results = {}
     if not sku_asins:
         return results
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_asin = {
-            executor.submit(_fetch_sku_images, session, domain, asin, hdrs): asin
+            executor.submit(_fetch_sku_images, session, domain, asin, hdrs, max_count): asin
             for asin in sku_asins
         }
         for future in as_completed(future_to_asin):
@@ -1356,6 +1356,9 @@ def fetch_amazon_product(asin, region="美国"):
         color_image_map = _extract_color_images_map(page_html)
         dimension_names, value_display_map = _build_variation_value_maps(page_html)
         fallback_images = main_images[:5] if main_images else ([res["image_url"]] if res.get("image_url") else [])
+        def _get_sku_image_limit(sku_count):
+            # 需求：SKU >= 5 时，每个 SKU 最多抓取 3 张；否则最多 5 张
+            return 3 if int(sku_count or 0) >= 5 else 5
         def _basis_has_style(_basis):
             return any("style" in str(_b).lower() for _b in (_basis or []))
 
@@ -1389,12 +1392,13 @@ def fetch_amazon_product(asin, region="美国"):
             if len(unique_color_asins) > max_sku_fetch:
                 _mark_sku_too_many(len(unique_color_asins))
                 return res
+            image_limit = _get_sku_image_limit(len(unique_color_asins))
             # 路径 A：HTML 解析到 color ASIN 列表，直接使用
             sku_asin_list = [a for a, _ in _color_asins_from_html if a and a != asin]
             sku_image_cache = _fetch_all_sku_images_concurrently(
-                sess, domain, sku_asin_list, hdrs, max_workers=4
+                sess, domain, sku_asin_list, hdrs, max_workers=4, max_count=image_limit
             )
-            sku_image_cache[asin] = fallback_images[:]
+            sku_image_cache[asin] = fallback_images[:image_limit]
 
             used_colors = set()
             color_to_idx = {}
@@ -1404,10 +1408,10 @@ def fetch_amazon_product(asin, region="美国"):
                 sku_images = sku_image_cache.get(ca, [])
                 if not sku_images:
                     sku_images = _pick_images_from_color_map(
-                        color_image_map, color_name, ca, max_count=5
+                        color_image_map, color_name, ca, max_count=image_limit
                     )
                 if not sku_images:
-                    sku_images = fallback_images[:]
+                    sku_images = fallback_images[:image_limit]
 
                 # 颜色唯一性策略：
                 # 1) 优先 "&" 前颜色；2) 冲突时尝试后颜色；3) 都冲突则随机删重
@@ -1431,7 +1435,7 @@ def fetch_amazon_product(asin, region="美国"):
                                 "sku_asin": ca,
                                 "sku_attributes": "Color: {}".format(conflict_color),
                                 "dimension_basis": ["color"],
-                                "images": sku_images[:5]
+                                "images": sku_images[:image_limit]
                             }
                             sku_seen.add(ca)
                         # 不替换则随机删除当前重复项（直接跳过）
@@ -1444,7 +1448,7 @@ def fetch_amazon_product(asin, region="美国"):
                     "sku_asin": ca,
                     "sku_attributes": "Color: {}".format(chosen_color),
                     "dimension_basis": ["color"],
-                    "images": sku_images[:5]
+                    "images": sku_images[:image_limit]
                 })
         else:
             # 路径 B：从 dimensionToAsinMap 构建 SKU 列表
@@ -1476,21 +1480,22 @@ def fetch_amazon_product(asin, region="美国"):
                 else:
                     candidate_entries = candidate_entries[:3]
 
+            image_limit = _get_sku_image_limit(len(candidate_entries))
             sku_asin_list = [sku_asin for _, sku_asin, _ in candidate_entries if sku_asin != asin]
 
             sku_image_cache = _fetch_all_sku_images_concurrently(
-                sess, domain, sku_asin_list, hdrs, max_workers=4
+                sess, domain, sku_asin_list, hdrs, max_workers=4, max_count=image_limit
             )
-            sku_image_cache[asin] = fallback_images[:]
+            sku_image_cache[asin] = fallback_images[:image_limit]
 
             for idx, (dim_key, sku_asin, basis) in enumerate(candidate_entries):
                 sku_images = sku_image_cache.get(sku_asin, [])
                 if not sku_images:
                     sku_images = _pick_images_from_color_map(
-                        color_image_map, dim_key, sku_asin, max_count=5
+                        color_image_map, dim_key, sku_asin, max_count=image_limit
                     )
                 if not sku_images:
-                    sku_images = fallback_images[:]
+                    sku_images = fallback_images[:image_limit]
 
                 if style_mode:
                     sku_attr_text = ["A", "B", "C"][idx] if idx < 3 else "默认规格"
@@ -1504,7 +1509,7 @@ def fetch_amazon_product(asin, region="美国"):
                     "sku_asin": sku_asin,
                     "sku_attributes": sku_attr_text,
                     "dimension_basis": basis,
-                    "images": sku_images[:5]
+                    "images": sku_images[:image_limit]
                 })
 
         # 对所有 color SKU 执行统一颜色唯一化（覆盖所有构建路径）
