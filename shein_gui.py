@@ -1300,7 +1300,7 @@ class SheinApp(tk.Tk):
             amazon_price_val = None
             amazon_url = ""
             cached = self.product_cache.get(asin) if isinstance(self.product_cache, dict) else None
-            if isinstance(cached, dict):
+            if isinstance(cached, dict) and self._is_cache_region_match(cached, region):
                 pv = self._parse_money_number(cached.get("price", ""))
                 if pv and pv > 0:
                     amazon_price_val = pv
@@ -1310,6 +1310,8 @@ class SheinApp(tk.Tk):
             if amazon_price_val is None:
                 try:
                     info = fetch_amazon_product(asin, region=region)
+                    if isinstance(info, dict):
+                        info["_fetch_region"] = region
                     amazon_url = str((info or {}).get("url", "") or "").strip()
                     p = self._parse_money_number((info or {}).get("price", ""))
                     if p and p > 0:
@@ -1928,6 +1930,15 @@ class SheinApp(tk.Tk):
         if not self._has_publishable_price(product_info):
             return "no_price"
         return "fetch_success"
+
+    @staticmethod
+    def _is_cache_region_match(product_info, region):
+        """缓存是否与当前抓取地区一致。"""
+        if not isinstance(product_info, dict):
+            return False
+        cached_region = str(product_info.get("_fetch_region", "") or "").strip()
+        target_region = str(region or "").strip()
+        return bool(cached_region) and (cached_region == target_region)
 
     def _is_asin_fetch_ready(self, asin):
         """上品前校验：必须抓取成功。"""
@@ -3725,14 +3736,16 @@ return false;
         self._stop_publish = False
         self._last_fetch_no_price_asins = []
         
-        # 分离已成功缓存 和 需要重新抓取 的 ASIN
+        # 分离已成功缓存 和 需要重新抓取 的 ASIN（缓存按地区隔离）
         need_fetch = []
         already_cached = []
+        current_region = self.amazon_region.get() if hasattr(self, "amazon_region") else "美国"
         for asin in sel:
             if asin in self.product_cache:
                 cached_info = self.product_cache[asin]
                 inferred = self._infer_fetch_status(cached_info)
-                is_cached_ok = (inferred == "fetch_success")
+                region_match = self._is_cache_region_match(cached_info, current_region)
+                is_cached_ok = (inferred == "fetch_success" and region_match)
                 if is_cached_ok:
                     already_cached.append(asin)
                 else:
@@ -3747,7 +3760,7 @@ return false;
         
         # 如果没有需要抓取的商品，直接返回
         if not need_fetch:
-            self.status_lbl.config(text="所有选中商品都已成功抓取过，无需重复抓取")
+            self.status_lbl.config(text="所有选中商品在当前抓取地区都已抓取成功，无需重复抓取")
             return
         
         try:
@@ -3782,12 +3795,14 @@ return false;
         def _fetch_one(asin):
             try:
                 info = fetch_amazon_product(asin, region=region)
+                if isinstance(info, dict):
+                    info["_fetch_region"] = region
                 title = str(info.get("title", ""))
                 _fp = ("获取失败", "HTTP ", "错误:", "被亚马逊反爬", "Error")
                 is_fail = (not info) or any(title.startswith(p) for p in _fp)
                 return asin, info, is_fail
             except Exception as e:
-                info = {"asin": asin, "title": "获取失败: {}".format(str(e)[:30])}
+                info = {"asin": asin, "title": "获取失败: {}".format(str(e)[:30]), "_fetch_region": region}
                 return asin, info, True
 
         done = 0

@@ -10,6 +10,7 @@ import json
 import time
 import os
 import difflib
+from urllib.parse import urlparse
 import requests
 try:
     import cloudscraper
@@ -169,6 +170,94 @@ def _make_browser_cookies(domain):
         "session-id": session_id,
         "ubid-main": ubid,
     }
+
+
+def _region_context(region):
+    """
+    构建地区抓取上下文：
+    - 美国时强制使用 amazon.com，并尽量将配送地设为美国（ZIP: 30005）。
+    """
+    _REGION_DOMAINS = {
+        "美国": "www.amazon.com",
+        "英国": "www.amazon.co.uk",
+        "德国": "www.amazon.de",
+        "法国": "www.amazon.fr",
+        "日本": "www.amazon.co.jp",
+        "加拿大": "www.amazon.ca",
+        "澳大利亚": "www.amazon.com.au",
+        "意大利": "www.amazon.it",
+        "西班牙": "www.amazon.es",
+        "墨西哥": "www.amazon.com.mx",
+    }
+    region_name = str(region or "美国").strip() or "美国"
+    domain = _REGION_DOMAINS.get(region_name, "www.amazon.com")
+    is_us = (region_name == "美国")
+    if is_us:
+        domain = "www.amazon.com"
+    return {
+        "region": region_name,
+        "domain": domain,
+        "is_us": is_us,
+        "ship_zip": "30005",  # Alpharetta, GA
+    }
+
+
+def _build_amazon_dp_url(domain, asin, is_us=False):
+    base = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, asin)
+    if is_us:
+        # 美国站补充常见参数，减少跳转到其它站点/币种的概率
+        return base + "&psc=1"
+    return base
+
+
+def _prepare_amazon_session(session, domain, ctx):
+    """注入地区 Cookie，并在美国站预热首页/配送地。"""
+    if session is None:
+        return
+    cookie_domain = domain if str(domain).startswith(".") else ".{}".format(domain)
+    # 基础浏览器 cookie
+    for k, v in _make_browser_cookies(domain).items():
+        try:
+            session.cookies.set(k, v, domain=domain)
+            session.cookies.set(k, v, domain=cookie_domain)
+        except Exception:
+            pass
+    # 地区偏好：美国地区强制美元 + 英文 + 美国邮编
+    if bool(ctx.get("is_us")):
+        zip_code = str(ctx.get("ship_zip") or "30005")
+        us_pref = {
+            "i18n-prefs": "USD",
+            "lc-main": "en_US",
+            "zipCode": zip_code,
+        }
+        for k, v in us_pref.items():
+            try:
+                session.cookies.set(k, v, domain="www.amazon.com")
+                session.cookies.set(k, v, domain=".amazon.com")
+            except Exception:
+                pass
+        # 先访问美国首页建立会话，再尝试设置配送邮编（最佳努力，不影响主流程）
+        try:
+            warm_headers = random.choice(HEADERS_POOL).copy()
+            warm_headers["Referer"] = "https://www.amazon.com/"
+            session.get("https://www.amazon.com/?language=en_US", headers=warm_headers, timeout=10)
+            ajax_headers = warm_headers.copy()
+            ajax_headers["X-Requested-With"] = "XMLHttpRequest"
+            session.get(
+                "https://www.amazon.com/gp/delivery/ajax/address-change.html"
+                "?locationType=LOCATION_INPUT&zipCode={}&storeContext=generic&deviceType=web&pageType=Detail&actionSource=glow".format(zip_code),
+                headers=ajax_headers,
+                timeout=10
+            )
+        except Exception:
+            pass
+
+
+def _extract_domain_from_url(url):
+    try:
+        return (urlparse(str(url or "")).hostname or "").lower()
+    except Exception:
+        return ""
 
 
 def _is_blocked(status_code, text):
@@ -924,7 +1013,7 @@ def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=5):
     return []
 
 
-def _fetch_page_with_selenium(url, timeout=20):
+def _fetch_page_with_selenium(url, timeout=20, region="美国", ship_zip="30005"):
     """
     使用 Selenium 无头 Chrome 抓取页面 HTML，绕过亚马逊反爬。
     返回页面 HTML 字符串，失败返回 None。
@@ -966,6 +1055,25 @@ def _fetch_page_with_selenium(url, timeout=20):
             driver.set_page_load_timeout(timeout)
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
                 {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"})
+            # 美国地区：先打开美国站并尝试设置配送地为美国，再抓取详情页
+            if str(region or "").strip() == "美国":
+                try:
+                    driver.get("https://www.amazon.com/?language=en_US")
+                    time.sleep(1.2)
+                    # 尝试通过地址弹层设置美国邮编（最佳努力）
+                    try:
+                        trigger = driver.find_element("css selector", "#nav-global-location-popover-link")
+                        trigger.click()
+                        time.sleep(0.8)
+                        zip_input = driver.find_element("css selector", "#GLUXZipUpdateInput")
+                        zip_input.clear()
+                        zip_input.send_keys(str(ship_zip or "30005"))
+                        driver.find_element("css selector", "#GLUXZipUpdate").click()
+                        time.sleep(1.0)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             driver.get(url)
             time.sleep(3)  # 等待 JS 渲染
             html = driver.page_source
@@ -982,7 +1090,7 @@ def _fetch_page_with_selenium(url, timeout=20):
 def _fetch_sku_images(session, domain, sku_asin, headers, max_count=5):
     """拉取单个 SKU 页面的主图，失败时返回空列表。"""
     try:
-        sku_url = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, sku_asin)
+        sku_url = _build_amazon_dp_url(domain, sku_asin, is_us=("amazon.com" in str(domain).lower()))
         # 优先用传入的 session（可能是 cloudscraper），直接单次请求
         try:
             _hdrs = random.choice(HEADERS_POOL).copy()
@@ -1094,24 +1202,20 @@ def _build_intro_from_title(title):
 
 
 def fetch_amazon_product(asin, region="美国"):
-    _REGION_DOMAINS = {
-        "美国": "www.amazon.com",
-        "英国": "www.amazon.co.uk",
-        "德国": "www.amazon.de",
-        "法国": "www.amazon.fr",
-        "日本": "www.amazon.co.jp",
-        "加拿大": "www.amazon.ca",
-        "澳大利亚": "www.amazon.com.au",
-        "意大利": "www.amazon.it",
-        "西班牙": "www.amazon.es",
-        "墨西哥": "www.amazon.com.mx",
-    }
-    domain = _REGION_DOMAINS.get(region, "www.amazon.com")
-    url = "https://{}/dp/{}?language=en_US&currency=USD".format(domain, asin)
+    ctx = _region_context(region)
+    domain = ctx["domain"]
+    url = _build_amazon_dp_url(domain, asin, is_us=ctx["is_us"])
     res = {"asin": asin, "title": "获取失败", "price": "N/A", "rating": "N/A",
            "reviews": "N/A", "brand": "N/A", "image_url": "",
            "description": "", "features": [], "url": url,
            "description_images": [], "main_images": [], "sku_list": [], "other_specs": {}}
+    res["requested_region"] = ctx["region"]
+    res["requested_domain"] = domain
+    res["requested_zip"] = ctx.get("ship_zip", "")
+    res["final_url"] = url
+    res["final_domain"] = _extract_domain_from_url(url)
+    res["fetch_channel"] = ""
+    res["zip_applied_hint"] = False
     try:
         def _is_low_stock_message(_text):
             t = str(_text or "").strip().lower()
@@ -1124,7 +1228,24 @@ def fetch_amazon_product(asin, region="美国"):
             t = str(_text or "").strip().lower()
             return "in stock" in t
 
-        # 三层抓取策略：cloudscraper > requests > Selenium
+        # 抓取策略：
+        # - 美国地区：优先 Selenium（先设 ZIP 再抓详情页），确保地区设置更稳定生效
+        # - 其它地区：requests/cloudscraper 优先，Selenium 保底
+        page_html = None
+        hdrs = None
+        if ctx["is_us"]:
+            page_html = _fetch_page_with_selenium(
+                url, timeout=28, region=ctx["region"], ship_zip=ctx.get("ship_zip", "30005")
+            )
+            if page_html:
+                hdrs = random.choice(HEADERS_POOL).copy()
+                res["final_url"] = url
+                res["final_domain"] = _extract_domain_from_url(url)
+                res["fetch_channel"] = "selenium_us_primary"
+                zip_code_txt = str(ctx.get("ship_zip", "") or "").strip()
+                if zip_code_txt and zip_code_txt in page_html:
+                    res["zip_applied_hint"] = True
+
         # 第1层：cloudscraper（内置 JS 挑战绕过）
         if _CLOUDSCRAPER_OK:
             sess = cloudscraper.create_scraper(
@@ -1133,41 +1254,66 @@ def fetch_amazon_product(asin, region="美国"):
             )
         else:
             sess = requests.Session()
-        # 注入模拟浏览器 Cookie
-        for k, v in _make_browser_cookies(domain).items():
-            sess.cookies.set(k, v, domain=domain)
+        # 注入地区会话（美国时尽量固定到美国站/美国配送）
+        _prepare_amazon_session(sess, domain, ctx)
 
-        # 主页面请求：cloudscraper/requests 带重试
-        r, hdrs = _get_with_retry(sess, url, max_attempts=3, base_timeout=15)
-        page_html = None
-        if r is not None and r.status_code in (200, 301, 302) and not _is_blocked(r.status_code, r.text):
-            page_html = r.text
-        else:
+        if not page_html:
+            # 主页面请求：cloudscraper/requests 带重试
+            r, hdrs_req = _get_with_retry(sess, url, max_attempts=3, base_timeout=15)
+            if r is not None and r.status_code in (200, 301, 302) and not _is_blocked(r.status_code, r.text):
+                final_url = str(getattr(r, "url", "") or url)
+                final_domain = _extract_domain_from_url(final_url)
+                # 美国地区严格要求在 amazon.com（含子域）范围内
+                if (not ctx["is_us"]) or final_domain.endswith("amazon.com"):
+                    page_html = r.text
+                    hdrs = hdrs_req
+                    res["final_url"] = final_url
+                    res["final_domain"] = final_domain
+                    res["fetch_channel"] = "requests_retry"
             # 第2层：cloudscraper 直接单次请求（不经过重试，换新 scraper 实例）
-            if _CLOUDSCRAPER_OK:
+            if (not page_html) and _CLOUDSCRAPER_OK:
                 try:
                     _scraper2 = cloudscraper.create_scraper(
                         browser={"browser": "firefox", "platform": "windows", "mobile": False},
                     )
-                    for k, v in _make_browser_cookies(domain).items():
-                        _scraper2.cookies.set(k, v, domain=domain)
+                    _prepare_amazon_session(_scraper2, domain, ctx)
                     _hdrs2 = random.choice(HEADERS_POOL).copy()
                     _r2 = _scraper2.get(url, headers=_hdrs2, timeout=15)
                     if not _is_blocked(_r2.status_code, _r2.text):
-                        page_html = _r2.text
-                        hdrs = _hdrs2
+                        final_url2 = str(getattr(_r2, "url", "") or url)
+                        final_domain2 = _extract_domain_from_url(final_url2)
+                        if (not ctx["is_us"]) or final_domain2.endswith("amazon.com"):
+                            page_html = _r2.text
+                            hdrs = _hdrs2
+                            res["final_url"] = final_url2
+                            res["final_domain"] = final_domain2
+                            res["fetch_channel"] = "cloudscraper_single"
                 except Exception:
                     pass
 
             # 第3层：Selenium 无头浏览器（最终保底）
             if not page_html:
-                page_html = _fetch_page_with_selenium(url, timeout=25)
+                page_html = _fetch_page_with_selenium(
+                    url, timeout=25, region=ctx["region"], ship_zip=ctx.get("ship_zip", "30005")
+                )
                 hdrs = random.choice(HEADERS_POOL).copy()
-                r = None
+                if page_html:
+                    res["final_url"] = url
+                    res["final_domain"] = _extract_domain_from_url(url)
+                    res["fetch_channel"] = "selenium_fallback"
+                    zip_code_txt = str(ctx.get("ship_zip", "") or "").strip()
+                    if zip_code_txt and zip_code_txt in page_html:
+                        res["zip_applied_hint"] = True
+
+        if hdrs is None:
+            hdrs = random.choice(HEADERS_POOL).copy()
 
         if not page_html:
             res["title"] = "被亚马逊反爬拦截，请稍后重试"
             return res
+        zip_code_txt = str(ctx.get("ship_zip", "") or "").strip()
+        if (not res.get("zip_applied_hint")) and zip_code_txt and (zip_code_txt in page_html):
+            res["zip_applied_hint"] = True
         s = BeautifulSoup(page_html, "html.parser")
 
         t = s.select_one("#productTitle")
