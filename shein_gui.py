@@ -2916,13 +2916,11 @@ return false;
             return True
         return False
 
-    def _auto_upload_image(self, session_id=None, stuck_retry=1):
+    def _auto_upload_image(self, session_id=None):
         """自动上传商品图片、选择推荐类目、填写基础信息（在后台线程中调用）。"""
         self._publish_running = True
         target_asin = None
         dot = None
-        _stuck_watchdog_stop = None
-        _stuck_watchdog = {"triggered": False}
         if session_id is None:
             session_id = self._publish_session_id
         try:
@@ -2930,54 +2928,6 @@ return false;
                 return
             target_asin = self.current_asin
             self._active_publish_asin = target_asin
-
-            def _restart_instance_and_open_publish_safe():
-                """关闭当前实例并新开实例，直达商品发布页。"""
-                try:
-                    old_pub = self._shein_publisher
-                    run_headless = bool(
-                        getattr(old_pub, "_headless_mode", (not is_dev_mode()))
-                    )
-                    try:
-                        if old_pub and getattr(old_pub, "driver", None):
-                            old_pub.driver.quit()
-                    except Exception:
-                        pass
-                    self._shein_publisher = None
-
-                    target_account = (self.shein_account.get().strip()
-                                      or self._login_session_account
-                                      or self._shein_publisher_account
-                                      or 'default')
-                    pub = SheinPublisher(log_cb=self._pub_log)
-                    pub.start_browser(
-                        account=target_account,
-                        headless=run_headless,
-                        force_new=(not run_headless),
-                    )
-                    self._shein_publisher = pub
-                    self._shein_publisher_account = target_account
-
-                    login_cookies, login_storage, login_session_storage = self._get_saved_login_session()
-                    if login_cookies or login_storage or login_session_storage:
-                        try:
-                            pub.driver.get("https://sso.geiwohuo.com/#/login")
-                            time.sleep(0.5)
-                        except Exception:
-                            pass
-                        self._inject_login_session_to_driver(
-                            pub.driver, login_cookies, login_storage, login_session_storage
-                        )
-                    pub.driver.get(SHEIN_PUBLISH_URL)
-                    time.sleep(2)
-                    try:
-                        pub._dismiss_announcements()
-                    except Exception:
-                        pass
-                    return True
-                except Exception as _re_e:
-                    self._pub_log('[ERROR] 重开实例失败: {}'.format(str(_re_e)[:80]))
-                    return False
 
             if self._check_stop_or_return(session_id=session_id):
                 return
@@ -2993,34 +2943,6 @@ return false;
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
 
-            # 卡住监控：任意环节超过 60 秒无进展，强制关闭浏览器并进入重试逻辑
-            _activity = {"ts": time.time(), "stage": "初始化"}
-            _stuck_watchdog_stop = threading.Event()
-            def _touch(stage=None):
-                _activity["ts"] = time.time()
-                if stage:
-                    _activity["stage"] = str(stage)
-            def _watch_stuck():
-                while not _stuck_watchdog_stop.is_set():
-                    try:
-                        if time.time() - float(_activity.get("ts", 0.0)) > 60.0:
-                            if not _stuck_watchdog["triggered"]:
-                                _stuck_watchdog["triggered"] = True
-                                self._pub_log("[WARN] 上品流程卡住超过60秒（阶段: {}），准备重启实例".format(
-                                    _activity.get("stage", "未知")
-                                ))
-                                try:
-                                    pub = self._shein_publisher
-                                    if pub and getattr(pub, "driver", None):
-                                        pub.driver.quit()
-                                except Exception:
-                                    pass
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(1.0)
-            threading.Thread(target=_watch_stuck, daemon=True).start()
-
             if self._check_stop_or_return(session_id=session_id):
                 return
             self._log_publish_progress(target_asin, "开始上品")
@@ -3028,7 +2950,6 @@ return false;
             if dot:
                 self.after(0, lambda a=target_asin: self._set_asin_status(a, "publishing"))
             def _set_status(msg, stage=None):
-                _touch(msg)
                 self._set_publish_status(target_asin, msg, stage)
                 self._update_publish_progress_by_msg(target_asin, msg)
 
@@ -3398,28 +3319,6 @@ return false;
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
 
         except Exception as e:
-            if _stuck_watchdog.get("triggered"):
-                if stuck_retry < 3:
-                    self._pub_log("[RETRY] 上品流程卡住，执行第{}/3次重试".format(stuck_retry + 1))
-                    self._set_publish_status(target_asin, "流程卡住超过60秒，正在重试（{}/3）...".format(stuck_retry + 1), "上品中")
-                    if dot:
-                        self.after(0, lambda a=target_asin: self._set_asin_status(a, "publishing"))
-                    if not _restart_instance_and_open_publish_safe():
-                        self._set_publish_status(target_asin, "✗ 卡住重试失败：无法重开浏览器", "上品失败")
-                        if dot:
-                            self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
-                        return
-                    threading.Thread(
-                        target=self._auto_upload_image,
-                        args=(session_id, stuck_retry + 1),
-                        daemon=True
-                    ).start()
-                    return
-                self._set_publish_status(target_asin, "✗ 发品流程多次卡住，已判定失败", "上品失败")
-                if dot:
-                    self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
-                self._pub_log("[ERROR] 商品 {} 上品流程卡住重试3次后仍失败".format(target_asin))
-                return
             if self._is_stop_requested(session_id=session_id) or '用户已停止上品' in str(e):
                 self._pub_log('[STOP] 用户已停止上品')
                 self._set_publish_status(target_asin, '已停止上品', "上品失败")
@@ -3431,11 +3330,6 @@ return false;
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 self._pub_log('上传出错: ' + str(e))
         finally:
-            try:
-                if _stuck_watchdog_stop is not None:
-                    _stuck_watchdog_stop.set()
-            except Exception:
-                pass
             try:
                 if target_asin:
                     _st = self.asin_status.get(target_asin, "")
