@@ -957,6 +957,7 @@ class SheinPublisher:
                         "//div[contains(@class,'soui-collapseItem-title') and contains(text(),'商品描述')]",
                         "//*[contains(@class,'soui-collapseItem-header') and .//*[contains(text(),'商品描述')] ]",
                         "//*[contains(text(),'展开添加') and contains(text(),'商品描述')]",
+                        "//*[@role='button' and contains(normalize-space(.),'商品描述')]",
                         "//div[contains(@class,'cbg5ad') or contains(@class,'soui-collapseItem-header')]",
                     ]
                     expanded = False
@@ -979,30 +980,117 @@ class SheinPublisher:
                             break
                     if not expanded:
                         self.log("[DEBUG] 未找到商品描述折叠按钮，尝试直接查找textarea")
-                    # 找到展开后的textarea（class包含main_desc或multi_desc下的textarea）
-                    desc_filled = False
-                    desc_xpaths = [
-                        "//div[contains(@class,'main_desc') or contains(@class,'multi_desc')]//textarea",
-                        "//div[contains(@class,'soui-collapseItem-expanded')]//textarea",
-                        "//div[contains(@class,'soui-collapseItem-content') and not(contains(@style,'display: none'))]//textarea",
-                        "//textarea[contains(@placeholder,'5000')]",
-                    ]
-                    for xp in desc_xpaths:
+
+                    def _collect_desc_inputs():
+                        cands = []
+                        xps = [
+                            # 优先：带“商品描述”标签的区域内输入框
+                            "//*[.//*[contains(normalize-space(.),'商品描述') or contains(normalize-space(.),'产品描述') or contains(normalize-space(.),'Product Description')]]//textarea",
+                            "//*[.//*[contains(normalize-space(.),'商品描述') or contains(normalize-space(.),'产品描述') or contains(normalize-space(.),'Product Description')]]//*[@contenteditable='true' or @role='textbox']",
+                            # 常见描述容器
+                            "//div[contains(@class,'main_desc') or contains(@class,'multi_desc') or contains(@class,'desc')]//textarea",
+                            "//div[contains(@class,'main_desc') or contains(@class,'multi_desc') or contains(@class,'desc')]//*[@contenteditable='true' or @role='textbox']",
+                            "//div[contains(@class,'soui-collapseItem-content') and not(contains(@style,'display: none'))]//textarea",
+                            "//div[contains(@class,'soui-collapseItem-content') and not(contains(@style,'display: none'))]//*[@contenteditable='true' or @role='textbox']",
+                            # placeholder 兜底
+                            "//textarea[contains(@placeholder,'描述') or contains(translate(@placeholder,'DESCRIPTION','description'),'description') or contains(@placeholder,'5000')]",
+                            "//*[@role='textbox' and (contains(@aria-label,'描述') or contains(@placeholder,'描述'))]",
+                        ]
+                        for xp in xps:
+                            try:
+                                for el in self.driver.find_elements(By.XPATH, xp):
+                                    try:
+                                        if el.is_displayed() and el.is_enabled():
+                                            cands.append(el)
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                continue
+                        return cands
+
+                    def _is_probably_desc_input(el):
                         try:
-                            ta = WebDriverWait(self.driver, 5).until(
-                                EC.presence_of_element_located((By.XPATH, xp)))
-                            if ta.is_displayed():
+                            # 排除 SKU 标题/商详标题输入框（日志里出现的那个 textarea）
+                            ph = str(el.get_attribute("placeholder") or "").strip()
+                            if "SPU标题" in ph or "SKC标题" in ph or "商详标题" in ph:
+                                return False
+                            cls = str(el.get_attribute("class") or "").lower()
+                            if any(k in cls for k in ("sku", "skc", "title")) and ("desc" not in cls):
+                                return False
+                            # 仅检查“最近的业务容器”，避免祖先到 body 误判
+                            containers = el.find_elements(
+                                By.XPATH,
+                                "./ancestor::*[contains(@class,'so-form-item') or contains(@class,'spmp_style__')][1]"
+                            )
+                            if containers:
+                                ctext = str(containers[0].text or "").strip()
+                                if any(k in ctext for k in ("SKC标题", "商详标题", "SPU标题")):
+                                    return False
+                        except Exception:
+                            pass
+                        return True
+
+                    # 等待描述输入框渲染（有些类目展开后渲染较慢）
+                    desc_filled = False
+                    deadline = time.time() + 10
+                    while time.time() < deadline and not desc_filled:
+                        for ta in _collect_desc_inputs():
+                            if not _is_probably_desc_input(ta):
+                                continue
+                            try:
                                 self.driver.execute_script(
                                     "arguments[0].scrollIntoView({block:'center'});", ta)
-                                ta.clear()
-                                ta.send_keys(desc_text)
+                                time.sleep(0.2)
+                                # 先用 JS 写值并触发 input/change，再 send_keys 兜底
+                                is_editable_div = (str(ta.get_attribute("contenteditable") or "").lower() == "true")
+                                if is_editable_div:
+                                    self.driver.execute_script(
+                                        "arguments[0].focus(); arguments[0].innerText='';", ta
+                                    )
+                                    ta.send_keys(desc_text)
+                                    self.driver.execute_script(
+                                        "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
+                                        "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", ta
+                                    )
+                                else:
+                                    try:
+                                        ta.clear()
+                                    except Exception:
+                                        pass
+                                    self.driver.execute_script(
+                                        "arguments[0].focus(); arguments[0].value = arguments[1];"
+                                        "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
+                                        "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));",
+                                        ta, desc_text
+                                    )
+                                    cur_val = str(ta.get_attribute("value") or "").strip()
+                                    if not cur_val:
+                                        ta.send_keys(desc_text)
                                 self.log("[OK] 商品描述(英文)已填写")
                                 desc_filled = True
                                 time.sleep(0.5)
                                 break
+                            except Exception:
+                                continue
+                        if not desc_filled:
+                            time.sleep(0.5)
+                    if not desc_filled:
+                        try:
+                            dbg = []
+                            for _ta in self.driver.find_elements(By.XPATH, "//textarea|//*[@contenteditable='true' or @role='textbox']"):
+                                try:
+                                    if not _ta.is_displayed():
+                                        continue
+                                    _ph = str(_ta.get_attribute("placeholder") or "").strip()
+                                    _cl = str(_ta.get_attribute("class") or "").strip()
+                                    if len(dbg) < 6:
+                                        dbg.append("ph='{}' class='{}'".format(_ph[:40], _cl[:50]))
+                                except Exception:
+                                    continue
+                            if dbg:
+                                self.log("[DEBUG] 描述输入框候选快照: {}".format(" || ".join(dbg)))
                         except Exception:
                             pass
-                    if not desc_filled:
                         self.log("[DEBUG] 未找到商品描述textarea，跳过")
                 except Exception as e:
                     self.log("[DEBUG] 填写商品描述失败: {}".format(str(e)[:60]))
