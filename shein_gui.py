@@ -12,6 +12,12 @@ from shein_checkprice import (
     trigger_shein_pending_bargain_action,
 )
 from datetime import datetime
+try:
+    from shein_asin import _canonicalize_shein_color, _split_color_candidates, _normalize_color_token
+except Exception:
+    _canonicalize_shein_color = None
+    _split_color_candidates = None
+    _normalize_color_token = None
 
 class SheinApp(tk.Tk):
     def __init__(self):
@@ -3697,7 +3703,27 @@ return false;
             card=tk.Frame(container,bg=BG_CARD)
             card.pack(fill="x",padx=20,pady=4)
             tk.Label(card,text="SKU {}: {}".format(idx+1, sku_asin),font=("Consolas",10,"bold"),fg=TEXT_MAIN,bg=BG_CARD,anchor="w").pack(fill="x",padx=10,pady=(8,2))
-            tk.Label(card,text="规格: {}".format(sku_attrs),font=("Segoe UI",9),fg=YELLOW,bg=BG_CARD,anchor="w",wraplength=680,justify="left").pack(fill="x",padx=10,pady=(0,2))
+            spec_row = tk.Frame(card, bg=BG_CARD)
+            spec_row.pack(fill="x", padx=10, pady=(0, 2))
+            tk.Label(
+                spec_row,
+                text="规格: {}".format(sku_attrs),
+                font=("Segoe UI",9),
+                fg=YELLOW,
+                bg=BG_CARD,
+                anchor="w",
+                wraplength=680,
+                justify="left"
+            ).pack(side="left", anchor="w")
+            if self._is_nonstandard_color_spec(sku_attrs):
+                tk.Label(
+                    spec_row,
+                    text="  该颜色不是SHEIN标准颜色",
+                    font=("Segoe UI",9,"bold"),
+                    fg=RED,
+                    bg=BG_CARD,
+                    anchor="w"
+                ).pack(side="left", anchor="w")
             basis_text = " / ".join(sku_basis) if sku_basis else "未识别"
             tk.Label(card,text="分类依据: {}".format(basis_text),font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_CARD,anchor="w",wraplength=680,justify="left").pack(fill="x",padx=10,pady=(0,6))
 
@@ -3719,6 +3745,46 @@ return false;
             )
         else:
             self._sku_render_after_id = None
+
+    def _is_nonstandard_color_spec(self, sku_attrs):
+        """仅用于 GUI 展示：判断规格颜色是否不是 SHEIN 标准颜色。"""
+        attrs = str(sku_attrs or "").strip()
+        if not attrs:
+            return False
+        if "该颜色不是SHEIN标准颜色" in attrs or "此颜色不是SHEIN标准颜色" in attrs:
+            return True
+        m = re.search(r"color\s*[:：]\s*([^/]+)", attrs, flags=re.IGNORECASE)
+        if not m:
+            return False
+        raw_color = str(m.group(1) or "").strip()
+        if not raw_color:
+            return False
+
+        candidates = []
+        if callable(_split_color_candidates):
+            try:
+                candidates = list(_split_color_candidates(raw_color) or [])
+            except Exception:
+                candidates = []
+        if callable(_normalize_color_token):
+            try:
+                packed = _normalize_color_token(raw_color)
+            except Exception:
+                packed = re.sub(r"[^a-z0-9]", "", raw_color.lower())
+        else:
+            packed = re.sub(r"[^a-z0-9]", "", raw_color.lower())
+        if packed and packed not in candidates:
+            candidates.append(packed)
+        if not candidates:
+            candidates = [packed] if packed else []
+
+        for c in candidates:
+            try:
+                if callable(_canonicalize_shein_color) and _canonicalize_shein_color(c):
+                    return False
+            except Exception:
+                continue
+        return True
 
     def _get_cached_preview_photo(self, url):
         with self._preview_cache_lock:
