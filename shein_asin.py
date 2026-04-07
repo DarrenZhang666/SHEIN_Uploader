@@ -672,11 +672,19 @@ _SHEIN_COLOR_ALIASES = {
     "burntora": "burnt orange",
 }
 
+_NON_COLOR_WORD_TOKENS = {
+    "pack", "packs", "pc", "pcs", "piece", "pieces", "set", "sets",
+    "count", "qty", "unit", "units", "assorted", "mix", "mixed",
+}
+
 
 def _canonicalize_shein_color(color_token):
     """将颜色候选词映射为 SHEIN 标准颜色词；非标准返回空字符串。"""
     key = _normalize_color_token(color_token)
     if not key:
+        return ""
+    # 先剔除明显不是颜色的噪音词（如 2|1pack / 3pcs / set）
+    if _is_obviously_non_color_token(color_token):
         return ""
     key = _SHEIN_COLOR_ALIASES.get(key, key)
     if key in _SHEIN_STANDARD_COLOR_TOKENS:
@@ -689,13 +697,46 @@ def _canonicalize_shein_color(color_token):
     best_token = ""
     best_score = 0.0
     for token in _SHEIN_STANDARD_COLOR_TOKENS:
+        # 仅对“长度足够且非数字噪音”的词做相近匹配，避免 pack/1pack 误判
+        if len(key) < 5 or re.search(r"\d", key):
+            continue
         score = difflib.SequenceMatcher(None, key, token).ratio()
         if score > best_score:
             best_score = score
             best_token = token
-    if best_token and best_score >= 0.74:
+    if best_token and best_score >= 0.80:
         return best_token
     return ""
+
+
+def _is_obviously_non_color_token(color_token):
+    """
+    判断候选值是否明显不是颜色（包装数量/纯数字/单位类文本）。
+    例如：2|1pack、3pcs、10set、12count。
+    """
+    raw = str(color_token or "").strip().lower()
+    if not raw:
+        return True
+    compact = _normalize_color_token(raw)
+    if not compact:
+        return True
+
+    letters = re.sub(r"[^a-z]", "", compact)
+    digits = re.sub(r"[^0-9]", "", compact)
+
+    # 纯数字/无字母，直接视为非颜色
+    if not letters:
+        return True
+
+    # pack/pcs/set/count 等关键词，通常是包装数量而非颜色
+    for word in _NON_COLOR_WORD_TOKENS:
+        if word in letters:
+            return True
+
+    # 数字+很短字母（如 1bk / 2pc）通常不是有效颜色名
+    if digits and len(letters) <= 3:
+        return True
+    return False
 
 
 def _filter_nonstandard_color_skus(sku_list):
@@ -714,9 +755,9 @@ def _filter_nonstandard_color_skus(sku_list):
         t = str(attr_text or "").strip()
         if not t:
             return "Color: {}".format(new_color)
-        if re.search(r"color\s*:", t, flags=re.IGNORECASE):
+        if re.search(r"(?:color|colour|颜色)\s*:", t, flags=re.IGNORECASE):
             return re.sub(
-                r"(color\s*:\s*)([^/]+)",
+                r"((?:color|colour|颜色)\s*:\s*)([^/]+)",
                 lambda m: "{}{}".format(m.group(1), new_color),
                 t,
                 count=1,
@@ -794,7 +835,7 @@ def _extract_color_from_attrs(attr_text):
     t = str(attr_text or "").strip()
     if not t:
         return ""
-    m = re.search(r"color\s*:\s*([^/]+)", t, flags=re.IGNORECASE)
+    m = re.search(r"(?:color|colour|颜色)\s*:\s*([^/]+)", t, flags=re.IGNORECASE)
     if m:
         return m.group(1).strip()
     # 回退：取第一个片段

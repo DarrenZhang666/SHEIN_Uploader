@@ -4062,12 +4062,17 @@ return false;
             return False
         if "该颜色不是SHEIN标准颜色" in attrs or "此颜色不是SHEIN标准颜色" in attrs:
             return True
-        m = re.search(r"color\s*[:：]\s*([^/]+)", attrs, flags=re.IGNORECASE)
+        m = re.search(r"(?:color|colour|颜色)\s*[:：]\s*([^/]+)", attrs, flags=re.IGNORECASE)
         if not m:
             return False
         raw_color = str(m.group(1) or "").strip()
         if not raw_color:
             return False
+
+        # 包装数量文本直接判定为非标准颜色，避免 2|1pack 这类漏标
+        packed_raw_letters = re.sub(r"[^a-z]", "", raw_color.lower())
+        if any(w in packed_raw_letters for w in ("pack", "pcs", "piece", "set", "count", "unit")):
+            return True
 
         candidates = []
         if callable(_split_color_candidates):
