@@ -30,8 +30,8 @@ class SheinApp(tk.Tk):
         self.asin_progress={}
         self.product_cache={}; self.current_asin=None
         self.select_all_var=tk.BooleanVar(value=False)
-        self.price_multiplier=tk.StringVar(value="3")
-        self.fetch_workers=tk.StringVar(value="5")
+        self.price_multiplier=tk.StringVar(value="5")
+        self.fetch_workers=tk.StringVar(value="3")
         self.amazon_region=tk.StringVar(value="美国")
         self.shein_account=tk.StringVar(value="")
         self.current_view_mode = "collect_publis1h"  # collect_publish / bargain
