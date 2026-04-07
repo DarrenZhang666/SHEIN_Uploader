@@ -3615,11 +3615,16 @@ class SheinPublisher:
                 self.log("[WARN] 未找到细节图表格行，回退单框模式")
                 self._upload_images_to_single_input(fallback_images)
                 return
-            max_sku_rows = 3
-            if len(rows) > max_sku_rows:
-                self.log("[INFO] 细节图仅处理前{}个SKU行（其余跳过）".format(max_sku_rows))
-                rows = rows[:max_sku_rows]
-            self.log("[DEBUG] 找到 {} 行 SKU 细节图行".format(len(rows)))
+            expected_sku_rows = len(sku_list)
+            if len(rows) > expected_sku_rows:
+                self.log("[INFO] 细节图行数({})超过SKU数({})，仅按SKU数处理".format(
+                    len(rows), expected_sku_rows))
+                rows = rows[:expected_sku_rows]
+            elif len(rows) < expected_sku_rows:
+                self.log("[WARN] 细节图行数({})少于SKU数({})，将按当前可见行继续".format(
+                    len(rows), expected_sku_rows))
+            self.log("[DEBUG] 找到 {} 行 SKU 细节图行（期望 {} 行）".format(
+                len(rows), expected_sku_rows))
 
             # -- 动态检测各列索引（细节图、方形图、色块图）--
             _col_detail = 2
