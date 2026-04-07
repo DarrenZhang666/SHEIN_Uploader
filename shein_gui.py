@@ -2569,18 +2569,38 @@ return false;
 
         # 已登录后仅做极短等待，避免“已打开商品发布页”阶段长时间停留
         _t.sleep(0.3)
-        # 非开发者模式下：若页面非中文，保留当前页面供手动调试语言，不做关闭处理
+        # 非开发者模式下：循环检测页面中文状态（每1秒一次，最多3分钟）
         if not is_dev_mode():
-            try:
-                if not self._is_chinese_page(pub.driver):
-                    self._pub_log("[WARN] 检测到页面非中文，已保留当前页面供手动调试语言")
-                    self.after(0, lambda: messagebox.showwarning("语言提示", "检测到页面不是中文，请先手动切换语言。"))
-                    self.after(0, lambda: self.status_lbl.config(text="页面非中文：已保留当前网页，请先切换为中文"))
-                    return
-            except Exception:
-                # 检测异常时也不自动关闭，避免误伤调试场景
-                self._pub_log("[WARN] 页面语言检测异常，已保留当前页面")
-                self.after(0, lambda: self.status_lbl.config(text="页面语言检测异常：已保留当前网页"))
+            zh_timeout = 180.0
+            zh_deadline = _t.time() + zh_timeout
+            self._pub_log("[INFO] 已登录，开始检测页面是否中文（每1秒检测，最长180秒）")
+            self.after(0, lambda: self.status_lbl.config(text="已登录，等待页面切换为中文..."))
+            chinese_ready = False
+            last_hint_left = None
+            while _t.time() < zh_deadline:
+                # 用户手动关闭浏览器时，不再判定失败（视为已手动调试完成）
+                if not self._is_publisher_reusable(pub):
+                    self._pub_log("[INFO] 登录浏览器已手动关闭，默认视为中文已调试完成")
+                    chinese_ready = True
+                    break
+                try:
+                    if self._is_chinese_page(pub.driver):
+                        chinese_ready = True
+                        self._pub_log("[OK] 中文页面检测通过，登录流程继续")
+                        break
+                except Exception:
+                    pass
+                left = int(max(0, zh_deadline - _t.time()))
+                # 每10秒刷新一次状态，避免日志与状态栏刷屏
+                if left // 10 != last_hint_left:
+                    last_hint_left = left // 10
+                    self.after(0, lambda s=left: self.status_lbl.config(
+                        text="页面非中文，等待手动切换为中文（剩余{}秒）...".format(s)))
+                _t.sleep(1.0)
+            if not chinese_ready:
+                self._pub_log("[ERROR] 页面非中文：180秒内未检测到中文页面，登录失败")
+                self.after(0, lambda: self.status_lbl.config(
+                    text="页面非中文：3分钟内未切换中文，登录失败"))
                 return
 
         try:
