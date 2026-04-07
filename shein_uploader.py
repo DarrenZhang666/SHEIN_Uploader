@@ -2877,6 +2877,97 @@ class SheinPublisher:
             self._main_spec_force_abc_mode = False
             # 5) 第二个框：主规格值下拉
             # 5) 第二个框：主规格値—循环填写所有 SKU 规格値
+            _SHEIN_UPLOAD_COLOR_TOKENS = [
+                "black", "white", "red", "blue", "green", "yellow", "pink", "purple",
+                "brown", "grey", "orange", "khaki", "beige", "navy", "multicolor",
+                "burgundy", "coffee", "apricot", "mint", "camel"
+            ]
+            _SHEIN_UPLOAD_COLOR_ALIASES = {
+                "gray": "grey",
+                "wine": "burgundy",
+                "maroon": "burgundy",
+                "tan": "khaki",
+                "ivory": "beige",
+                "nude": "beige",
+                "skyblue": "blue",
+                "lightblue": "blue",
+                "darkblue": "navy",
+                "hotpink": "pink",
+                "fuchsia": "purple",
+            }
+
+            def _norm_color_upload(txt):
+                return re.sub(r"[^a-z0-9]", "", str(txt or "").lower())
+
+            def _canonicalize_upload_color(raw_text):
+                key = _norm_color_upload(raw_text)
+                if not key:
+                    return ""
+                key = _SHEIN_UPLOAD_COLOR_ALIASES.get(key, key)
+                if key in _SHEIN_UPLOAD_COLOR_TOKENS:
+                    return key
+                for token in _SHEIN_UPLOAD_COLOR_TOKENS:
+                    if (len(key) >= 4 and token.startswith(key)) or (len(token) >= 4 and key.startswith(token)):
+                        return token
+                return ""
+
+            def _map_main_spec_colors_for_upload(attr_text, values):
+                """
+                仅用于上传主规格值：若属性为颜色，非标准色替换为任意 SHEIN 标准色。
+                不改写 product_info，仅影响当前上传入参。
+                """
+                if not values:
+                    return values, []
+                if "color" not in _normalize_key(attr_text):
+                    return values, []
+
+                used = set()
+                mapped = []
+                replace_logs = []
+                std_idx = 0
+
+                def _pick_any_unused_standard():
+                    nonlocal std_idx
+                    for _ in range(len(_SHEIN_UPLOAD_COLOR_TOKENS)):
+                        c = _SHEIN_UPLOAD_COLOR_TOKENS[std_idx % len(_SHEIN_UPLOAD_COLOR_TOKENS)]
+                        std_idx += 1
+                        if c not in used:
+                            return c
+                    return ""
+
+                for raw_v in values:
+                    src = str(raw_v or "").strip()
+                    if not src:
+                        continue
+                    src_key = _norm_color_upload(src)
+                    canon = _canonicalize_upload_color(src)
+
+                    target = ""
+                    if canon and canon not in used:
+                        target = canon
+                    elif not canon:
+                        target = _pick_any_unused_standard()
+                    else:
+                        # canon 已被占用，换任意未使用标准色，避免重复
+                        target = _pick_any_unused_standard()
+
+                    if not target:
+                        # 标准色已用尽：无法替换则保留原值
+                        target = src
+
+                    target_key = _norm_color_upload(target)
+                    if target_key and target_key in used:
+                        # 仍冲突则跳过，保证上传主规格值不重复
+                        continue
+
+                    if target_key:
+                        used.add(target_key)
+                    mapped.append(target)
+                    if target_key and src_key != target_key:
+                        replace_logs.append("{}->{}".format(src, target))
+
+                return mapped, replace_logs
+
             def _collect_all_spec_values(attr_text):
                 """从 sku_list 提取所有唯一规格値（基于已选的属性维度）。"""
                 if not isinstance(product_info, dict):
@@ -2929,6 +3020,12 @@ class SheinPublisher:
                 self.log("[INFO] 主规格值数量限制：SKU数={}, 提取值由{}个截断为{}个".format(
                     sku_limit, len(all_spec_values), sku_limit))
                 all_spec_values = all_spec_values[:sku_limit]
+            all_spec_values, _upload_color_replace_logs = _map_main_spec_colors_for_upload(
+                picked_attr, all_spec_values
+            )
+            if _upload_color_replace_logs:
+                self.log("[INFO] 主规格颜色上传替换(仅上传生效，不改GUI): {}".format(
+                    " | ".join(_upload_color_replace_logs[:20])))
             # 需求：若 ASIN 未提供可用“规格/分类依据”，则第二个框直接点击并选择首项
             if not all_spec_values:
                 self.log("[INFO] 未提取到ASIN主规格值，按兜底策略选择第2个下拉首项")

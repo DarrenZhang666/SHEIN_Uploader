@@ -700,15 +700,39 @@ def _canonicalize_shein_color(color_token):
 
 def _filter_nonstandard_color_skus(sku_list):
     """
-    仅保留颜色在 SHEIN 标准色白名单中的 SKU。
-    返回：(filtered_sku_list, removed_count, replaced_count)
+    对颜色 SKU 执行 SHEIN 标准色规范：
+    1) 能映射到标准色时，优先替换为 SHEIN 标准色；
+    2) 若替换后会导致颜色重复，则回退保留原颜色（不替换）；
+    3) 非标准色不丢弃，保留抓取并在 sku_attributes 末尾追加提示；
+    4) 同一商品最终颜色不重复，无法避免重复时跳过该 SKU。
+    返回：(processed_sku_list, marked_nonstandard_count, replaced_count)
     """
     if not sku_list:
         return sku_list, 0, 0
+
+    def _replace_color_in_attrs(attr_text, new_color):
+        t = str(attr_text or "").strip()
+        if not t:
+            return "Color: {}".format(new_color)
+        if re.search(r"color\s*:", t, flags=re.IGNORECASE):
+            return re.sub(
+                r"(color\s*:\s*)([^/]+)",
+                lambda m: "{}{}".format(m.group(1), new_color),
+                t,
+                count=1,
+                flags=re.IGNORECASE
+            ).strip()
+        # 没有显式 Color 字段时，尽量保留其它规格并补首段颜色
+        parts = [p.strip() for p in t.split("/") if str(p).strip()]
+        if not parts:
+            return "Color: {}".format(new_color)
+        parts[0] = "Color: {}".format(new_color)
+        return " / ".join(parts)
+
     kept = []
-    removed = 0
+    marked_nonstandard = 0
     replaced = 0
-    used_standard_colors = set()
+    used_final_colors = set()
     for sku in sku_list:
         basis = [str(b).lower() for b in (sku.get("dimension_basis") or [])]
         is_color_sku = any("color" in b or "colour" in b for b in basis)
@@ -728,21 +752,41 @@ def _filter_nonstandard_color_skus(sku_list):
             canon = _canonicalize_shein_color(c)
             if canon:
                 break
+
+        sku2 = dict(sku)
+        old_raw = _normalize_color_token(raw_color)
+        final_color = raw_color
+        replaced_ok = False
+
+        # 能替换时优先替换；若替换后颜色冲突，则回退到原色不替换
         if canon:
-            # 标准化后再次保证“一个颜色仅一个 SKU”
-            if canon in used_standard_colors:
-                removed += 1
-                continue
-            sku2 = dict(sku)
-            old_raw = _normalize_color_token(raw_color)
-            sku2["sku_attributes"] = "Color: {}".format(canon)
-            if old_raw and old_raw != canon:
+            if canon not in used_final_colors:
+                final_color = canon
+                replaced_ok = bool(old_raw and old_raw != canon)
+            else:
+                final_color = raw_color
+
+        final_key = _normalize_color_token(final_color)
+        if final_key and final_key in used_final_colors:
+            # 最终颜色仍冲突，跳过该 SKU，确保同商品颜色不重复
+            continue
+
+        if canon and final_key == canon:
+            sku2["sku_attributes"] = _replace_color_in_attrs(sku2.get("sku_attributes", ""), canon)
+            if replaced_ok:
                 replaced += 1
-            kept.append(sku2)
-            used_standard_colors.add(canon)
         else:
-            removed += 1
-    return kept, removed, replaced
+            # 保留原色并标注：该颜色未能替换为标准色
+            cur_attr = str(sku2.get("sku_attributes", "") or "").strip()
+            tip = "此颜色不是SHEIN标准颜色"
+            if tip not in cur_attr:
+                sku2["sku_attributes"] = "{} / {}".format(cur_attr, tip) if cur_attr else tip
+            marked_nonstandard += 1
+
+        if final_key:
+            used_final_colors.add(final_key)
+        kept.append(sku2)
+    return kept, marked_nonstandard, replaced
 
 
 def _extract_color_from_attrs(attr_text):
@@ -1466,17 +1510,10 @@ def fetch_amazon_product(asin, region="美国"):
         # 对所有 color SKU 执行统一颜色唯一化（覆盖所有构建路径）
         sku_list = _enforce_unique_color_skus(sku_list)
 
-        # 主规格含 color 时：过滤掉非 SHEIN 标准颜色 SKU
+        # 注意：颜色替换仅在上传 SHEIN 主规格时处理，不在抓取阶段改写 sku_attributes，
+        # 以保证 GUI 展示保持原始抓取颜色。
         if _main_spec_has_color:
-            sku_list, _removed_nonstandard, _replaced_to_standard = _filter_nonstandard_color_skus(sku_list)
-            if _replaced_to_standard > 0:
-                res["standard_color_replaced"] = int(_replaced_to_standard)
-            if _removed_nonstandard > 0:
-                res["nonstandard_color_filtered"] = int(_removed_nonstandard)
-                # 若页面 color SKU 全被过滤，避免回退默认规格导致误上品
-                if not sku_list:
-                    res["nonstandard_color_only"] = True
-                    res["no_suitable_sku"] = True
+            pass
 
         if not sku_list and not bool(res.get("nonstandard_color_only")):
             sku_list.append({
