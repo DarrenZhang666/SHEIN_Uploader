@@ -628,39 +628,97 @@ class SheinPublisher:
         try:
             self._ensure_not_stopped()
             self.log("[DEBUG] 查找推荐类目...")
-            # 方法1：查找所有包含"/"的 span（推荐类目格式）
-            category_spans = self.driver.find_elements(By.XPATH, "//span[contains(text(), '/')]")
-            if category_spans:
-                for span in category_spans:
+            def _get_recommend_items():
+                items = []
+                xpaths = [
+                    # 新版识图推荐项：spmc_item_orPlO，禁用项常带 spmc_disabled
+                    "//div[contains(@class,'spmc_item_orPlO')]",
+                    # 兜底：有斜杠路径且可点击的行
+                    "//div[contains(@class,'cursor-pointer') and .//span[contains(normalize-space(.),'/')]]",
+                ]
+                for xp in xpaths:
                     try:
-                        text = span.text.strip()
-                        # 确保是推荐类目格式（包含多个"/"）
-                        if text.count('/') >= 3:
-                            self.log("[DEBUG] 找到第一个推荐类目: {}".format(text))
-                            span.click()
-                            self.log("[OK] 已选择第一个推荐类目")
-                            time.sleep(1)
-                            return True
-                    except Exception as e:
-                        self.log("[DEBUG] 点击 span 失败: {}".format(str(e)[:40]))
+                        for row in self.driver.find_elements(By.XPATH, xp):
+                            try:
+                                if not row.is_displayed():
+                                    continue
+                                txt = ""
+                                try:
+                                    txt = row.find_element(
+                                        By.XPATH, ".//span[contains(@class,'rounded')][1]"
+                                    ).text.strip()
+                                except Exception:
+                                    txt = (row.text or "").strip()
+                                if txt.count("/") < 2:
+                                    continue
+                                disabled = False
+                                try:
+                                    if row.find_elements(By.XPATH, ".//*[contains(@class,'spmc_disabled')]"):
+                                        disabled = True
+                                except Exception:
+                                    pass
+                                if "点此申请" in (row.text or ""):
+                                    disabled = True
+                                items.append((row, txt, disabled))
+                            except Exception:
+                                continue
+                    except Exception:
                         continue
-            # 方法2：查找所有包含"/"的 div（推荐类目格式）
-            category_divs = self.driver.find_elements(By.XPATH, "//div[contains(text(), '/')]")
-            if category_divs:
-                for div in category_divs:
+                return items
+
+            # 等候推荐项渲染
+            end = time.time() + 8
+            items = []
+            while time.time() < end:
+                items = _get_recommend_items()
+                if items:
+                    break
+                time.sleep(0.5)
+
+            if not items:
+                self.log("[ERROR] 未找到推荐类目项")
+                return False
+
+            for row, text, disabled in items:
+                if disabled:
+                    self.log("[DEBUG] 跳过禁用推荐类目: {}".format(text[:80]))
+                    continue
+                try:
+                    self.log("[DEBUG] 尝试选择推荐类目: {}".format(text))
+                    self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
+                    time.sleep(0.2)
                     try:
-                        text = div.text.strip()
-                        # 确保是推荐类目格式（包含多个"/"）
-                        if text.count('/') >= 3:
-                            self.log("[DEBUG] 找到第一个推荐类目: {}".format(text))
-                            div.click()
-                            self.log("[OK] 已选择第一个推荐类目")
-                            time.sleep(1)
-                            return True
-                    except Exception as e:
-                        self.log("[DEBUG] 点击 div 失败: {}".format(str(e)[:40]))
-                        continue
-            self.log("[ERROR] 未找到推荐类目（span 和 div 都没找到）")
+                        row.click()
+                    except Exception:
+                        self.driver.execute_script("arguments[0].click();", row)
+
+                    # 验证“已选中”状态：类名含 spmc_selected 或该行出现 selected 语义
+                    def _picked():
+                        try:
+                            if row.find_elements(By.XPATH, ".//*[contains(@class,'spmc_selected')]"):
+                                return True
+                            cls = (row.get_attribute("class") or "").lower()
+                            if "selected" in cls or "active" in cls:
+                                return True
+                        except Exception:
+                            pass
+                        try:
+                            return bool(self.driver.find_elements(
+                                By.XPATH,
+                                "//div[contains(@class,'spmc_item_orPlO')]//*[contains(@class,'spmc_selected')]"
+                            ))
+                        except Exception:
+                            return False
+
+                    self._wait_until(_picked, timeout=3, interval=0.4, desc="推荐类目选中")
+                    self.log("[OK] 已选择第一个可用推荐类目: {}".format(text))
+                    time.sleep(0.6)
+                    return True
+                except Exception as e:
+                    self.log("[DEBUG] 点击推荐类目失败: {}".format(str(e)[:50]))
+                    continue
+
+            self.log("[ERROR] 推荐类目均不可用（可能全部禁用或点击失败）")
             return False
         except Exception as e:
             self.log("[ERROR] 选择类目失败: {}".format(str(e)[:60]))
@@ -706,8 +764,17 @@ class SheinPublisher:
                 try:
                     text = btn.text.strip()
                     if "确认" in text and "下一步" in text:
+                        # 保护：若类目未选中且按钮不可点，则不允许盲点下一步
+                        btn_cls = (btn.get_attribute("class") or "").lower()
+                        btn_disabled = (not btn.is_enabled()) or ("disabled" in btn_cls) or bool(btn.get_attribute("disabled"))
+                        if btn_disabled:
+                            self.log("[WARN] '确认，下一步'当前不可点击，疑似尚未选中有效类目")
+                            return False
                         self.log("[DEBUG] 找到'确认，下一步'按钮")
-                        btn.click()
+                        try:
+                            btn.click()
+                        except Exception:
+                            self.driver.execute_script("arguments[0].click();", btn)
                         self.log("[OK] 已点击'确认，下一步'按钮")
                         # 改为动态等待填写信息页加载完成
                         def _fill_page_ready():
