@@ -63,6 +63,11 @@ class SheinApp(tk.Tk):
         self._active_publish_asin = None
         self._verified_accounts: set[str] = set()
         self._account_auth_periods = {}  # account -> (start_raw, end_raw)
+        self._auth_check_interval_ms = 60 * 60 * 1000  # 每小时复检一次账号授权
+        self._auth_check_after_id = None
+        self._auth_watch_account = ""
+        self._license_locked = False
+        self._license_locked_reason = ""
         self._app_closing = False
         self._bargain_rows = []
         self._bargain_progress_percent = 0.0
@@ -283,7 +288,8 @@ class SheinApp(tk.Tk):
         self._publish_btn.pack(side="left",padx=5)
         self._suggest_price_btn = self._btn(bf,"抓取SHEIN建议价格","#0ea5a4",self._fetch_shein_suggest_price)
         
-        self._btn(bf,"停止","#dc2626",self._stop_publish_action).pack(side="left",padx=5)
+        self._stop_btn = self._btn(bf,"停止","#dc2626",self._stop_publish_action)
+        self._stop_btn.pack(side="left",padx=5)
         self._shein_login_btn = self._btn(bf,"登录 SHEIN","#059669",self._open_shein)
         self._shein_login_btn.pack(side="left",padx=5)
         acct_frame=tk.Frame(bf,bg=BG_PANEL)
@@ -342,6 +348,9 @@ class SheinApp(tk.Tk):
                 self.status_lbl.config(text="请先导入 ASIN 文件")
 
     def _fetch_shein_suggest_price(self):
+        if self._license_locked:
+            self._show_auth_lock_popup()
+            return
         if getattr(self, "_bargain_fetch_running", False):
             messagebox.showinfo("议价", "正在抓取中，请先等待当前任务完成或点击“停止”")
             return
@@ -2010,6 +2019,9 @@ class SheinApp(tk.Tk):
                 self.status_lbl.config(text="抓取完成，共缓存 {} 个商品".format(len(self.product_cache)))
 
     def _import_txt(self):
+        if self._license_locked:
+            self._show_auth_lock_popup()
+            return
         path=filedialog.askopenfilename(title="选择 ASIN 文本文件",
             filetypes=[("文本文件","*.txt"),("所有文件","*.*")])
         if not path: return
@@ -2360,6 +2372,9 @@ class SheinApp(tk.Tk):
     def _verify_account(self, account: str) -> bool:
         """验证 SHEIN 账号是否已授权，通过后缓存结果。"""
         account = (account or "").strip()
+        if self._license_locked:
+            self._show_auth_lock_popup()
+            return False
         if not account:
             return False
         if account in self._verified_accounts:
@@ -2367,6 +2382,7 @@ class SheinApp(tk.Tk):
             period_ok, period_msg = self._check_local_period(start_raw, end_raw)
             self._update_license_text(start_raw, end_raw)
             if period_ok:
+                self._mark_verified_account(account, start_raw, end_raw)
                 return True
             self.status_lbl.config(text='账号验证失败')
             messagebox.showerror('账号验证失败', period_msg)
@@ -2381,13 +2397,130 @@ class SheinApp(tk.Tk):
                 self.status_lbl.config(text='账号验证失败')
                 messagebox.showerror('账号验证失败', period_msg)
                 return False
-            self._verified_accounts.add(account)
-            self._account_auth_periods[account] = (start_raw, end_raw)
+            self._mark_verified_account(account, start_raw, end_raw)
             self.status_lbl.config(text='账号验证通过')
             return True
         self.status_lbl.config(text='账号验证失败')
         messagebox.showerror('账号验证失败', msg)
         return False
+
+    def _mark_verified_account(self, account, start_raw, end_raw):
+        """记录验证成功账号，并开启每小时复检。"""
+        account = str(account or "").strip()
+        if not account:
+            return
+        self._verified_accounts.add(account)
+        self._account_auth_periods[account] = (start_raw, end_raw)
+        self._auth_watch_account = account
+        self._schedule_auth_check()
+
+    def _schedule_auth_check(self, delay_ms=None):
+        """计划下一次账号授权复检。"""
+        if self._app_closing or self._license_locked:
+            return
+        if self._auth_check_after_id is not None:
+            try:
+                self.after_cancel(self._auth_check_after_id)
+            except Exception:
+                pass
+            self._auth_check_after_id = None
+        if delay_ms is None:
+            delay_ms = self._auth_check_interval_ms
+        self._auth_check_after_id = self.after(delay_ms, self._run_periodic_auth_check)
+
+    def _run_periodic_auth_check(self):
+        """每小时请求服务端复检账号授权状态。"""
+        self._auth_check_after_id = None
+        if self._app_closing or self._license_locked:
+            return
+        account = str(self._auth_watch_account or "").strip()
+        if not account:
+            return
+        self.status_lbl.config(text='正在复检账号授权...')
+
+        def _worker():
+            ok, msg, start_raw, end_raw = verify_shein_account_detail(account)
+            if ok:
+                period_ok, period_msg = self._check_local_period(start_raw, end_raw)
+                if not period_ok:
+                    ok = False
+                    msg = period_msg
+            self.after(
+                0,
+                lambda a=account, s=start_raw, e=end_raw, passed=ok, m=msg:
+                self._on_periodic_auth_check_done(a, passed, m, s, e)
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_periodic_auth_check_done(self, account, ok, msg, start_raw, end_raw):
+        if self._app_closing or self._license_locked:
+            return
+        if ok:
+            self._mark_verified_account(account, start_raw, end_raw)
+            self._update_license_text(start_raw, end_raw)
+            self.status_lbl.config(text='账号授权复检通过')
+            return
+        lock_reason = "账号 [{}] 已不在权限范围内。\n{}\n请联系管理员续费/开通后再使用。".format(account, str(msg or "授权校验未通过"))
+        self._lock_app_for_auth(lock_reason)
+
+    def _set_auth_control_state(self, enabled):
+        state = "normal" if enabled else "disabled"
+        for name in (
+            "_mode_collect_btn",
+            "_mode_bargain_btn",
+            "_import_btn",
+            "_fetch_btn",
+            "_publish_btn",
+            "_suggest_price_btn",
+            "_shein_login_btn",
+        ):
+            btn = getattr(self, name, None)
+            if btn is None:
+                continue
+            try:
+                btn.config(state=state)
+            except Exception:
+                pass
+        combo = getattr(self, "_acct_combo", None)
+        if combo is not None:
+            try:
+                combo.config(state=("normal" if enabled else "disabled"))
+            except Exception:
+                pass
+
+    def _lock_app_for_auth(self, reason):
+        """权限失效后锁定功能入口并提示用户。"""
+        if self._license_locked:
+            return
+        self._license_locked = True
+        self._license_locked_reason = str(reason or "账号权限已失效，请联系管理员")
+        if self._auth_check_after_id is not None:
+            try:
+                self.after_cancel(self._auth_check_after_id)
+            except Exception:
+                pass
+            self._auth_check_after_id = None
+        try:
+            self._stop_publish = True
+            self._stop_bargain_fetch = True
+            self._publish_session_id += 1
+        except Exception:
+            pass
+        self._set_auth_control_state(False)
+        self.status_lbl.config(text='账号权限失效，软件已锁定')
+        self._show_auth_lock_popup()
+
+    def _show_auth_lock_popup(self):
+        msg = str(self._license_locked_reason or "账号权限已失效，请联系管理员")
+        try:
+            self.status_lbl.config(text='账号权限失效，软件已锁定')
+        except Exception:
+            pass
+        try:
+            messagebox.showerror('账号权限失效', msg)
+        except Exception:
+            pass
 
     @staticmethod
     def _parse_period_datetime(raw_value):
@@ -2447,6 +2580,9 @@ class SheinApp(tk.Tk):
 
     def _open_shein(self):
         """打开 SHEIN 登录页面。"""
+        if self._license_locked:
+            self._show_auth_lock_popup()
+            return
         account = self.shein_account.get().strip()
         if not account:
             messagebox.showwarning('提示', '请先在「SHEIN账号」输入框中填写账号')
@@ -2855,6 +2991,9 @@ return false;
 
     def _open_publish_page(self):
         """打开 SHEIN 商品发布页面，自动上传选中商品的图片。"""
+        if self._license_locked:
+            self._show_auth_lock_popup()
+            return
         account = self.shein_account.get().strip()
         if not account:
             messagebox.showwarning('提示', '请先在「SHEIN账号」输入框中填写账号')
@@ -3078,6 +3217,10 @@ return false;
         # 会话ID变化表示已有新任务启动，旧线程必须立刻退出
         if session_id is not None and session_id != self._publish_session_id:
             self._pub_log('[STOP] 检测到新上品会话，旧线程退出')
+            return True
+        if self._license_locked:
+            self._pub_log('[STOP] 账号授权失效，任务终止')
+            self.after(0, lambda: self.status_lbl.config(text="账号权限失效，任务已终止"))
             return True
         if self._is_publish_stopped():
             self._pub_log('[STOP] 用户点击停止，抓取已中断')
@@ -3570,6 +3713,9 @@ return false;
         threading.Thread(target=_do_upload, daemon=True).start()
 
     def _fetch_sel(self):
+        if self._license_locked:
+            self._show_auth_lock_popup()
+            return
         sel=[a for a,v in self.asin_vars.items() if v.get()]
         if not sel: messagebox.showinfo("提示","请先勾选要抓取的 ASIN"); return
         if self._fetch_thread and self._fetch_thread.is_alive():
@@ -4550,6 +4696,12 @@ return false;
                 pass
         threading.Thread(target=_hard_exit_after_delay, daemon=True).start()
         try:
+            if self._auth_check_after_id is not None:
+                self.after_cancel(self._auth_check_after_id)
+                self._auth_check_after_id = None
+        except Exception:
+            pass
+        try:
             self._stop_publish = True
             self._publish_session_id += 1
             self.progress.stop()
@@ -4591,6 +4743,9 @@ return false;
 
     def _publish_direct(self, product_info):
         """详情页“发布此商品”与“开始上品”保持完全同流程（单品模式）。"""
+        if self._license_locked:
+            self._show_auth_lock_popup()
+            return
         if product_info is None or not product_info.get('image_url'):
             messagebox.showwarning('提示', '商品信息不完整，请重新抓取')
             return
