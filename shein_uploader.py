@@ -1189,7 +1189,8 @@ class SheinPublisher:
 
             if not required_items:
                 self.log("[DEBUG] 未找到带*号的类目属性项")
-                return
+                # 不直接返回：仍需继续执行成分 Composition 专项处理
+                required_items = []
 
             # 若存在「*产品型号」，固定写入：/
             try:
@@ -1255,6 +1256,178 @@ class SheinPublisher:
                         continue
             except Exception:
                 pass
+
+            # 成分 Composition 专项处理：
+            # 规则：第一个框(下拉)选首项；第二个框(%数值)填 60
+            try:
+                root = attr_card if attr_card is not None else driver
+                comp_items = root.find_elements(
+                    By.XPATH,
+                    ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
+                    "and .//span[contains(@class,'spmp_style__productAttrLabel') and "
+                    "(contains(normalize-space(.),'成分') or contains(normalize-space(.),'Composition'))]]"
+                )
+            except Exception:
+                comp_items = []
+
+            comp_select_done = False
+            comp_ratio_done = False
+            for comp in comp_items:
+                try:
+                    if not comp.is_displayed():
+                        continue
+
+                    # A) 下拉框：若已选则跳过；否则选首项
+                    try:
+                        has_selected = bool(comp.find_elements(
+                            By.XPATH, ".//*[contains(@class,'so-select-item') and normalize-space(.)!='']"
+                        ))
+                    except Exception:
+                        has_selected = False
+                    if not has_selected:
+                        sel_trigger = None
+                        for sx in [
+                            ".//div[contains(@class,'so-select-inner')]",
+                            ".//div[contains(@class,'so-select-result')]",
+                            ".//a[contains(@class,'so-select-caret') or contains(@class,'so-select-multi')]",
+                        ]:
+                            try:
+                                cand = comp.find_element(By.XPATH, sx)
+                                if cand.is_displayed():
+                                    sel_trigger = cand
+                                    break
+                            except Exception:
+                                continue
+                        if sel_trigger is not None:
+                            try:
+                                driver.execute_script(
+                                    "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                                    sel_trigger
+                                )
+                                time.sleep(0.2)
+                                first_option = driver.execute_script(
+                                    """
+                                    function visible(el){
+                                      if(!el) return false;
+                                      const st = window.getComputedStyle(el);
+                                      if(st.display==='none' || st.visibility==='hidden') return false;
+                                      const r = el.getBoundingClientRect();
+                                      return r.width>0 && r.height>0;
+                                    }
+                                    function validOption(el){
+                                      if(!el || !visible(el)) return false;
+                                      const cls = (el.className || '').toString();
+                                      if(/disabled|is-disabled/.test(cls)) return false;
+                                      const txt = (el.innerText || el.textContent || '').trim();
+                                      if(!txt) return false;
+                                      if(txt.includes('请选择') || txt.includes('Select')) return false;
+                                      return true;
+                                    }
+                                    const drops = Array.from(document.querySelectorAll('div.so-select-drop-down-content')).filter(visible);
+                                    const activeDrop = drops.length ? drops[drops.length - 1] : null;
+                                    if(!activeDrop) return null;
+                                    const cands = Array.from(activeDrop.querySelectorAll(
+                                      '.so-select-option, .so-option, li[role=\"option\"], [class*=\"option\"]'
+                                    ));
+                                    for (const c of cands){
+                                      if(validOption(c)) return c;
+                                    }
+                                    return null;
+                                    """
+                                )
+                                if first_option is not None:
+                                    driver.execute_script("arguments[0].click();", first_option)
+                                    time.sleep(0.15)
+                                else:
+                                    try:
+                                        sel_trigger.send_keys(Keys.ENTER)
+                                    except Exception:
+                                        pass
+                                has_selected = bool(comp.find_elements(
+                                    By.XPATH, ".//*[contains(@class,'so-select-item') and normalize-space(.)!='']"
+                                ))
+                            except Exception:
+                                has_selected = False
+                    if has_selected and (not comp_select_done):
+                        comp_select_done = True
+                        self.log("[OK] 成分Composition已选择首项")
+
+                    # B) 比例输入框：定位“后面带%”的输入，空值则填60
+                    # 说明：该输入框有时被自定义组件托管，send_keys 不稳定，因此优先 JS 赋值。
+                    ratio_inputs = []
+                    try:
+                        ratio_inputs = comp.find_elements(
+                            By.XPATH,
+                            ".//div[contains(@class,'spmp_style__appendBox')]//input[contains(@name,'attribute_extra_value') or contains(@placeholder,'数字')] | "
+                            ".//input[contains(@name,'attribute_extra_value') or contains(@placeholder,'数字')]"
+                        )
+                    except Exception:
+                        ratio_inputs = []
+
+                    # 若常规定位失败，使用“% 就近前置 input”兜底（限制在当前 comp 区域内）
+                    if not ratio_inputs:
+                        try:
+                            ratio_inputs = comp.find_elements(
+                                By.XPATH,
+                                ".//span[normalize-space(.)='%']/preceding-sibling::label//input | "
+                                ".//span[normalize-space(.)='%']/preceding::input[1]"
+                            )
+                        except Exception:
+                            ratio_inputs = []
+
+                    filled_this_comp = False
+                    for ri in ratio_inputs:
+                        try:
+                            cur = str(ri.get_attribute("value") or "").strip()
+                            if cur:
+                                continue
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", ri)
+                            # 1) 先尝试常规输入
+                            typed = False
+                            if ri.is_displayed() and ri.is_enabled():
+                                try:
+                                    ri.click()
+                                except Exception:
+                                    driver.execute_script("arguments[0].click();", ri)
+                                try:
+                                    ri.send_keys(Keys.CONTROL, "a")
+                                    ri.send_keys(Keys.BACKSPACE)
+                                except Exception:
+                                    pass
+                                try:
+                                    ri.send_keys("60")
+                                    typed = True
+                                except Exception:
+                                    typed = False
+
+                            # 2) JS 强制写值兜底（对不可交互 input 也有效）
+                            cur_after_type = str(ri.get_attribute("value") or "").strip()
+                            if (not cur_after_type) or (cur_after_type != "60"):
+                                driver.execute_script(
+                                    "arguments[0].value='60';"
+                                    "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
+                                    "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));"
+                                    "arguments[0].dispatchEvent(new Event('blur',{bubbles:true}));",
+                                    ri
+                                )
+
+                            cur_final = str(ri.get_attribute("value") or "").strip()
+                            if cur_final == "60":
+                                filled_this_comp = True
+                                break
+                        except Exception:
+                            continue
+
+                    if filled_this_comp:
+                        comp_ratio_done = True
+                        self.log("[OK] 成分Composition比例已填写: 60%")
+                    else:
+                        try:
+                            self.log("[WARN] 成分Composition比例未写入：未找到可用数字输入框或写入失败")
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
 
             auto_filled_count = 0
             for item in required_items:
