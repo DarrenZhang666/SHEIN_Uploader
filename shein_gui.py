@@ -1487,6 +1487,19 @@ class SheinApp(tk.Tk):
             cursor="hand2",
             command=self._locate_asin_from_query
         ).pack(side="left", padx=(4,0))
+        tk.Button(
+            locate_wrap,
+            text="抓取",
+            bg="#2563eb",
+            fg=TEXT_MAIN,
+            font=("Segoe UI", 8, "bold"),
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=2,
+            cursor="hand2",
+            command=self._fetch_asin_from_query
+        ).pack(side="left", padx=(4,0))
         asin_search_entry.bind("<Return>", lambda _e: self._locate_asin_from_query())
         # 亚马逊地区选择（仅支持美国）
         rg=tk.Frame(f,bg=BG_PANEL); rg.pack(fill="x",padx=12,pady=(2,4))
@@ -2087,6 +2100,45 @@ class SheinApp(tk.Tk):
         self._click(matched)
         self._scroll_to_asin(matched)
         self.status_lbl.config(text="已定位 ASIN: {}".format(matched))
+
+    def _fetch_asin_from_query(self):
+        """从输入框直接抓取单个 ASIN，并刷新商品详情。"""
+        if self._fetch_thread and self._fetch_thread.is_alive():
+            messagebox.showinfo("提示", "正在抓取中，请稍候...")
+            return
+        q = (self.asin_search_var.get() or "").strip().upper()
+        if not q:
+            self.status_lbl.config(text="请输入 ASIN 码")
+            return
+        if not re.match(r"^B[A-Z0-9]{9}$", q):
+            self.status_lbl.config(text="ASIN 格式不正确: {}".format(q))
+            return
+
+        self._stop_publish = False
+        self._last_fetch_no_price_asins = []
+
+        if q in self.asin_list:
+            self._click(q)
+            self._scroll_to_asin(q)
+        else:
+            self.current_asin = q
+            self._schedule_show_current_asin(delay_ms=1)
+
+        # 直抓模式：强制重新抓取该 ASIN，避免命中旧缓存
+        try:
+            if q in self.product_cache:
+                del self.product_cache[q]
+        except Exception:
+            pass
+
+        self.progress.start(12)
+        self.status_lbl.config(text="正在抓取 ASIN: {} ...".format(q))
+        self._fetch_thread = threading.Thread(
+            target=self._worker,
+            args=([q], 1, []),
+            daemon=True
+        )
+        self._fetch_thread.start()
 
     def _placeholder(self,asin):
         self._cancel_pending_sku_render()
