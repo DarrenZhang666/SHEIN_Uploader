@@ -2880,6 +2880,7 @@ class SheinPublisher:
             _SHEIN_UPLOAD_COLOR_TOKENS = [
                 "black", "white", "red", "blue", "green", "yellow", "pink", "purple",
                 "brown", "grey", "orange", "khaki", "beige", "navy", "multicolor",
+                "silver", "gold", "clear",
                 "burgundy", "coffee", "apricot", "mint", "camel"
             ]
             _SHEIN_UPLOAD_COLOR_ALIASES = {
@@ -2894,6 +2895,7 @@ class SheinPublisher:
                 "darkblue": "navy",
                 "hotpink": "pink",
                 "fuchsia": "purple",
+                "sliver": "silver",
             }
 
             def _norm_color_upload(txt):
@@ -2913,8 +2915,9 @@ class SheinPublisher:
 
             def _map_main_spec_colors_for_upload(attr_text, values):
                 """
-                仅用于上传主规格值：若属性为颜色，非标准色替换为任意 SHEIN 标准色。
-                不改写 product_info，仅影响当前上传入参。
+                仅用于上传主规格值：颜色值标准化（如 sliver -> silver），
+                但不再随机改色，避免把 gold/silver 错写成 white/red 等无关颜色。
+                不改写 product_info，仅影响当前上传入参；重复值只保留首个。
                 """
                 if not values:
                     return values, []
@@ -2924,16 +2927,6 @@ class SheinPublisher:
                 used = set()
                 mapped = []
                 replace_logs = []
-                std_idx = 0
-
-                def _pick_any_unused_standard():
-                    nonlocal std_idx
-                    for _ in range(len(_SHEIN_UPLOAD_COLOR_TOKENS)):
-                        c = _SHEIN_UPLOAD_COLOR_TOKENS[std_idx % len(_SHEIN_UPLOAD_COLOR_TOKENS)]
-                        std_idx += 1
-                        if c not in used:
-                            return c
-                    return ""
 
                 for raw_v in values:
                     src = str(raw_v or "").strip()
@@ -2942,22 +2935,12 @@ class SheinPublisher:
                     src_key = _norm_color_upload(src)
                     canon = _canonicalize_upload_color(src)
 
-                    target = ""
-                    if canon and canon not in used:
-                        target = canon
-                    elif not canon:
-                        target = _pick_any_unused_standard()
-                    else:
-                        # canon 已被占用，换任意未使用标准色，避免重复
-                        target = _pick_any_unused_standard()
-
-                    if not target:
-                        # 标准色已用尽：无法替换则保留原值
-                        target = src
+                    # 关键修复：优先使用规范化颜色；无法规范化则保留原值，不做随机改色
+                    target = canon if canon else src
 
                     target_key = _norm_color_upload(target)
                     if target_key and target_key in used:
-                        # 仍冲突则跳过，保证上传主规格值不重复
+                        # 重复值只保留首个，避免同色被硬改成其它颜色
                         continue
 
                     if target_key:
