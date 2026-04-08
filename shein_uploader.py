@@ -1429,15 +1429,18 @@ class SheinPublisher:
                 except Exception:
                     continue
 
-            # 适用季节 Suitable Seasons 专项处理：
-            # 规则：清空默认值 -> 输入 All Seasons -> 选择下拉首项确认
+            # Season/适用季节 专项处理：
+            # 规则：清空默认值 -> 输入 ALL Seasons -> 选择下拉首项确认
             try:
                 root = attr_card if attr_card is not None else driver
                 season_items = root.find_elements(
                     By.XPATH,
                     ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
                     "and .//span[contains(@class,'spmp_style__productAttrLabel') and "
-                    "(contains(normalize-space(.),'适用季节') or contains(normalize-space(.),'Suitable Seasons'))]]"
+                    "("
+                    "contains(normalize-space(.),'适用季节') or contains(normalize-space(.),'Suitable Seasons') "
+                    "or contains(normalize-space(.),'季节') or contains(normalize-space(.),'Season')"
+                    ")]]"
                 )
             except Exception:
                 season_items = []
@@ -1662,7 +1665,157 @@ class SheinPublisher:
                                 selected_ok = False
 
                     if selected_ok:
-                        self.log("[OK] 适用季节Suitable Seasons已清空默认值，写入ALL Seasons并选择首项")
+                        self.log("[OK] Season已清空默认值，写入ALL Seasons并选择首项")
+                        try:
+                            driver.execute_script("document.body.click();")
+                        except Exception:
+                            pass
+                        time.sleep(0.15)
+                except Exception:
+                    continue
+
+            # 长度 Length 专项处理（不依赖 * 必填）：
+            # 规则：清空已有值 -> 点击下拉 -> 选择首项
+            try:
+                root = attr_card if attr_card is not None else driver
+                length_items = root.find_elements(
+                    By.XPATH,
+                    ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
+                    "and .//span[contains(@class,'spmp_style__productAttrLabel') and "
+                    "(contains(normalize-space(.),'长度') or contains(normalize-space(.),'Length'))]]"
+                )
+            except Exception:
+                length_items = []
+
+            for length_item in length_items:
+                try:
+                    if not length_item.is_displayed():
+                        continue
+
+                    # A) 清空已有值（优先 clear 按钮）
+                    try:
+                        for cx in [
+                            ".//a[@data-role='close' and contains(@class,'so-select-close')]",
+                            ".//*[contains(@class,'so-select-close-warpper')]//a[contains(@class,'so-select-close')]",
+                            ".//*[contains(@class,'so-select-indicator') and contains(@class,'so-select-close')]",
+                        ]:
+                            cleared_once = False
+                            try:
+                                for ce in length_item.find_elements(By.XPATH, cx):
+                                    if not ce.is_displayed():
+                                        continue
+                                    driver.execute_script(
+                                        "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                                        ce
+                                    )
+                                    cleared_once = True
+                                    time.sleep(0.12)
+                                    break
+                            except Exception:
+                                pass
+                            if cleared_once:
+                                break
+                    except Exception:
+                        pass
+
+                    # 兜底清空：可编辑输入执行 Ctrl+A + Backspace
+                    for inp in length_item.find_elements(
+                        By.XPATH,
+                        ".//span[contains(@class,'so-select-input') and @contenteditable='true'] | "
+                        ".//input[not(@type='hidden')]"
+                    ):
+                        try:
+                            if not inp.is_displayed():
+                                continue
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                            try:
+                                inp.click()
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", inp)
+                            try:
+                                inp.send_keys(Keys.CONTROL, "a")
+                                inp.send_keys(Keys.BACKSPACE)
+                            except Exception:
+                                pass
+                        except Exception:
+                            continue
+
+                    # B) 点击触发器
+                    trigger = None
+                    for sx in [
+                        ".//div[contains(@class,'so-select-inner')]",
+                        ".//div[contains(@class,'so-select-result')]",
+                        ".//a[contains(@class,'so-select-caret') or contains(@class,'so-select-multi')]",
+                        ".//span[contains(@class,'so-select-input')]",
+                    ]:
+                        try:
+                            cand = length_item.find_element(By.XPATH, sx)
+                            if cand.is_displayed():
+                                trigger = cand
+                                break
+                        except Exception:
+                            continue
+                    if trigger is None:
+                        continue
+
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});arguments[0].click();", trigger
+                    )
+                    time.sleep(0.2)
+
+                    # C) 选择当前可见下拉中的首个有效选项
+                    selected_ok = False
+                    first_option = None
+                    try:
+                        first_option = driver.execute_script(
+                            """
+                            function visible(el){
+                              if(!el) return false;
+                              const st = window.getComputedStyle(el);
+                              if(st.display==='none' || st.visibility==='hidden') return false;
+                              const r = el.getBoundingClientRect();
+                              return r.width>0 && r.height>0;
+                            }
+                            function validOption(el){
+                              if(!el || !visible(el)) return false;
+                              const cls = (el.className || '').toString();
+                              if(/disabled|is-disabled/.test(cls)) return false;
+                              const txt = (el.innerText || el.textContent || '').trim();
+                              if(!txt) return false;
+                              if(txt.includes('请选择') || txt.includes('Select')) return false;
+                              return true;
+                            }
+                            const drops = Array.from(document.querySelectorAll('div.so-select-drop-down-content')).filter(visible);
+                            const activeDrop = drops.length ? drops[drops.length - 1] : null;
+                            if(!activeDrop) return null;
+                            const cands = Array.from(activeDrop.querySelectorAll(
+                              '.so-select-option, .so-option, li[role="option"], [class*="option"]'
+                            ));
+                            for (const c of cands){
+                              if(validOption(c)) return c;
+                            }
+                            return null;
+                            """
+                        )
+                    except Exception:
+                        first_option = None
+
+                    if first_option is not None:
+                        try:
+                            driver.execute_script("arguments[0].click();", first_option)
+                            selected_ok = True
+                        except Exception:
+                            selected_ok = False
+
+                    if not selected_ok:
+                        try:
+                            trigger.send_keys(Keys.ENTER)
+                            selected_ok = True
+                        except Exception:
+                            selected_ok = False
+
+                    if selected_ok:
+                        self.log("[OK] 长度Length已清空并选择首项")
                         try:
                             driver.execute_script("document.body.click();")
                         except Exception:
@@ -1686,6 +1839,13 @@ class SheinPublisher:
                         pass
                     # 产品型号单独按“/”填写，不走下拉首项逻辑
                     if "产品型号" in label or "Product Model" in label:
+                        continue
+
+                    # 长度 Length 专项规则：
+                    # 无论当前是否已有值，先清空，再打开下拉选择首项
+                    is_length_attr = ("长度" in label or "Length" in label)
+                    # 长度由上面的“长度专项处理”统一处理，这里直接跳过避免重复操作
+                    if is_length_attr:
                         continue
 
                     # 已有值则跳过
