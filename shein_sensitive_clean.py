@@ -41,7 +41,7 @@ SENSITIVE_WORDS = [
     "medical", "therapeutic", "cure", "treat", "heal",
     "anti-inflammatory", "sterilizing", "detox",
     "weight loss", "slimming", "whitening", "anti-aging", "anti-wrinkle",
-    "acne removal", "spot fading", "medical grade", "no side effects", "seguro", "FILA", "Safe",
+    "acne removal", "spot fading", "medical grade", "no side effects", "seguro", "FILA", "Safe","Sustainable"
     # 在此处继续添加敏感词，每行一个，字符串格式
 ]
 
