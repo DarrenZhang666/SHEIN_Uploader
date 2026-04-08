@@ -1146,6 +1146,39 @@ def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_wor
     return results
 
 
+def _normalize_image_list(images, max_count=None):
+    """清洗并去重图片列表，保持原有顺序。"""
+    out = []
+    for u in (images or []):
+        uu = str(u or "").strip()
+        if not uu or uu in out:
+            continue
+        out.append(uu)
+        if max_count and len(out) >= int(max_count):
+            break
+    return out
+
+
+def _filter_skus_by_min_images(sku_list, min_images=2):
+    """
+    过滤图片不足的 SKU：
+    - 每个 SKU 至少需要 min_images 张图
+    - 图片会先去重后再计数
+    返回 (filtered_sku_list, dropped_count)
+    """
+    kept = []
+    dropped = 0
+    for sku in (sku_list or []):
+        sku2 = dict(sku or {})
+        imgs = _normalize_image_list(sku2.get("images", []))
+        if len(imgs) < int(min_images or 0):
+            dropped += 1
+            continue
+        sku2["images"] = imgs
+        kept.append(sku2)
+    return kept, dropped
+
+
 _SENSITIVE_REPLACEMENT_MAP = {
     "sales": "popular",
     "on sale": "special offer",
@@ -1726,18 +1759,27 @@ def fetch_amazon_product(asin, region="美国"):
         # 对所有 color SKU 执行统一颜色唯一化（覆盖所有构建路径）
         sku_list = _enforce_unique_color_skus(sku_list)
 
+        # 业务规则：每个 SKU 必须至少 2 张图；不足 2 张的 SKU 直接删除。
+        sku_list, dropped_by_images = _filter_skus_by_min_images(sku_list, min_images=2)
+        if dropped_by_images:
+            res["sku_removed_for_few_images"] = dropped_by_images
+
         # 注意：颜色替换仅在上传 SHEIN 主规格时处理，不在抓取阶段改写 sku_attributes，
         # 以保证 GUI 展示保持原始抓取颜色。
         if _main_spec_has_color:
             pass
 
         if not sku_list and not bool(res.get("nonstandard_color_only")):
-            sku_list.append({
-                "sku_asin": asin,
-                "sku_attributes": "默认规格",
-                "dimension_basis": [],
-                "images": fallback_images[:5]
-            })
+            default_images = _normalize_image_list(fallback_images[:5])
+            if len(default_images) >= 2:
+                sku_list.append({
+                    "sku_asin": asin,
+                    "sku_attributes": "默认规格",
+                    "dimension_basis": [],
+                    "images": default_images
+                })
+            else:
+                res["no_suitable_sku"] = True
 
         res["sku_list"] = sku_list
     except Exception as e:
