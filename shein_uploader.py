@@ -1429,6 +1429,248 @@ class SheinPublisher:
                 except Exception:
                     continue
 
+            # 适用季节 Suitable Seasons 专项处理：
+            # 规则：清空默认值 -> 输入 All Seasons -> 选择下拉首项确认
+            try:
+                root = attr_card if attr_card is not None else driver
+                season_items = root.find_elements(
+                    By.XPATH,
+                    ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
+                    "and .//span[contains(@class,'spmp_style__productAttrLabel') and "
+                    "(contains(normalize-space(.),'适用季节') or contains(normalize-space(.),'Suitable Seasons'))]]"
+                )
+            except Exception:
+                season_items = []
+
+            for season in season_items:
+                try:
+                    if not season.is_displayed():
+                        continue
+
+                    # A) 先清空默认值（若存在）
+                    try:
+                        clear_btn = None
+                        for cx in [
+                            ".//a[@data-role='close' and contains(@class,'so-select-close')]",
+                            ".//*[contains(@class,'so-select-close-warpper')]//a[contains(@class,'so-select-close')]",
+                            ".//*[contains(@class,'so-select-indicator') and contains(@class,'so-select-close')]",
+                        ]:
+                            try:
+                                for ce in season.find_elements(By.XPATH, cx):
+                                    if ce.is_displayed():
+                                        clear_btn = ce
+                                        break
+                            except Exception:
+                                continue
+                            if clear_btn is not None:
+                                break
+                        if clear_btn is not None:
+                            driver.execute_script(
+                                "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                                clear_btn
+                            )
+                            time.sleep(0.12)
+                    except Exception:
+                        pass
+
+                    # B) 点击下拉，输入 ALL Seasons，再选首项
+                    trigger = None
+                    for sx in [
+                        ".//div[contains(@class,'so-select-inner')]",
+                        ".//div[contains(@class,'so-select-result')]",
+                        ".//a[contains(@class,'so-select-caret')]",
+                    ]:
+                        try:
+                            cand = season.find_element(By.XPATH, sx)
+                            if cand.is_displayed():
+                                trigger = cand
+                                break
+                        except Exception:
+                            continue
+                    if trigger is None:
+                        continue
+
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});arguments[0].click();", trigger
+                    )
+                    time.sleep(0.2)
+
+                    # 先写入搜索词：ALL Seasons
+                    typed_keyword = False
+                    try:
+                        kw_input = None
+                        for ix in [
+                            ".//input[not(@type='hidden')]",
+                            ".//div[contains(@class,'so-select-result')]//input[not(@type='hidden')]",
+                        ]:
+                            try:
+                                for ie in season.find_elements(By.XPATH, ix):
+                                    if ie.is_displayed() and ie.is_enabled():
+                                        kw_input = ie
+                                        break
+                            except Exception:
+                                continue
+                            if kw_input is not None:
+                                break
+                        if kw_input is None:
+                            try:
+                                kw_input = driver.switch_to.active_element
+                            except Exception:
+                                kw_input = None
+                        if kw_input is not None:
+                            try:
+                                kw_input.click()
+                            except Exception:
+                                pass
+                            try:
+                                kw_input.send_keys(Keys.CONTROL, "a")
+                                kw_input.send_keys(Keys.BACKSPACE)
+                            except Exception:
+                                pass
+                            kw_input.send_keys("ALL Seasons")
+                            typed_keyword = True
+                    except Exception:
+                        typed_keyword = False
+
+                    if typed_keyword:
+                        time.sleep(0.18)
+
+                    selected_ok = False
+
+                    def _season_has_selected_value():
+                        try:
+                            tags = season.find_elements(
+                                By.XPATH, ".//*[contains(@class,'so-select-item') and normalize-space(.)!='']"
+                            )
+                            if tags:
+                                return True
+                        except Exception:
+                            pass
+                        try:
+                            vals = season.find_elements(
+                                By.XPATH,
+                                ".//span[contains(@class,'so-select-input') and not(contains(@class,'so-input-placeholder'))]"
+                            )
+                            for v in vals:
+                                txt = (v.text or v.get_attribute("title") or "").strip()
+                                if txt and ("请选择" not in txt) and ("Select" not in txt):
+                                    return True
+                        except Exception:
+                            pass
+                        return False
+
+                    # 优先使用键盘在当前焦点下拉内确认“第一个匹配项”
+                    keyboard_target = None
+                    try:
+                        for ix in [
+                            ".//input[not(@type='hidden')]",
+                            ".//div[contains(@class,'so-select-result')]//input[not(@type='hidden')]",
+                        ]:
+                            try:
+                                for ie in season.find_elements(By.XPATH, ix):
+                                    if ie.is_displayed() and ie.is_enabled():
+                                        keyboard_target = ie
+                                        break
+                            except Exception:
+                                continue
+                            if keyboard_target is not None:
+                                break
+                    except Exception:
+                        keyboard_target = None
+                    if keyboard_target is None:
+                        try:
+                            keyboard_target = driver.switch_to.active_element
+                        except Exception:
+                            keyboard_target = None
+
+                    if keyboard_target is not None:
+                        try:
+                            keyboard_target.send_keys(Keys.ARROW_DOWN)
+                            time.sleep(0.08)
+                            keyboard_target.send_keys(Keys.ENTER)
+                            for _ in range(8):
+                                if _season_has_selected_value():
+                                    selected_ok = True
+                                    break
+                                time.sleep(0.08)
+                        except Exception:
+                            selected_ok = False
+
+                    if not selected_ok:
+                        # 兜底：按与当前 trigger 距离最近的下拉层，点击第一条有效选项
+                        first_option = None
+                        try:
+                            first_option = driver.execute_script(
+                                """
+                                function visible(el){
+                                  if(!el) return false;
+                                  const st = window.getComputedStyle(el);
+                                  if(st.display==='none' || st.visibility==='hidden') return false;
+                                  const r = el.getBoundingClientRect();
+                                  return r.width>0 && r.height>0;
+                                }
+                                function validOption(el){
+                                  if(!el || !visible(el)) return false;
+                                  const cls = (el.className || '').toString();
+                                  if(/disabled|is-disabled/.test(cls)) return false;
+                                  const txt = (el.innerText || el.textContent || '').trim();
+                                  if(!txt) return false;
+                                  if(txt.includes('请选择') || txt.includes('Select')) return false;
+                                  return true;
+                                }
+                                const trg = arguments[0];
+                                if(!trg) return null;
+                                const tr = trg.getBoundingClientRect();
+                                const tcx = (tr.left + tr.right) / 2;
+                                const tcy = (tr.top + tr.bottom) / 2;
+                                const drops = Array.from(document.querySelectorAll('div.so-select-drop-down-content')).filter(visible);
+                                if(!drops.length) return null;
+                                let best = null, bestDist = Number.POSITIVE_INFINITY;
+                                for(const d of drops){
+                                  const r = d.getBoundingClientRect();
+                                  const cx = (r.left + r.right) / 2;
+                                  const cy = (r.top + r.bottom) / 2;
+                                  const dist = Math.hypot(cx - tcx, cy - tcy);
+                                  if(dist < bestDist){
+                                    bestDist = dist;
+                                    best = d;
+                                  }
+                                }
+                                if(!best) return null;
+                                const cands = Array.from(best.querySelectorAll(
+                                  '.so-select-option, .so-option, li[role="option"], [class*="option"]'
+                                ));
+                                for (const c of cands){
+                                  if(validOption(c)) return c;
+                                }
+                                return null;
+                                """,
+                                trigger
+                            )
+                        except Exception:
+                            first_option = None
+
+                        if first_option is not None:
+                            try:
+                                driver.execute_script("arguments[0].click();", first_option)
+                                for _ in range(8):
+                                    if _season_has_selected_value():
+                                        selected_ok = True
+                                        break
+                                    time.sleep(0.08)
+                            except Exception:
+                                selected_ok = False
+
+                    if selected_ok:
+                        self.log("[OK] 适用季节Suitable Seasons已清空默认值，写入ALL Seasons并选择首项")
+                        try:
+                            driver.execute_script("document.body.click();")
+                        except Exception:
+                            pass
+                        time.sleep(0.15)
+                except Exception:
+                    continue
+
             auto_filled_count = 0
             for item in required_items:
                 try:
