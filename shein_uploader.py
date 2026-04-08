@@ -3243,9 +3243,10 @@ class SheinPublisher:
 
             def _map_main_spec_colors_for_upload(attr_text, values):
                 """
-                仅用于上传主规格值：颜色值标准化（如 sliver -> silver），
-                但不再随机改色，避免把 gold/silver 错写成 white/red 等无关颜色。
-                不改写 product_info，仅影响当前上传入参；重复值只保留首个。
+                仅用于上传主规格值：颜色值标准化（如 sliver -> silver）。
+                若颜色非 SHEIN 标准颜色，则自动替换为一个未占用的 SHEIN 标准颜色，
+                并尽量保证同一商品的颜色值不重复。
+                不改写 product_info，仅影响当前上传入参。
                 """
                 if not values:
                     return values, []
@@ -3256,6 +3257,13 @@ class SheinPublisher:
                 mapped = []
                 replace_logs = []
 
+                def _pick_unused_standard_color():
+                    candidates = [c for c in _SHEIN_UPLOAD_COLOR_TOKENS if c not in used]
+                    if not candidates:
+                        return ""
+                    # 随机选择一个未使用标准色，满足“随便找个标准色替换”的需求
+                    return random.choice(candidates)
+
                 for raw_v in values:
                     src = str(raw_v or "").strip()
                     if not src:
@@ -3263,18 +3271,26 @@ class SheinPublisher:
                     src_key = _norm_color_upload(src)
                     canon = _canonicalize_upload_color(src)
 
-                    # 关键修复：优先使用规范化颜色；无法规范化则保留原值，不做随机改色
-                    target = canon if canon else src
+                    target = ""
+                    if canon:
+                        if canon in used:
+                            # 规范色发生重复时，优先换成其它未使用标准色
+                            target = _pick_unused_standard_color()
+                        else:
+                            target = canon
+                    else:
+                        # 非标准颜色：替换为未使用标准色
+                        target = _pick_unused_standard_color()
 
-                    target_key = _norm_color_upload(target)
-                    if target_key and target_key in used:
-                        # 重复值只保留首个，避免同色被硬改成其它颜色
+                    if not target:
+                        # 极端情况下标准色池耗尽，跳过该值以维持“不重复”原则
+                        self.log("[WARN] 主规格颜色可用标准色已耗尽，跳过颜色: {}".format(src))
                         continue
 
-                    if target_key:
-                        used.add(target_key)
+                    used.add(target)
                     mapped.append(target)
-                    if target_key and src_key != target_key:
+                    target_key = _norm_color_upload(target)
+                    if src_key != target_key:
                         replace_logs.append("{}->{}".format(src, target))
 
                 return mapped, replace_logs
