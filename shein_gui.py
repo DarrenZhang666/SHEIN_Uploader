@@ -107,14 +107,14 @@ class SheinApp(tk.Tk):
         self.bind("<Destroy>", self._on_root_destroy, add="+")
 
     def _init_log_file(self):
-        """初始化日志目录（仅在开发者模式写日志时创建文件）。"""
+        """初始化日志目录（所有模式均可落盘）。"""
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         os.makedirs(desktop, exist_ok=True)
         self._log_dir = os.path.join(desktop, "SHEIN_Logs")
         self.log_file = None
 
     def _ensure_log_file(self):
-        """懒创建日志文件，仅开发者模式需要详细日志时创建。"""
+        """懒创建日志文件。"""
         if self.log_file:
             return
         os.makedirs(self._log_dir, exist_ok=True)
@@ -131,8 +131,6 @@ class SheinApp(tk.Tk):
 
     def _write_log(self, msg):
         """写入日志文件。"""
-        if not is_dev_mode():
-            return
         try:
             self._ensure_log_file()
             with open(self.log_file, 'a', encoding='utf-8') as f:
@@ -3541,10 +3539,25 @@ return false;
                     return
                 _set_status('下载商品图片（第{}/3次）...'.format(dl_try), "上品中")
                 try:
-                    response = requests.get(image_url, timeout=10)
-                    response.raise_for_status()
-                    with open(temp_image, 'wb') as f:
-                        f.write(response.content)
+                    _tmp_dl = None
+                    try:
+                        if self._shein_publisher:
+                            _tmp_dl = self._shein_publisher._download_identify_image_to_temp(image_url)
+                    except Exception:
+                        _tmp_dl = None
+                    if _tmp_dl and os.path.exists(_tmp_dl):
+                        with open(_tmp_dl, "rb") as _rf, open(temp_image, "wb") as _wf:
+                            _wf.write(_rf.read())
+                        try:
+                            os.remove(_tmp_dl)
+                        except Exception:
+                            pass
+                    else:
+                        # 兜底：保留原 requests 直连下载
+                        response = requests.get(image_url, timeout=(5, 20))
+                        response.raise_for_status()
+                        with open(temp_image, 'wb') as f:
+                            f.write(response.content)
                     downloaded_ok = True
                     break
                 except Exception as e:
@@ -3968,6 +3981,9 @@ return false;
         except Exception:
             max_workers = 5
         max_workers = max(1, min(6, max_workers))
+        # 美国站反爬更敏感，自动收缩并发，提升跨电脑稳定性
+        if str(self.amazon_region.get() or "").strip() == "美国":
+            max_workers = min(max_workers, 3)
         self.fetch_workers.set(str(max_workers))
         self.progress.start(12)
         # 直接开始抓取，自动跳过已缓存的商品
@@ -3992,30 +4008,60 @@ return false;
             except RuntimeError:
                 pass  # 主线程已退出
 
+        def _is_anti_blocked_title(_title):
+            t = str(_title or "").strip().lower()
+            if not t:
+                return False
+            return (
+                ("被亚马逊反爬" in t)
+                or ("captcha" in t)
+                or ("robot" in t)
+                or ("automated access" in t)
+                or ("bot check" in t)
+            )
+
         def _fetch_one(asin):
             try:
-                info = fetch_amazon_product(asin, region=region)
-                if isinstance(info, dict):
-                    info["_fetch_region"] = region
-                title = str(info.get("title", ""))
-                _fp = ("获取失败", "HTTP ", "错误:", "被亚马逊反爬", "Error")
-                is_fail = (not info) or any(title.startswith(p) for p in _fp)
-                return asin, info, is_fail
+                last_info = None
+                for _try in range(3):
+                    info = fetch_amazon_product(asin, region=region)
+                    if isinstance(info, dict):
+                        info["_fetch_region"] = region
+                    title = str((info or {}).get("title", "") or "")
+                    _fp = ("获取失败", "HTTP ", "错误:", "被亚马逊反爬", "Error")
+                    is_fail = (not info) or any(title.startswith(p) for p in _fp)
+                    anti_blocked = _is_anti_blocked_title(title)
+                    last_info = info
+                    # 非反爬失败不重试，避免无意义重复请求
+                    if (not is_fail) or (not anti_blocked):
+                        return asin, info, is_fail, anti_blocked
+                    if _try < 2:
+                        time.sleep(1.5 + (_try * 1.2) + random.uniform(0.6, 1.8))
+                info = last_info if isinstance(last_info, dict) else {"asin": asin, "title": "被亚马逊反爬拦截，请稍后重试"}
+                info["_fetch_region"] = region
+                return asin, info, True, True
             except Exception as e:
                 info = {"asin": asin, "title": "获取失败: {}".format(str(e)[:30]), "_fetch_region": region}
-                return asin, info, True
+                return asin, info, True, False
 
         done = 0
-        batch_size = max(1, min(max_workers * 3, 15))
-        for batch_start in range(0, total, batch_size):
+        adaptive_workers = max(1, int(max_workers or 1))
+        anti_rates_window = []
+        clean_batch_streak = 0
+        batch_start = 0
+        while batch_start < total:
+            batch_size = max(1, min(adaptive_workers * 3, 15, total - batch_start))
             batch_asins = asins[batch_start: batch_start + batch_size]
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            anti_block_count = 0
+            with ThreadPoolExecutor(max_workers=adaptive_workers) as executor:
                 futures = [executor.submit(_fetch_one, asin) for asin in batch_asins]
                 for fut in as_completed(futures):
                     try:
-                        asin, info, is_fail = fut.result()
+                        asin, info, is_fail, anti_blocked = fut.result()
                         self.product_cache[asin] = info
                         done += 1
+                        if anti_blocked:
+                            anti_block_count += 1
                         try:
                             self.after(0, lambda d=done, t=total, a=asin: self.status_lbl.config(text="抓取完成 {}/{}：{}".format(d, t, a)))
                         except RuntimeError:
@@ -4059,10 +4105,40 @@ return false;
                                 pass
                     except Exception:
                         pass
+            anti_rate = (float(anti_block_count) / float(len(batch_asins))) if batch_asins else 0.0
+            anti_rates_window.append(anti_rate)
+            if len(anti_rates_window) > 3:
+                anti_rates_window = anti_rates_window[-3:]
+            avg_anti_rate = (sum(anti_rates_window) / float(len(anti_rates_window))) if anti_rates_window else anti_rate
+
+            prev_workers = adaptive_workers
+            if anti_block_count >= 2 or anti_rate >= 0.5 or avg_anti_rate >= 0.4:
+                adaptive_workers = max(1, adaptive_workers - 1)
+                clean_batch_streak = 0
+            else:
+                if anti_block_count == 0:
+                    clean_batch_streak += 1
+                else:
+                    clean_batch_streak = 0
+                if clean_batch_streak >= 2 and avg_anti_rate <= 0.12 and adaptive_workers < max_workers:
+                    adaptive_workers = min(max_workers, adaptive_workers + 1)
+                    clean_batch_streak = 0
+
+            if adaptive_workers != prev_workers:
+                try:
+                    self.after(0, lambda nw=adaptive_workers, pr=prev_workers, ar=anti_rate: self.status_lbl.config(
+                        text="检测到反爬波动，抓取线程 {} -> {}（当前命中率 {:.0%}）".format(pr, nw, ar)
+                    ))
+                except RuntimeError:
+                    pass
             # 批次间冷却，降低后半段 ASIN 被连续风控的概率
             remaining = total - (batch_start + len(batch_asins))
             if remaining > 0:
                 cool_down = 3.0 if remaining > 18 else 2.0
+                if anti_rate >= 0.5:
+                    cool_down = max(cool_down, 5.0)
+                elif anti_rate >= 0.2:
+                    cool_down = max(cool_down, 3.5)
                 try:
                     self.after(0, lambda d=done, t=total, s=cool_down: self.status_lbl.config(
                         text="抓取完成 {}/{}，冷却 {:.1f}s 后继续".format(d, t, s)
@@ -4070,6 +4146,7 @@ return false;
                 except RuntimeError:
                     pass
                 time.sleep(cool_down)
+            batch_start += len(batch_asins)
         try:
             self.after(0, lambda ac=already_cached, np=list(no_price_asins): self._done(ac, np))
         except RuntimeError:
@@ -4481,9 +4558,9 @@ return false;
         """发布日志回调：开发者模式=完整日志，非开发者模式=仅简化上品进度。"""
         m = str(msg)[:100] if msg else ""
         self._route_asin_progress_from_log(m)
-        if is_dev_mode():
-            self._write_log(msg)
-        else:
+        # 本地日志落盘：所有模式都保留完整日志（便于非开发者模式排障）
+        self._write_log(msg)
+        if not is_dev_mode():
             if not self._is_simple_publish_msg(m):
                 return
         # 更新状态栏

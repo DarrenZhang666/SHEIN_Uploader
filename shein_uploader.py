@@ -5538,17 +5538,22 @@ class SheinPublisher:
                 return cached["bytes"], cached.get("ext", ".jpg"), True
 
         last_err = ""
-        for _attempt in range(2):
+        for _attempt in range(4):
             try:
                 hdrs = random.choice(HEADERS_POOL).copy() if HEADERS_POOL else {}
+                hdrs.setdefault("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+                hdrs.setdefault("Referer", "https://www.amazon.com/")
+                hdrs.setdefault("Connection", "keep-alive")
                 # 分离连接超时和读取超时，避免长时间卡住
-                r = requests.get(url, headers=hdrs, timeout=(3, 8))
+                r = requests.get(url, headers=hdrs, timeout=(5, 20))
                 if r.status_code != 200:
                     last_err = "http {}".format(r.status_code)
+                    time.sleep(0.35 + (_attempt * 0.25))
                     continue
                 img_bytes = r.content or b""
                 if not img_bytes:
                     last_err = "empty file"
+                    time.sleep(0.35 + (_attempt * 0.25))
                     continue
 
                 ctype = (r.headers.get("Content-Type", "") or "").lower()
@@ -5573,10 +5578,57 @@ class SheinPublisher:
                 return img_bytes, ext, False
             except Exception as e:
                 last_err = str(e)[:80]
+                time.sleep(0.35 + (_attempt * 0.25))
                 continue
+
+        # 兜底1：走 _save_img_temp 的下载链路再读回内存（其 timeout 更宽）
+        try:
+            tmp = self._save_img_temp(url)
+            if tmp and os.path.exists(tmp):
+                with open(tmp, "rb") as _f:
+                    img_bytes = _f.read()
+                ext = os.path.splitext(tmp)[1].lower() or ".jpg"
+                if img_bytes:
+                    with self._IMG_MEM_CACHE_LOCK:
+                        if len(self._IMG_MEM_CACHE) >= self._IMG_MEM_CACHE_MAX:
+                            try:
+                                self._IMG_MEM_CACHE.pop(next(iter(self._IMG_MEM_CACHE)))
+                            except Exception:
+                                self._IMG_MEM_CACHE.clear()
+                        self._IMG_MEM_CACHE[key] = {"bytes": img_bytes, "ext": ext}
+                    return img_bytes, ext, False
+        except Exception as e:
+            last_err = str(e)[:80]
+        finally:
+            try:
+                if 'tmp' in locals() and tmp and os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
         if last_err:
             self.log("[识图] 下载图片失败: {}".format(last_err))
         return None, ".jpg", False
+
+    def _download_identify_image_to_temp(self, url):
+        """
+        识图专用下载：优先内存缓存下载，失败后兜底常规下载。
+        成功返回临时文件路径，失败返回 None。
+        """
+        if not url:
+            return None
+        try:
+            img_bytes, img_ext, _ = self._get_image_bytes_cached(url)
+            if img_bytes:
+                fd, tmp_path = tempfile.mkstemp(suffix=(img_ext if img_ext else ".jpg"))
+                with os.fdopen(fd, "wb") as _f:
+                    _f.write(img_bytes)
+                return tmp_path
+        except Exception:
+            pass
+        try:
+            return self._save_img_temp(url)
+        except Exception:
+            return None
     # ── 识图选类目
 
     def select_category_by_image(self, img_url_or_path, timeout=20):
@@ -5594,19 +5646,13 @@ class SheinPublisher:
         need_cleanup = False
         if img_url_or_path.startswith("http"):
             _t0 = time.time()
-            img_bytes, img_ext, from_cache = self._get_image_bytes_cached(img_url_or_path)
-            if not img_bytes:
+            tmp_path = self._download_identify_image_to_temp(img_url_or_path)
+            if not tmp_path:
                 self.log("[识图] 图片下载失败")
                 return False
-            fd, tmp_path = tempfile.mkstemp(suffix=img_ext if img_ext else ".jpg")
-            with os.fdopen(fd, "wb") as _f:
-                _f.write(img_bytes)
             img_path = tmp_path
             need_cleanup = True
-            if from_cache:
-                self.log("[识图] 使用内存缓存图片（不落盘缓存）")
-            else:
-                self.log("[识图] 下载图片耗时 {:.2f}s".format(time.time() - _t0))
+            self.log("[识图] 下载图片耗时 {:.2f}s".format(time.time() - _t0))
         else:
             img_path = img_url_or_path
         entry_xpaths = [
@@ -6058,11 +6104,7 @@ class SheinPublisher:
             self.log("[Step2] 尝试识图自动选类目（统一流程）...")
             _tmp_img = None
             try:
-                img_bytes, img_ext, _ = self._get_image_bytes_cached(img_url)
-                if img_bytes:
-                    _fd, _tmp_img = tempfile.mkstemp(suffix=img_ext)
-                    with os.fdopen(_fd, "wb") as _f:
-                        _f.write(img_bytes)
+                _tmp_img = self._download_identify_image_to_temp(img_url)
                 if not _tmp_img:
                     raise Exception("识图图片下载失败")
 
