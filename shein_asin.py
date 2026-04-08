@@ -384,11 +384,18 @@ def _is_blocked(status_code, text):
     """判断响应是否被反爬拦截。"""
     tl = text.lower()
     return (
-        status_code == 503
+        status_code == 429
+        or status_code == 503
+        or status_code == 540
         or (status_code == 404 and "automated" in tl)
         or "captcha" in tl
+        or "enter the characters you see below" in tl
+        or "type the characters you see in this image" in tl
         or ("sorry" in tl and "automated" in tl)
+        or "to discuss automated access to amazon data" in tl
         or "robot check" in tl
+        or "bot check" in tl
+        or "automated access to amazon data" in tl
         or "api-services-support@amazon.com" in tl
     )
 
@@ -1523,7 +1530,7 @@ def fetch_amazon_product(asin, region="美国"):
 
         if not page_html:
             # 主页面请求：cloudscraper/requests 带重试
-            r, hdrs_req = _get_with_retry(sess, url, max_attempts=2, base_timeout=10)
+            r, hdrs_req = _get_with_retry(sess, url, max_attempts=4, base_timeout=12)
             if r is not None and r.status_code in (200, 301, 302) and not _is_blocked(r.status_code, r.text):
                 final_url = str(getattr(r, "url", "") or url)
                 final_domain = _extract_domain_from_url(final_url)
@@ -1559,7 +1566,7 @@ def fetch_amazon_product(asin, region="美国"):
             if (not page_html) and ctx["is_us"]:
                 try:
                     _prepare_amazon_session(sess, domain, ctx, warmup=True)
-                    r3, hdrs3 = _get_with_retry(sess, url, max_attempts=1, base_timeout=10)
+                    r3, hdrs3 = _get_with_retry(sess, url, max_attempts=2, base_timeout=12)
                     if r3 is not None and r3.status_code in (200, 301, 302) and not _is_blocked(r3.status_code, r3.text):
                         final_url3 = str(getattr(r3, "url", "") or url)
                         final_domain3 = _extract_domain_from_url(final_url3)
@@ -1578,6 +1585,11 @@ def fetch_amazon_product(asin, region="美国"):
                     url, timeout=20, region=ctx["region"], ship_zip=ctx.get("ship_zip", "30005")
                 )
                 hdrs = random.choice(HEADERS_POOL).copy()
+                if page_html and _is_blocked(200, page_html):
+                    _record_request_feedback(blocked=True)
+                    page_html = _fetch_page_with_selenium(
+                        url, timeout=28, region=ctx["region"], ship_zip=ctx.get("ship_zip", "30005")
+                    )
                 if page_html:
                     res["final_url"] = url
                     res["final_domain"] = _extract_domain_from_url(url)
