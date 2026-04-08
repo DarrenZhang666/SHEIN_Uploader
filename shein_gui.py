@@ -1891,7 +1891,8 @@ class SheinApp(tk.Tk):
         m = str(msg or "")
         # 按“后期阶段优先”匹配，避免宽泛关键词把进度卡在早期。
         if "商品已提交发布" in m or "提交成功，等待审核中" in m:
-            self._set_asin_progress(asin, 100, "完成发布", state="success"); return
+            # 仅日志命中不直接判定成功，最终成功以业务结果回写为准（避免串日志导致误绿）
+            self._set_asin_progress(asin, 95, "发布结果确认中", state="running"); return
         if "发布失败" in m or "上品失败" in m:
             self._set_asin_progress(asin, 100, "发布失败", state="fail"); return
         if ("点击发布商品" in m or "等待确认弹窗" in m or "确认弹窗" in m
@@ -1964,7 +1965,8 @@ class SheinApp(tk.Tk):
                     pass
             return
 
-        asin = asin_from_msg or self._active_publish_asin or self.current_asin
+        # 不再回退到 current_asin，避免用户切换选中项时把日志错路由到当前详情商品
+        asin = asin_from_msg or self._active_publish_asin
         if not asin:
             return
         try:
@@ -4632,6 +4634,9 @@ return false;
 
         def _record_result(asin, ok, err=''):
             nonlocal done
+            # 会话隔离：旧会话线程的晚到结果不允许覆盖当前会话状态
+            if session_id is not None and session_id != self._publish_session_id:
+                return
             with result_lock:
                 done += 1
                 if ok:
@@ -4676,6 +4681,9 @@ return false;
 
         def _worker_loop(worker_idx):
             def _worker_log(msg):
+                # 会话隔离：旧会话日志不更新当前会话进度
+                if session_id is not None and session_id != self._publish_session_id:
+                    return
                 _msg = str(msg)[:220]
                 _asin = None
                 try:
