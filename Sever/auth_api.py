@@ -28,6 +28,8 @@ SECURE_KEY = "ShEiN_2025!@xKz9#Qm7$wPv"  # 客户端与服务端共享密钥，�
 ADMIN_KEY = "ChangeThis_AdminKey_2026"  # 管理端密钥，manager.py 需保持一致
 DELETE_PASSWORD = "qwertyuiop[]"       # 删除记录二次确认密码
 AUDIT_LOG_FILE = os.path.join(os.path.dirname(__file__), "admin_audit.log")
+CHECK_LOG_DIR = os.path.join(os.path.expanduser("~"), "Desktop", "Sever")
+CHECK_LOG_FILE = os.path.join(CHECK_LOG_DIR, "Sever_log.txt")
 
 DB_CONFIG = {
     "host": "127.0.0.1",
@@ -102,6 +104,7 @@ pool = SimplePool(DB_CONFIG, POOL_SIZE)
 
 _rate_store: dict[str, list[float]] = {}
 _rate_lock = threading.Lock()
+_check_log_lock = threading.Lock()
 
 def _check_rate(ip: str) -> bool:
     now = time.time()
@@ -207,18 +210,54 @@ def _write_audit_log(
         # 审计日志失败不影响主流程
         pass
 
+
+def _write_check_request_log(
+    shein_id: str,
+    start_time: str,
+    end_time: str,
+    allowed: bool,
+) -> None:
+    """记录账号校验请求日志（每次请求一条）。"""
+    request_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    account = str(shein_id or "").strip() or "unknown"
+    start_text = str(start_time or "-")
+    end_text = str(end_time or "-")
+    result_text = "允许" if allowed else "不允许"
+    line = "{}    {}    {}    {}    {}".format(
+        request_time,
+        account,
+        start_text,
+        end_text,
+        result_text,
+    )
+    try:
+        with _check_log_lock:
+            os.makedirs(CHECK_LOG_DIR, exist_ok=True)
+            with open(CHECK_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception:
+        # 日志写入失败不影响主流程
+        pass
+    try:
+        print("[CHECK_AUTH] {}".format(line))
+    except Exception:
+        pass
+
 @app.post("/check_auth")
 async def check_auth(req: CheckRequest, request: Request):
     client_ip = request.client.host if request.client else "unknown"
     if not _check_rate(client_ip):
+        _write_check_request_log(req.shein_id, "", "", False)
         raise HTTPException(status_code=429, detail="请求过于频繁")
 
     now_ts = int(time.time())
     if abs(now_ts - req.timestamp) > TIMESTAMP_TOLERANCE:
+        _write_check_request_log(req.shein_id, "", "", False)
         raise HTTPException(status_code=403, detail="请求已过期")
 
     expected = _make_sign(req.shein_id, req.timestamp)
     if not hmac.compare_digest(req.sign, expected):
+        _write_check_request_log(req.shein_id, "", "", False)
         raise HTTPException(status_code=403, detail="签名验证失败")
 
     try:
@@ -233,15 +272,21 @@ async def check_auth(req: CheckRequest, request: Request):
                 cur.execute(sql, (req.shein_id,))
                 row = cur.fetchone()
     except Exception:
+        _write_check_request_log(req.shein_id, "", "", False)
         raise HTTPException(status_code=500, detail="服务器内部错误")
 
     if row is None:
+        _write_check_request_log(req.shein_id, "", "", False)
         return {"success": False}
+
+    start_time = str(row["start_time"])
+    end_time = str(row["end_time"])
+    _write_check_request_log(req.shein_id, start_time, end_time, True)
 
     return {
         "success": True,
-        "start_time": str(row["start_time"]),
-        "end_time": str(row["end_time"]),
+        "start_time": start_time,
+        "end_time": end_time,
     }
 
 
