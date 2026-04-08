@@ -9,6 +9,7 @@ import io
 import json
 import time
 import os
+import threading
 import difflib
 from urllib.parse import urlparse
 import requests
@@ -147,6 +148,9 @@ HEADERS_POOL = [
 # 可选代理池（留空则不使用，格式: ["http://user:pass@host:port"]）
 PROXY_POOL = []
 
+_SESSION_LOCK = threading.Lock()
+_SESSION_CACHE = {}
+
 
 def _get_proxy():
     """随机返回代理配置字典，PROXY_POOL 为空时返回 None。"""
@@ -210,9 +214,15 @@ def _build_amazon_dp_url(domain, asin, is_us=False):
     return base
 
 
-def _prepare_amazon_session(session, domain, ctx):
+def _prepare_amazon_session(session, domain, ctx, warmup=False):
     """注入地区 Cookie，并在美国站预热首页/配送地。"""
     if session is None:
+        return
+    cache_key = "_amz_prepared_{}_{}".format(
+        str(domain or "").replace(".", "_"),
+        "us" if bool(ctx.get("is_us")) else "nonus"
+    )
+    if getattr(session, cache_key, False):
         return
     cookie_domain = domain if str(domain).startswith(".") else ".{}".format(domain)
     # 基础浏览器 cookie
@@ -237,20 +247,23 @@ def _prepare_amazon_session(session, domain, ctx):
             except Exception:
                 pass
         # 先访问美国首页建立会话，再尝试设置配送邮编（最佳努力，不影响主流程）
-        try:
-            warm_headers = random.choice(HEADERS_POOL).copy()
-            warm_headers["Referer"] = "https://www.amazon.com/"
-            session.get("https://www.amazon.com/?language=en_US", headers=warm_headers, timeout=10)
-            ajax_headers = warm_headers.copy()
-            ajax_headers["X-Requested-With"] = "XMLHttpRequest"
-            session.get(
-                "https://www.amazon.com/gp/delivery/ajax/address-change.html"
-                "?locationType=LOCATION_INPUT&zipCode={}&storeContext=generic&deviceType=web&pageType=Detail&actionSource=glow".format(zip_code),
-                headers=ajax_headers,
-                timeout=10
-            )
-        except Exception:
-            pass
+        if warmup and (not getattr(session, "_amz_us_warmed", False)):
+            try:
+                warm_headers = random.choice(HEADERS_POOL).copy()
+                warm_headers["Referer"] = "https://www.amazon.com/"
+                session.get("https://www.amazon.com/?language=en_US", headers=warm_headers, timeout=8)
+                ajax_headers = warm_headers.copy()
+                ajax_headers["X-Requested-With"] = "XMLHttpRequest"
+                session.get(
+                    "https://www.amazon.com/gp/delivery/ajax/address-change.html"
+                    "?locationType=LOCATION_INPUT&zipCode={}&storeContext=generic&deviceType=web&pageType=Detail&actionSource=glow".format(zip_code),
+                    headers=ajax_headers,
+                    timeout=8
+                )
+                setattr(session, "_amz_us_warmed", True)
+            except Exception:
+                pass
+    setattr(session, cache_key, True)
 
 
 def _extract_domain_from_url(url):
@@ -286,10 +299,10 @@ def _get_with_retry(session, url, max_attempts=3, base_timeout=12):
         proxies = _get_proxy()
         if attempt > 0:
             # 短暂退避：避免超长等待
-            wait = min(2 ** attempt + random.uniform(0.3, 1.0), 8.0)
+            wait = min(0.6 * (2 ** (attempt - 1)) + random.uniform(0.1, 0.5), 2.5)
             time.sleep(wait)
         try:
-            r = session.get(url, headers=hdrs, proxies=proxies, timeout=base_timeout)
+            r = session.get(url, headers=hdrs, proxies=proxies, timeout=(5, base_timeout))
             if not _is_blocked(r.status_code, r.text):
                 return r, hdrs
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
@@ -1118,7 +1131,8 @@ def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_wor
     results = {}
     if not sku_asins:
         return results
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    worker_count = max(1, min(max_workers, len(sku_asins)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_to_asin = {
             executor.submit(_fetch_sku_images, session, domain, asin, hdrs, max_count): asin
             for asin in sku_asins
@@ -1228,38 +1242,31 @@ def fetch_amazon_product(asin, region="美国"):
             t = str(_text or "").strip().lower()
             return "in stock" in t
 
-        # 抓取策略：
-        # - 美国地区：优先 Selenium（先设 ZIP 再抓详情页），确保地区设置更稳定生效
-        # - 其它地区：requests/cloudscraper 优先，Selenium 保底
+        # 抓取策略（提速版）：
+        # - 先走 requests/cloudscraper（连接复用 + 低开销）
+        # - 美国地区仅在必要时做一次轻量预热，再请求
+        # - 最后再走 Selenium 保底
         page_html = None
         hdrs = None
-        if ctx["is_us"]:
-            page_html = _fetch_page_with_selenium(
-                url, timeout=28, region=ctx["region"], ship_zip=ctx.get("ship_zip", "30005")
-            )
-            if page_html:
-                hdrs = random.choice(HEADERS_POOL).copy()
-                res["final_url"] = url
-                res["final_domain"] = _extract_domain_from_url(url)
-                res["fetch_channel"] = "selenium_us_primary"
-                zip_code_txt = str(ctx.get("ship_zip", "") or "").strip()
-                if zip_code_txt and zip_code_txt in page_html:
-                    res["zip_applied_hint"] = True
-
-        # 第1层：cloudscraper（内置 JS 挑战绕过）
-        if _CLOUDSCRAPER_OK:
-            sess = cloudscraper.create_scraper(
-                browser={"browser": "chrome", "platform": "windows", "mobile": False},
-                delay=3,
-            )
-        else:
-            sess = requests.Session()
-        # 注入地区会话（美国时尽量固定到美国站/美国配送）
-        _prepare_amazon_session(sess, domain, ctx)
+        # 第1层：cloudscraper（内置 JS 挑战绕过）；不可用则退回 requests.Session
+        with _SESSION_LOCK:
+            session_key = (domain, threading.get_ident())
+            sess = _SESSION_CACHE.get(session_key)
+            if sess is None:
+                if _CLOUDSCRAPER_OK:
+                    sess = cloudscraper.create_scraper(
+                        browser={"browser": "chrome", "platform": "windows", "mobile": False},
+                        delay=0,
+                    )
+                else:
+                    sess = requests.Session()
+                _SESSION_CACHE[session_key] = sess
+        # 先仅注入 cookie，不做额外预热请求
+        _prepare_amazon_session(sess, domain, ctx, warmup=False)
 
         if not page_html:
             # 主页面请求：cloudscraper/requests 带重试
-            r, hdrs_req = _get_with_retry(sess, url, max_attempts=3, base_timeout=15)
+            r, hdrs_req = _get_with_retry(sess, url, max_attempts=2, base_timeout=10)
             if r is not None and r.status_code in (200, 301, 302) and not _is_blocked(r.status_code, r.text):
                 final_url = str(getattr(r, "url", "") or url)
                 final_domain = _extract_domain_from_url(final_url)
@@ -1276,9 +1283,9 @@ def fetch_amazon_product(asin, region="美国"):
                     _scraper2 = cloudscraper.create_scraper(
                         browser={"browser": "firefox", "platform": "windows", "mobile": False},
                     )
-                    _prepare_amazon_session(_scraper2, domain, ctx)
+                    _prepare_amazon_session(_scraper2, domain, ctx, warmup=False)
                     _hdrs2 = random.choice(HEADERS_POOL).copy()
-                    _r2 = _scraper2.get(url, headers=_hdrs2, timeout=15)
+                    _r2 = _scraper2.get(url, headers=_hdrs2, timeout=10)
                     if not _is_blocked(_r2.status_code, _r2.text):
                         final_url2 = str(getattr(_r2, "url", "") or url)
                         final_domain2 = _extract_domain_from_url(final_url2)
@@ -1291,10 +1298,27 @@ def fetch_amazon_product(asin, region="美国"):
                 except Exception:
                     pass
 
+            # 第3层（仅美国）：做一次轻量预热后再请求，避免无条件 Selenium
+            if (not page_html) and ctx["is_us"]:
+                try:
+                    _prepare_amazon_session(sess, domain, ctx, warmup=True)
+                    r3, hdrs3 = _get_with_retry(sess, url, max_attempts=1, base_timeout=10)
+                    if r3 is not None and r3.status_code in (200, 301, 302) and not _is_blocked(r3.status_code, r3.text):
+                        final_url3 = str(getattr(r3, "url", "") or url)
+                        final_domain3 = _extract_domain_from_url(final_url3)
+                        if final_domain3.endswith("amazon.com"):
+                            page_html = r3.text
+                            hdrs = hdrs3
+                            res["final_url"] = final_url3
+                            res["final_domain"] = final_domain3
+                            res["fetch_channel"] = "requests_us_warmup"
+                except Exception:
+                    pass
+
             # 第3层：Selenium 无头浏览器（最终保底）
             if not page_html:
                 page_html = _fetch_page_with_selenium(
-                    url, timeout=25, region=ctx["region"], ship_zip=ctx.get("ship_zip", "30005")
+                    url, timeout=20, region=ctx["region"], ship_zip=ctx.get("ship_zip", "30005")
                 )
                 hdrs = random.choice(HEADERS_POOL).copy()
                 if page_html:
