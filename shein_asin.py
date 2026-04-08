@@ -232,13 +232,13 @@ def _prepare_amazon_session(session, domain, ctx, warmup=False):
             session.cookies.set(k, v, domain=cookie_domain)
         except Exception:
             pass
-    # 地区偏好：美国地区强制美元 + 英文 + 美国邮编
+    # 地区偏好：美国地区强制美元 + 英文 + CDN 地区提示
     if bool(ctx.get("is_us")):
         zip_code = str(ctx.get("ship_zip") or "30005")
         us_pref = {
             "i18n-prefs": "USD",
             "lc-main": "en_US",
-            "zipCode": zip_code,
+            "sp-cdn": "L5Z:{}".format(zip_code),
         }
         for k, v in us_pref.items():
             try:
@@ -246,20 +246,54 @@ def _prepare_amazon_session(session, domain, ctx, warmup=False):
                 session.cookies.set(k, v, domain=".amazon.com")
             except Exception:
                 pass
-        # 先访问美国首页建立会话，再尝试设置配送邮编（最佳努力，不影响主流程）
+        # 访问美国首页建立会话，再通过 POST 设置配送邮编
         if warmup and (not getattr(session, "_amz_us_warmed", False)):
             try:
                 warm_headers = random.choice(HEADERS_POOL).copy()
                 warm_headers["Referer"] = "https://www.amazon.com/"
-                session.get("https://www.amazon.com/?language=en_US", headers=warm_headers, timeout=8)
-                ajax_headers = warm_headers.copy()
-                ajax_headers["X-Requested-With"] = "XMLHttpRequest"
-                session.get(
-                    "https://www.amazon.com/gp/delivery/ajax/address-change.html"
-                    "?locationType=LOCATION_INPUT&zipCode={}&storeContext=generic&deviceType=web&pageType=Detail&actionSource=glow".format(zip_code),
-                    headers=ajax_headers,
-                    timeout=8
+                home_r = session.get(
+                    "https://www.amazon.com/?language=en_US",
+                    headers=warm_headers, timeout=10,
                 )
+                csrf_token = ""
+                if home_r and hasattr(home_r, "text") and home_r.text:
+                    for _csrf_pat in [
+                        r'CSRF_TOKEN\s*:\s*["\']([^"\']+)',
+                        r'anti-csrftoken-a2z["\s:]+([^"\']+)',
+                        r'"csrfToken"\s*:\s*"([^"]+)"',
+                    ]:
+                        _csrf_m = re.search(_csrf_pat, home_r.text)
+                        if _csrf_m:
+                            csrf_token = _csrf_m.group(1).strip()
+                            break
+                post_headers = warm_headers.copy()
+                post_headers["X-Requested-With"] = "XMLHttpRequest"
+                post_headers["Content-Type"] = (
+                    "application/x-www-form-urlencoded;charset=UTF-8"
+                )
+                if csrf_token:
+                    post_headers["anti-csrftoken-a2z"] = csrf_token
+                addr_r = session.post(
+                    "https://www.amazon.com/gp/delivery/ajax/address-change.html",
+                    data={
+                        "locationType": "LOCATION_INPUT",
+                        "zipCode": zip_code,
+                        "storeContext": "generic",
+                        "deviceType": "web",
+                        "pageType": "Gateway",
+                        "actionSource": "glow",
+                        "almBrandId": "undefined",
+                    },
+                    headers=post_headers,
+                    timeout=8,
+                )
+                if addr_r and addr_r.status_code == 200:
+                    try:
+                        _addr_json = addr_r.json()
+                        if _addr_json.get("isValidAddress") == 1:
+                            setattr(session, "_amz_zip_confirmed", True)
+                    except Exception:
+                        pass
                 setattr(session, "_amz_us_warmed", True)
             except Exception:
                 pass
@@ -1072,23 +1106,65 @@ def _fetch_page_with_selenium(url, timeout=20, region="美国", ship_zip="30005"
             if str(region or "").strip() == "美国":
                 try:
                     driver.get("https://www.amazon.com/?language=en_US")
-                    time.sleep(1.2)
-                    # 尝试通过地址弹层设置美国邮编（最佳努力）
+                    time.sleep(1.5)
                     try:
-                        trigger = driver.find_element("css selector", "#nav-global-location-popover-link")
+                        trigger = driver.find_element(
+                            "css selector", "#nav-global-location-popover-link"
+                        )
                         trigger.click()
-                        time.sleep(0.8)
-                        zip_input = driver.find_element("css selector", "#GLUXZipUpdateInput")
-                        zip_input.clear()
-                        zip_input.send_keys(str(ship_zip or "30005"))
-                        driver.find_element("css selector", "#GLUXZipUpdate").click()
-                        time.sleep(1.0)
+                        # 等待邮编输入框出现
+                        zip_input = None
+                        for _wi in range(12):
+                            try:
+                                zip_input = driver.find_element(
+                                    "css selector", "#GLUXZipUpdateInput"
+                                )
+                                if zip_input.is_displayed():
+                                    break
+                            except Exception:
+                                pass
+                            time.sleep(0.3)
+                        if zip_input:
+                            zip_input.clear()
+                            zip_input.send_keys(str(ship_zip or "30005"))
+                            time.sleep(0.3)
+                            # 点击 Apply 按钮
+                            try:
+                                _apply = driver.find_element(
+                                    "css selector",
+                                    "#GLUXZipUpdate input[type='submit']",
+                                )
+                                _apply.click()
+                            except Exception:
+                                try:
+                                    driver.find_element(
+                                        "css selector", "#GLUXZipUpdate"
+                                    ).click()
+                                except Exception:
+                                    pass
+                            time.sleep(1.5)
+                            # 点击 Done/Continue/Close 确认按钮
+                            for _dsel in [
+                                "#GLUXConfirmClose",
+                                ".a-popover-footer .a-button-primary",
+                                "[name='glowDoneButton']",
+                                ".a-popover-close",
+                            ]:
+                                try:
+                                    _done = driver.find_element("css selector", _dsel)
+                                    if _done.is_displayed():
+                                        _done.click()
+                                        time.sleep(0.5)
+                                        break
+                                except Exception:
+                                    continue
+                            time.sleep(1.0)
                     except Exception:
                         pass
                 except Exception:
                     pass
             driver.get(url)
-            time.sleep(3)  # 等待 JS 渲染
+            time.sleep(3)
             html = driver.page_source
             return html
         finally:
@@ -1294,8 +1370,8 @@ def fetch_amazon_product(asin, region="美国"):
                 else:
                     sess = requests.Session()
                 _SESSION_CACHE[session_key] = sess
-        # 先仅注入 cookie，不做额外预热请求
-        _prepare_amazon_session(sess, domain, ctx, warmup=False)
+        # 美国区首次请求即做地址预热（POST 设邮编），确保价格按 US 区域返回
+        _prepare_amazon_session(sess, domain, ctx, warmup=ctx["is_us"])
 
         if not page_html:
             # 主页面请求：cloudscraper/requests 带重试
@@ -1466,6 +1542,41 @@ def fetch_amazon_product(asin, region="美国"):
 
         price_value = _extract_price_usd(s, page_html)
         res["price"] = "${:.2f}".format(price_value) if price_value is not None else "N/A"
+
+        # 美国区价格重试：若首次未获取到价格，尝试强制预热后重新抓取
+        if price_value is None and ctx["is_us"]:
+            _retry_html = None
+            try:
+                if not getattr(sess, "_amz_us_warmed", False):
+                    _ck = "_amz_prepared_{}_us".format(
+                        str(domain or "").replace(".", "_")
+                    )
+                    setattr(sess, _ck, False)
+                    _prepare_amazon_session(sess, domain, ctx, warmup=True)
+                _rr, _ = _get_with_retry(sess, url, max_attempts=2, base_timeout=12)
+                if _rr and not _is_blocked(_rr.status_code, _rr.text):
+                    _retry_html = _rr.text
+            except Exception:
+                pass
+            if not _retry_html:
+                try:
+                    _retry_html = _fetch_page_with_selenium(
+                        url, timeout=25, region=ctx["region"],
+                        ship_zip=ctx.get("ship_zip", "30005"),
+                    )
+                except Exception:
+                    pass
+            if _retry_html:
+                _rs = BeautifulSoup(_retry_html, "html.parser")
+                _rp = _extract_price_usd(_rs, _retry_html)
+                if _rp is not None:
+                    price_value = _rp
+                    res["price"] = "${:.2f}".format(price_value)
+                    res["fetch_channel"] = (
+                        str(res.get("fetch_channel", "")) + "+price_retry"
+                    )
+                    page_html = _retry_html
+                    s = _rs
 
         rt = s.select_one("span[data-hook='rating-out-of-text']")
         if rt:
