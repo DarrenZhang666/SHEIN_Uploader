@@ -2429,6 +2429,129 @@ class SheinPublisher:
                                     self.log("[WARN] 价格批量填写重试后仍未通过校验")
                 except Exception as _bp_e:
                     self.log("[WARN] 批量填写价格失败: {}".format(str(_bp_e)[:60]))
+            # 步骤1.6: 逐个SKU处理「件数类型」：点击第一个框并选择「单品」（无则首项）
+            try:
+                self.log("[DEBUG] 逐行处理件数类型...")
+                supply_rows = []
+                for _xp in [
+                    "//div[@id='userguide_commodities_info_supply_weight_table']//tbody/tr",
+                    "//div[contains(@class,'spmp_style__supplyInfoTable')]//tbody/tr",
+                ]:
+                    try:
+                        supply_rows = [r for r in driver.find_elements(By.XPATH, _xp) if r.is_displayed()]
+                        if supply_rows:
+                            break
+                    except Exception:
+                        continue
+
+                if not supply_rows:
+                    self.log("[WARN] 未找到供应信息SKU行，跳过件数类型逐行处理")
+                else:
+                    row_done = 0
+                    for ridx, row in enumerate(supply_rows):
+                        try:
+                            qty_cell = None
+                            try:
+                                tds = row.find_elements(By.XPATH, "./td")
+                                if len(tds) >= 4:
+                                    qty_cell = tds[3]
+                            except Exception:
+                                qty_cell = None
+                            if qty_cell is None:
+                                qty_cell = row
+
+                            trigger = None
+                            for sx in [
+                                ".//div[contains(@class,'soui-select-wrapper') or contains(@class,'soui-select')][1]",
+                                ".//div[contains(@class,'so-select-inner')][1]",
+                                ".//div[contains(@class,'so-select-result')][1]",
+                            ]:
+                                try:
+                                    cand = qty_cell.find_element(By.XPATH, sx)
+                                    if cand.is_displayed():
+                                        trigger = cand
+                                        break
+                                except Exception:
+                                    continue
+                            if trigger is None:
+                                self.log("[DEBUG] 第{}行未定位到件数类型下拉".format(ridx + 1))
+                                continue
+
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", trigger)
+                            time.sleep(0.1)
+                            try:
+                                trigger.click()
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", trigger)
+                            time.sleep(0.2)
+
+                            # 优先选择“单品”；若不存在则选当前可见列表首项
+                            chosen = False
+                            preferred_opt = None
+                            fallback_opt = None
+                            try:
+                                for opt in driver.find_elements(
+                                    By.XPATH,
+                                    "//*[contains(@class,'soui-select-option') or contains(@class,'so-select-option') "
+                                    "or contains(@class,'so-option') or @role='option']"
+                                ):
+                                    try:
+                                        if not opt.is_displayed():
+                                            continue
+                                        txt = (opt.text or "").strip().replace("\n", " ")
+                                        if not txt or txt in ("请选择", "无数据", "件数类型"):
+                                            continue
+                                        if fallback_opt is None:
+                                            fallback_opt = opt
+                                        if "单品" in txt:
+                                            preferred_opt = opt
+                                            break
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+
+                            target_opt = preferred_opt if preferred_opt is not None else fallback_opt
+                            if target_opt is not None:
+                                try:
+                                    driver.execute_script("arguments[0].click();", target_opt)
+                                    chosen = True
+                                except Exception:
+                                    chosen = False
+
+                            if not chosen:
+                                # 键盘兜底：确认当前高亮项（通常为首项）
+                                try:
+                                    trigger.send_keys(Keys.ARROW_DOWN)
+                                    time.sleep(0.06)
+                                    trigger.send_keys(Keys.ENTER)
+                                    chosen = True
+                                except Exception:
+                                    try:
+                                        ae = driver.switch_to.active_element
+                                        ae.send_keys(Keys.ARROW_DOWN)
+                                        time.sleep(0.06)
+                                        ae.send_keys(Keys.ENTER)
+                                        chosen = True
+                                    except Exception:
+                                        chosen = False
+
+                            if chosen:
+                                row_done += 1
+                                self.log("[OK] 第{}个SKU件数类型已处理".format(ridx + 1))
+                                try:
+                                    driver.execute_script("document.body.click();")
+                                except Exception:
+                                    pass
+                                time.sleep(0.1)
+                            else:
+                                self.log("[WARN] 第{}个SKU件数类型选择失败".format(ridx + 1))
+                        except Exception:
+                            continue
+
+                    self.log("[OK] 件数类型逐行处理完成，共处理 {} / {} 行".format(row_done, len(supply_rows)))
+            except Exception as _qty_row_e:
+                self.log("[WARN] 件数类型逐行处理失败: {}".format(str(_qty_row_e)[:80]))
             # 步骤2.5: 通过批量填写区域填写含包装重量(g)
             try:
                 self.log("[DEBUG] 批量填写含包装重量...")
