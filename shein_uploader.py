@@ -3449,7 +3449,7 @@ class SheinPublisher:
             # 5) 第二个框：主规格値—循环填写所有 SKU 规格値
             _SHEIN_UPLOAD_COLOR_TOKENS = [
                 "black", "white", "red", "blue", "green", "yellow", "pink", "purple",
-                "brown", "grey", "orange", "khaki", "beige", "navy", "multicolor",
+                "brown", "grey", "orange", "khaki", "beige", "navy",
                 "silver", "gold", "clear",
                 "burgundy", "coffee", "apricot", "mint", "camel"
             ]
@@ -3642,7 +3642,20 @@ class SheinPublisher:
             # Build a mapping: spec_val order -> sku_list index, so image upload stays aligned
             # all_spec_values is already in sku_list order (same as GUI display)
             val_idx = 0
+            # 防止同一规格值反复失败导致不断新增输入行（超过SKU数量）
+            per_value_fail_counts = {}
+            max_fail_retry_per_value = 2
+            max_total_loop_guard = max(10, len(all_spec_values) * 3)
+            total_loop_count = 0
             while val_idx < len(all_spec_values):
+                total_loop_count += 1
+                if total_loop_count > max_total_loop_guard:
+                    self.log("[WARN] 主规格循环保护触发：已超过最大尝试次数({})，停止填写".format(
+                        max_total_loop_guard))
+                    break
+                if sku_limit is not None and len(filled_vals) >= sku_limit:
+                    self.log("[WARN] 主规格已填数量达到SKU上限({})，停止继续写入".format(sku_limit))
+                    break
                 spec_val = all_spec_values[val_idx]
                 self.log("[DEBUG] 填写第 {} 个规格値: {}".format(val_idx + 1, spec_val))
                 # Find the next NEW empty 'please select or customize' input box
@@ -3720,8 +3733,15 @@ class SheinPublisher:
                     except Exception:
                         pass
                     time.sleep(0.5)
-                    # 不能调用 _pick_first 去覆盖当前框（可能 hint_modal 已处理过）
-                    self.log("[WARN] 规格値 '{}' 输入匹配失败，尝试下一个输入框重试".format(spec_val))
+                    # 不能无限重试同一值，否则会不断新增行导致主规格数量异常膨胀
+                    fail_cnt = int(per_value_fail_counts.get(val_idx, 0)) + 1
+                    per_value_fail_counts[val_idx] = fail_cnt
+                    if fail_cnt >= max_fail_retry_per_value:
+                        self.log("[WARN] 规格値 '{}' 连续失败{}次，跳过该值并继续下一个".format(
+                            spec_val, fail_cnt))
+                        val_idx += 1
+                    else:
+                        self.log("[WARN] 规格値 '{}' 输入匹配失败，第{}次重试".format(spec_val, fail_cnt))
             if filled_vals:
                 self._last_main_spec_filled_values = list(filled_vals)
                 self._main_spec_filled_sku_indices = list(range(len(filled_vals)))
