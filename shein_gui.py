@@ -4,6 +4,7 @@
 from shein_main import *
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter.font as tkfont
+import subprocess
 from shein_developer_mode import DevModeToggle, is_dev_mode
 from shein_mysql import verify_shein_account_detail
 from shein_checkprice import (
@@ -4538,6 +4539,40 @@ return false;
         if reason:
             self._pub_log("[STOP] 已关闭全部浏览器/driver: {}".format(reason))
   
+    def _kill_edge_processes_on_exit(self):
+        """Windows 兜底：强制清理所有 Edge 与 EdgeDriver 进程。"""
+        if os.name != "nt":
+            return
+        targets = ["msedgedriver.exe", "msedge.exe"]
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for proc_name in targets:
+            try:
+                cp = subprocess.run(
+                    ["taskkill", "/F", "/T", "/IM", proc_name],
+                    capture_output=True,
+                    text=True,
+                    creationflags=creation_flags
+                )
+                out = (cp.stdout or cp.stderr or "").strip()
+                if cp.returncode == 0:
+                    try:
+                        self._pub_log("[STOP] 已强制结束进程: {}".format(proc_name))
+                    except Exception:
+                        pass
+                else:
+                    # 128/1 常见于“未找到进程”，属于可接受结果
+                    if out and ("未找到" not in out) and ("not found" not in out.lower()):
+                        try:
+                            self._pub_log("[WARN] 清理进程 {} 返回码{}: {}".format(
+                                proc_name, cp.returncode, out[:160]))
+                        except Exception:
+                            pass
+            except Exception as e:
+                try:
+                    self._pub_log("[WARN] 清理进程 {} 异常: {}".format(proc_name, str(e)[:120]))
+                except Exception:
+                    pass
+
 
     def _publish_worker(self,asins,max_workers=5,session_id=None):
         success_list = []
@@ -4986,6 +5021,10 @@ return false;
         except Exception:
             pass
         try:
+            self._kill_edge_processes_on_exit()
+        except Exception:
+            pass
+        try:
             self.destroy()
         except Exception:
             pass
@@ -5004,6 +5043,14 @@ return false;
         if self._app_closing:
             return
         self._app_closing = True
+        try:
+            self._shutdown_all_browsers(reason="根窗口销毁")
+        except Exception:
+            pass
+        try:
+            self._kill_edge_processes_on_exit()
+        except Exception:
+            pass
         def _force_exit():
             try:
                 time.sleep(0.2)
