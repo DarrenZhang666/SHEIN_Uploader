@@ -1297,7 +1297,7 @@ class SheinApp(tk.Tk):
         except Exception:
             max_workers = 5
         # 与“抓取选中商品(ASIN)”保持同一线程策略
-        max_workers = max(1, min(20, max_workers))
+        max_workers = max(1, min(6, max_workers))
         self.fetch_workers.set(str(max_workers))
         self._pub_log("议价流程：亚马逊价格补充使用 {} 线程".format(max_workers))
 
@@ -3926,7 +3926,7 @@ return false;
             max_workers = int(self.fetch_workers.get())
         except Exception:
             max_workers = 5
-        max_workers = max(1, min(20, max_workers))
+        max_workers = max(1, min(6, max_workers))
         self.fetch_workers.set(str(max_workers))
         self.progress.start(12)
         # 直接开始抓取，自动跳过已缓存的商品
@@ -3965,56 +3965,70 @@ return false;
                 return asin, info, True
 
         done = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_fetch_one, asin) for asin in asins]
-            for fut in as_completed(futures):
-                try:
-                    asin, info, is_fail = fut.result()
-                    self.product_cache[asin] = info
-                    done += 1
+        batch_size = max(1, min(max_workers * 3, 15))
+        for batch_start in range(0, total, batch_size):
+            batch_asins = asins[batch_start: batch_start + batch_size]
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(_fetch_one, asin) for asin in batch_asins]
+                for fut in as_completed(futures):
                     try:
-                        self.after(0, lambda d=done, t=total, a=asin: self.status_lbl.config(text="抓取完成 {}/{}：{}".format(d, t, a)))
-                    except RuntimeError:
+                        asin, info, is_fail = fut.result()
+                        self.product_cache[asin] = info
+                        done += 1
+                        try:
+                            self.after(0, lambda d=done, t=total, a=asin: self.status_lbl.config(text="抓取完成 {}/{}：{}".format(d, t, a)))
+                        except RuntimeError:
+                            pass
+                        if info and info.get("stock_low"):
+                            try:
+                                self.after(0, lambda a=asin: self._set_asin_status(a, "stock_low"))
+                            except RuntimeError:
+                                pass
+                        elif info and info.get("sku_too_many"):
+                            try:
+                                self.after(0, lambda a=asin: self._set_asin_status(a, "sku_too_many"))
+                            except RuntimeError:
+                                pass
+                        elif info and info.get("no_suitable_sku"):
+                            try:
+                                self.after(0, lambda a=asin: self._set_asin_status(a, "no_suitable_sku"))
+                            except RuntimeError:
+                                pass
+                        elif is_fail:
+                            try:
+                                self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_fail"))
+                            except RuntimeError:
+                                pass
+                        elif not self._has_publishable_price(info):
+                            no_price_asins.append(asin)
+                            try:
+                                self.after(0, lambda a=asin: self._set_asin_status(a, "no_price"))
+                                self.after(0, lambda: self.status_lbl.config(text="No price， stop"))
+                            except RuntimeError:
+                                pass
+                        else:
+                            try:
+                                self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_success"))
+                            except RuntimeError:
+                                pass
+                        if self.current_asin == asin:
+                            try:
+                                self.after(0, self._show_current_asin_now)
+                            except RuntimeError:
+                                pass
+                    except Exception:
                         pass
-                    if info and info.get("stock_low"):
-                        try:
-                            self.after(0, lambda a=asin: self._set_asin_status(a, "stock_low"))
-                        except RuntimeError:
-                            pass
-                    elif info and info.get("sku_too_many"):
-                        try:
-                            self.after(0, lambda a=asin: self._set_asin_status(a, "sku_too_many"))
-                        except RuntimeError:
-                            pass
-                    elif info and info.get("no_suitable_sku"):
-                        try:
-                            self.after(0, lambda a=asin: self._set_asin_status(a, "no_suitable_sku"))
-                        except RuntimeError:
-                            pass
-                    elif is_fail:
-                        try:
-                            self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_fail"))
-                        except RuntimeError:
-                            pass
-                    elif not self._has_publishable_price(info):
-                        no_price_asins.append(asin)
-                        try:
-                            self.after(0, lambda a=asin: self._set_asin_status(a, "no_price"))
-                            self.after(0, lambda: self.status_lbl.config(text="No price， stop"))
-                        except RuntimeError:
-                            pass
-                    else:
-                        try:
-                            self.after(0, lambda a=asin: self._set_asin_status(a, "fetch_success"))
-                        except RuntimeError:
-                            pass
-                    if self.current_asin == asin:
-                        try:
-                            self.after(0, self._show_current_asin_now)
-                        except RuntimeError:
-                            pass
-                except Exception:
+            # 批次间冷却，降低后半段 ASIN 被连续风控的概率
+            remaining = total - (batch_start + len(batch_asins))
+            if remaining > 0:
+                cool_down = 3.0 if remaining > 18 else 2.0
+                try:
+                    self.after(0, lambda d=done, t=total, s=cool_down: self.status_lbl.config(
+                        text="抓取完成 {}/{}，冷却 {:.1f}s 后继续".format(d, t, s)
+                    ))
+                except RuntimeError:
                     pass
+                time.sleep(cool_down)
         try:
             self.after(0, lambda ac=already_cached, np=list(no_price_asins): self._done(ac, np))
         except RuntimeError:

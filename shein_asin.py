@@ -150,6 +150,79 @@ PROXY_POOL = []
 
 _SESSION_LOCK = threading.Lock()
 _SESSION_CACHE = {}
+_REQUEST_PACE_LOCK = threading.Lock()
+_REQUEST_PACE_STATE = {
+    "next_ts": 0.0,          # 下一次允许发起请求的时间点
+    "penalty_level": 0,      # 反爬压力级别，越高越慢
+    "blocked_streak": 0,     # 连续命中反爬次数
+    "last_block_ts": 0.0,    # 最近一次命中反爬时间
+}
+
+
+def _wait_request_slot(base_gap=0.22, jitter=(0.08, 0.35), extra_delay=0.0):
+    """
+    全局请求节流：跨线程串行化请求起点，避免突发流量。
+    base_gap 为基础间隔，jitter 为随机抖动，extra_delay 用于临时降速。
+    """
+    wait_s = 0.0
+    with _REQUEST_PACE_LOCK:
+        now = time.time()
+        gap = float(base_gap) + random.uniform(float(jitter[0]), float(jitter[1])) + float(extra_delay or 0.0)
+        # 命中反爬后，提高请求间隔（上限约 2.8s，避免完全停滞）
+        penalty = min(2.0, _REQUEST_PACE_STATE["penalty_level"] * 0.25)
+        target_gap = min(2.8, gap + penalty)
+        available_at = max(now, _REQUEST_PACE_STATE["next_ts"])
+        wait_s = max(0.0, available_at - now)
+        _REQUEST_PACE_STATE["next_ts"] = available_at + target_gap
+    if wait_s > 0:
+        time.sleep(wait_s)
+
+
+def _record_request_feedback(blocked=False):
+    """记录反爬反馈，用于动态升降速。"""
+    with _REQUEST_PACE_LOCK:
+        if blocked:
+            _REQUEST_PACE_STATE["blocked_streak"] = min(
+                10, _REQUEST_PACE_STATE["blocked_streak"] + 1
+            )
+            _REQUEST_PACE_STATE["penalty_level"] = min(
+                10, _REQUEST_PACE_STATE["penalty_level"] + 1
+            )
+            _REQUEST_PACE_STATE["last_block_ts"] = time.time()
+        else:
+            _REQUEST_PACE_STATE["blocked_streak"] = 0
+            # 成功请求逐步退火，避免长时间保持高惩罚
+            if _REQUEST_PACE_STATE["penalty_level"] > 0:
+                _REQUEST_PACE_STATE["penalty_level"] -= 1
+
+
+def _recommend_worker_count(max_workers, task_count):
+    """
+    根据当前反爬压力动态收缩并发，降低中后段封禁概率。
+    """
+    workers = max(1, min(int(max_workers or 1), int(task_count or 1)))
+    with _REQUEST_PACE_LOCK:
+        penalty = int(_REQUEST_PACE_STATE.get("penalty_level", 0))
+        streak = int(_REQUEST_PACE_STATE.get("blocked_streak", 0))
+    if penalty >= 6 or streak >= 3:
+        workers = min(workers, 2)
+    elif penalty >= 3:
+        workers = min(workers, 3)
+    return max(1, workers)
+
+
+def _should_fetch_sku_details():
+    """
+    高风控压力时降级：跳过 SKU 明细抓取，优先保证主信息抓取成功率。
+    """
+    with _REQUEST_PACE_LOCK:
+        penalty = int(_REQUEST_PACE_STATE.get("penalty_level", 0))
+        streak = int(_REQUEST_PACE_STATE.get("blocked_streak", 0))
+    if streak >= 2 or penalty >= 5:
+        return False
+    if penalty >= 3 and random.random() < 0.6:
+        return False
+    return True
 
 
 def _get_proxy():
@@ -328,20 +401,25 @@ def _get_with_retry(session, url, max_attempts=3, base_timeout=12):
     shuffled = random.sample(HEADERS_POOL, len(HEADERS_POOL))
     attempts = min(max_attempts, len(shuffled))
     for attempt in range(attempts):
+        _wait_request_slot(base_gap=0.24, jitter=(0.10, 0.32))
         hdrs = shuffled[attempt].copy()
         hdrs["Referer"] = "https://{}/".format(url.split("/")[2])
         proxies = _get_proxy()
         if attempt > 0:
-            # 短暂退避：避免超长等待
-            wait = min(0.6 * (2 ** (attempt - 1)) + random.uniform(0.1, 0.5), 2.5)
+            # 失败退避：按尝试次数指数增长，命中反爬后可自动进一步放大
+            wait = min(0.7 * (2 ** (attempt - 1)) + random.uniform(0.2, 0.8), 4.8)
             time.sleep(wait)
         try:
             r = session.get(url, headers=hdrs, proxies=proxies, timeout=(5, base_timeout))
-            if not _is_blocked(r.status_code, r.text):
+            blocked = _is_blocked(r.status_code, r.text)
+            _record_request_feedback(blocked=blocked)
+            if not blocked:
                 return r, hdrs
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            _record_request_feedback(blocked=True)
             continue
         except Exception:
+            _record_request_feedback(blocked=True)
             continue
     return None, None
 
@@ -1180,23 +1258,11 @@ def _fetch_sku_images(session, domain, sku_asin, headers, max_count=5):
     """拉取单个 SKU 页面的主图，失败时返回空列表。"""
     try:
         sku_url = _build_amazon_dp_url(domain, sku_asin, is_us=("amazon.com" in str(domain).lower()))
-        # 优先用传入的 session（可能是 cloudscraper），直接单次请求
-        try:
-            _hdrs = random.choice(HEADERS_POOL).copy()
-            _hdrs["Referer"] = "https://{}/".format(domain)
-            r = session.get(sku_url, headers=_hdrs, timeout=10)
-            if r and not _is_blocked(r.status_code, r.text):
-                sku_soup = BeautifulSoup(r.text, "html.parser")
-                imgs = _collect_main_images_from_soup(sku_soup, max_count=max_count)
-                if imgs:
-                    return imgs
-        except Exception:
-            pass
-        # 回退：用 _get_with_retry
-        r2, _ = _get_with_retry(session, sku_url, max_attempts=1, base_timeout=8)
-        if r2 is None:
+        # 只发起一次请求，避免 SKU 链路请求量过大触发风控
+        r, _ = _get_with_retry(session, sku_url, max_attempts=1, base_timeout=8)
+        if r is None:
             return []
-        sku_soup = BeautifulSoup(r2.text, "html.parser")
+        sku_soup = BeautifulSoup(r.text, "html.parser")
         return _collect_main_images_from_soup(sku_soup, max_count=max_count)
     except Exception:
         return []
@@ -1207,7 +1273,7 @@ def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_wor
     results = {}
     if not sku_asins:
         return results
-    worker_count = max(1, min(max_workers, len(sku_asins)))
+    worker_count = _recommend_worker_count(max_workers, len(sku_asins))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_to_asin = {
             executor.submit(_fetch_sku_images, session, domain, asin, hdrs, max_count): asin
@@ -1732,6 +1798,22 @@ def fetch_amazon_product(asin, region="美国"):
             other_specs = _extract_non_color_specs(s)
         res["other_specs"] = other_specs
 
+        # 高风控压力下直接降级，减少后续请求爆发
+        if not _should_fetch_sku_details():
+            default_images = _normalize_image_list(fallback_images[:5])
+            res["sku_fetch_degraded"] = True
+            if len(default_images) >= 2:
+                res["sku_list"] = [{
+                    "sku_asin": asin,
+                    "sku_attributes": "默认规格",
+                    "dimension_basis": [],
+                    "images": default_images
+                }]
+            else:
+                res["sku_list"] = []
+                res["no_suitable_sku"] = True
+            return res
+
         # SKU 过多时跳过 SKU 明细抓取，仅保留主信息
         max_sku_fetch = 10
         def _mark_sku_too_many(count):
@@ -1751,7 +1833,7 @@ def fetch_amazon_product(asin, region="美国"):
             # 路径 A：HTML 解析到 color ASIN 列表，直接使用
             sku_asin_list = [a for a, _ in _color_asins_from_html if a and a != asin]
             sku_image_cache = _fetch_all_sku_images_concurrently(
-                sess, domain, sku_asin_list, hdrs, max_workers=4, max_count=image_limit
+                sess, domain, sku_asin_list, hdrs, max_workers=2, max_count=image_limit
             )
             sku_image_cache[asin] = fallback_images[:image_limit]
 
@@ -1839,7 +1921,7 @@ def fetch_amazon_product(asin, region="美国"):
             sku_asin_list = [sku_asin for _, sku_asin, _ in candidate_entries if sku_asin != asin]
 
             sku_image_cache = _fetch_all_sku_images_concurrently(
-                sess, domain, sku_asin_list, hdrs, max_workers=4, max_count=image_limit
+                sess, domain, sku_asin_list, hdrs, max_workers=2, max_count=image_limit
             )
             sku_image_cache[asin] = fallback_images[:image_limit]
 
