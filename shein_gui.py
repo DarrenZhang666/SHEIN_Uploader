@@ -1772,14 +1772,18 @@ class SheinApp(tk.Tk):
         if state == "running" and cur.get("state") == "running":
             pct = max(int(cur.get("pct", 0)), pct)
         # 进度未变化时不触发控件重绘，降低高频日志带来的 UI 抖动/卡顿。
-        if (
+        unchanged = (
             int(cur.get("pct", 0)) == int(pct)
             and str(cur.get("text", "")) == str(text)
             and str(cur.get("state", "")) == str(state)
-        ):
-            return
+        )
+        render_key = (int(pct), str(text), str(state))
         self.asin_progress[asin] = {"pct": pct, "text": text, "state": state}
         if not bar or not fill_id or not txt_lbl:
+            return
+        # 仅当当前行已经按同一内容渲染过，才跳过重绘。
+        # 这样可避免虚拟列表中新建行因“值未变化”而不刷新颜色/文案。
+        if unchanged and ws.get("prog_drawn") == render_key:
             return
         color_map = {
             "idle": "#64748b",
@@ -1798,6 +1802,7 @@ class SheinApp(tk.Tk):
             fg=fill_color if state in ("success", "fail") else TEXT_SUB,
             font=txt_font
         )
+        ws["prog_drawn"] = render_key
 
     def _on_global_mousewheel(self, event):
         """仅在鼠标位于 ASIN 列表区域时滚动，并合并滚轮事件降低卡顿。"""
