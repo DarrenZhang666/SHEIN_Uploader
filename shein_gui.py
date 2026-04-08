@@ -60,6 +60,13 @@ class SheinApp(tk.Tk):
         self._preview_inflight = set()
         self._sku_render_after_id = None
         self._detail_switch_after_id = None
+        self._asin_wheel_after_id = None
+        self._asin_wheel_accum = 0
+        self._asin_virtual_after_id = None
+        self._asin_row_height = 34
+        self._asin_row_buffer = 10
+        self._asin_visible_range = (-1, -1)
+        self._asin_index_map = {}
         self._active_publish_asin = None
         self._verified_accounts: set[str] = set()
         self._account_auth_periods = {}  # account -> (start_raw, end_raw)
@@ -1562,14 +1569,14 @@ class SheinApp(tk.Tk):
         tk.Frame(f,bg=BORDER,height=1).pack(fill="x",padx=8,pady=(0,4))
         c=tk.Frame(f,bg=BG_PANEL); c.pack(fill="both",expand=True,padx=4,pady=4)
         cv=tk.Canvas(c,bg=BG_PANEL,highlightthickness=0,bd=0)
-        sb=ttk.Scrollbar(c,orient="vertical",command=cv.yview)
+        sb=ttk.Scrollbar(c,orient="vertical",command=self._on_asin_scrollbar)
         cv.configure(yscrollcommand=sb.set)
         sb.pack(side="right",fill="y"); cv.pack(side="left",fill="both",expand=True)
         self.lf=tk.Frame(cv,bg=BG_PANEL)
         self._lw=cv.create_window((0,0),window=self.lf,anchor="nw")
-        self.lf.bind("<Configure>",lambda e:cv.configure(scrollregion=cv.bbox("all")))
-        cv.bind("<Configure>",lambda e:cv.itemconfig(self._lw,width=e.width))
-        cv.bind_all("<MouseWheel>",lambda e:cv.yview_scroll(int(-1*(e.delta/120)),"units"))
+        self.lf.bind("<Configure>", self._on_asin_list_inner_configure)
+        cv.bind("<Configure>", self._on_asin_list_canvas_configure)
+        cv.bind_all("<MouseWheel>", self._on_global_mousewheel, add="+")
         self.acv=cv
         self.after(0, self._sync_left_resize_handle_height)
 
@@ -1709,8 +1716,6 @@ class SheinApp(tk.Tk):
         """更新ASIN状态并同步圆点颜色。"""
         self.asin_status[asin] = status
         dot = self.asin_dots.get(asin)
-        if not dot:
-            return
         color_map = {
             "imported": "#ffffff",
             "fetching": YELLOW,
@@ -1726,11 +1731,12 @@ class SheinApp(tk.Tk):
             "fail": RED,
             "pending": "#ffffff",
         }
-        dot.config(fg=color_map.get(status, "#ffffff"))
+        if dot:
+            dot.config(fg=color_map.get(status, "#ffffff"))
         hint = getattr(self, "asin_hints", {}).get(asin)
         if hint:
             # 警告文案统一显示在进度文案区域，避免与 hint 文案叠加。
-            hint.config(text="", fg=dot.cget("bg"))
+            hint.config(text="", fg=dot.cget("bg") if dot else hint.cget("bg"))
         if status in ("imported", "pending", "fetch_success"):
             self._set_asin_progress(asin, 0, "未上品", state="idle")
         elif status == "publishing":
@@ -1756,8 +1762,6 @@ class SheinApp(tk.Tk):
         bar = ws.get("prog_canvas")
         fill_id = ws.get("prog_fill")
         txt_lbl = ws.get("prog_text")
-        if not bar or not fill_id or not txt_lbl:
-            return
         cur = self.asin_progress.get(asin, {"pct": 0, "text": "未上品", "state": "idle"})
         if pct is None:
             pct = cur.get("pct", 0)
@@ -1767,6 +1771,16 @@ class SheinApp(tk.Tk):
         # 运行中阶段不允许回退，避免并发日志时序导致进度条倒退。
         if state == "running" and cur.get("state") == "running":
             pct = max(int(cur.get("pct", 0)), pct)
+        # 进度未变化时不触发控件重绘，降低高频日志带来的 UI 抖动/卡顿。
+        if (
+            int(cur.get("pct", 0)) == int(pct)
+            and str(cur.get("text", "")) == str(text)
+            and str(cur.get("state", "")) == str(state)
+        ):
+            return
+        self.asin_progress[asin] = {"pct": pct, "text": text, "state": state}
+        if not bar or not fill_id or not txt_lbl:
+            return
         color_map = {
             "idle": "#64748b",
             "running": "#3b82f6",
@@ -1784,7 +1798,88 @@ class SheinApp(tk.Tk):
             fg=fill_color if state in ("success", "fail") else TEXT_SUB,
             font=txt_font
         )
-        self.asin_progress[asin] = {"pct": pct, "text": text, "state": state}
+
+    def _on_global_mousewheel(self, event):
+        """仅在鼠标位于 ASIN 列表区域时滚动，并合并滚轮事件降低卡顿。"""
+        cv = getattr(self, "acv", None)
+        if cv is None:
+            return
+        try:
+            x, y = int(event.x_root), int(event.y_root)
+            left = cv.winfo_rootx()
+            top = cv.winfo_rooty()
+            right = left + cv.winfo_width()
+            bottom = top + cv.winfo_height()
+            if not (left <= x <= right and top <= y <= bottom):
+                return
+        except Exception:
+            return
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return
+        self._asin_wheel_accum += delta
+        if self._asin_wheel_after_id:
+            return
+        self._asin_wheel_after_id = self.after(12, self._flush_asin_mousewheel)
+
+    def _flush_asin_mousewheel(self):
+        self._asin_wheel_after_id = None
+        cv = getattr(self, "acv", None)
+        if cv is None:
+            self._asin_wheel_accum = 0
+            return
+        accum = int(getattr(self, "_asin_wheel_accum", 0))
+        if accum == 0:
+            return
+        steps = int(-accum / 120)
+        if steps == 0:
+            steps = -1 if accum > 0 else 1
+        try:
+            cv.yview_scroll(steps, "units")
+        except Exception:
+            pass
+        self._asin_wheel_accum = 0
+        self._schedule_refresh_visible_asin_rows()
+
+    def _on_asin_list_inner_configure(self, _event):
+        cv = getattr(self, "acv", None)
+        if cv is None:
+            return
+        try:
+            bbox = cv.bbox("all")
+            if bbox:
+                cv.configure(scrollregion=bbox)
+        except Exception:
+            pass
+
+    def _on_asin_list_canvas_configure(self, event):
+        cv = getattr(self, "acv", None)
+        if cv is None:
+            return
+        try:
+            cv.itemconfig(self._lw, width=event.width)
+        except Exception:
+            pass
+        self._schedule_refresh_visible_asin_rows()
+
+    def _on_asin_scrollbar(self, *args):
+        cv = getattr(self, "acv", None)
+        if cv is None:
+            return
+        try:
+            cv.yview(*args)
+        except Exception:
+            return
+        self._schedule_refresh_visible_asin_rows()
+
+    def _schedule_refresh_visible_asin_rows(self):
+        if self._asin_virtual_after_id:
+            return
+        self._asin_virtual_after_id = self.after(12, self._flush_refresh_visible_asin_rows)
+
+    def _flush_refresh_visible_asin_rows(self):
+        self._asin_virtual_after_id = None
+        self._refresh_visible_asin_rows(force=False)
 
     def _update_publish_progress_by_msg(self, asin, msg):
         m = str(msg or "")
@@ -2053,52 +2148,114 @@ class SheinApp(tk.Tk):
         for w in self.lf.winfo_children(): w.destroy()
         self.asin_hints = {}
         self.asin_row_widgets = {}
-        for idx,asin in enumerate(self.asin_list):
+        self._asin_visible_range = (-1, -1)
+        self._asin_index_map = {asin: idx for idx, asin in enumerate(self.asin_list)}
+        for asin in self.asin_list:
             var=tk.BooleanVar(value=False)
             self.asin_vars[asin]=var
             self.asin_status[asin]="imported"
-            bg=BG_CARD if idx%2==0 else BG_PANEL
-            row=tk.Frame(self.lf,bg=bg,cursor="hand2")
-            row.pack(fill="x",pady=1)
-            cb=tk.Checkbutton(row,variable=var,bg=bg,fg="#ffffff",selectcolor=BG_DARK,
-                activebackground=bg,activeforeground="#ffffff",command=self._upd_cnt)
-            cb.pack(side="left",padx=(8,2))
-            dot=tk.Label(row,text="\u25cf",font=("Segoe UI",8),fg="#ffffff",bg=bg)
-            dot.pack(side="left"); self.asin_dots[asin]=dot
-            lbl=tk.Label(row,text=asin,font=("Consolas",10),fg=TEXT_MAIN,bg=bg,anchor="w",cursor="hand2")
-            lbl.pack(side="left",padx=4,pady=5)
-            hint=tk.Label(row,text="",font=("Segoe UI",8),fg=bg,bg=bg,anchor="w")
-            hint.pack(side="left",padx=(0,4))
-            prog_wrap = tk.Frame(row, bg=bg)
-            prog_wrap.pack(side="right", padx=(4,8), pady=2)
-            prog_text = tk.Label(prog_wrap, text="未上品", font=("Segoe UI",8), fg=TEXT_SUB, bg=bg, anchor="e")
-            prog_text.pack(fill="x")
-            prog_canvas = tk.Canvas(prog_wrap, width=110, height=6, bg=bg, highlightthickness=0, bd=0)
-            prog_canvas.pack(fill="x")
-            prog_canvas.create_rectangle(0, 0, 110, 6, fill="#334155", outline="#334155")
-            prog_fill = prog_canvas.create_rectangle(0, 0, 0, 6, fill="#64748b", outline="#64748b")
-            self.asin_hints[asin]=hint
-            self.asin_row_widgets[asin] = {
-                "idx": idx,
-                "row": row,
-                "cb": cb,
-                "lbl": lbl,
-                "dot": dot,
-                "hint": hint,
-                "prog_wrap": prog_wrap,
-                "prog_text": prog_text,
-                "prog_canvas": prog_canvas,
-                "prog_fill": prog_fill,
-            }
-            lbl.bind("<Button-1>",lambda e,a=asin:self._click(a))
-            row.bind("<Button-1>",lambda e,a=asin:self._click(a))
-            lbl.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
-            row.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
-            dot.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
             self._set_asin_progress(asin, 0, "未上品", state="idle")
+        total_h = max(1, len(self.asin_list) * self._asin_row_height)
+        self.lf.configure(height=total_h)
+        self.lf.pack_propagate(False)
+        self.acv.configure(scrollregion=(0, 0, max(1, self.acv.winfo_width()), total_h))
+        self._refresh_visible_asin_rows(force=True)
         self.cnt_lbl.config(text="({})".format(len(self.asin_list)))
         self._upd_cnt(); self.select_all_var.set(False)
         self._update_asin_row_styles()
+
+    def _create_asin_row_widget(self, asin, idx):
+        bg=BG_CARD if idx%2==0 else BG_PANEL
+        row=tk.Frame(self.lf,bg=bg,cursor="hand2")
+        row.place(x=0, y=idx * self._asin_row_height, relwidth=1.0, height=self._asin_row_height - 2)
+        var = self.asin_vars.get(asin)
+        cb=tk.Checkbutton(row,variable=var,bg=bg,fg="#ffffff",selectcolor=BG_DARK,
+            activebackground=bg,activeforeground="#ffffff",command=self._upd_cnt)
+        cb.pack(side="left",padx=(8,2))
+        dot=tk.Label(row,text="\u25cf",font=("Segoe UI",8),fg="#ffffff",bg=bg)
+        dot.pack(side="left"); self.asin_dots[asin]=dot
+        lbl=tk.Label(row,text=asin,font=("Consolas",10),fg=TEXT_MAIN,bg=bg,anchor="w",cursor="hand2")
+        lbl.pack(side="left",padx=4,pady=5)
+        hint=tk.Label(row,text="",font=("Segoe UI",8),fg=bg,bg=bg,anchor="w")
+        hint.pack(side="left",padx=(0,4))
+        prog_wrap = tk.Frame(row, bg=bg)
+        prog_wrap.pack(side="right", padx=(4,8), pady=2)
+        prog_text = tk.Label(prog_wrap, text="未上品", font=("Segoe UI",8), fg=TEXT_SUB, bg=bg, anchor="e")
+        prog_text.pack(fill="x")
+        prog_canvas = tk.Canvas(prog_wrap, width=110, height=6, bg=bg, highlightthickness=0, bd=0)
+        prog_canvas.pack(fill="x")
+        prog_canvas.create_rectangle(0, 0, 110, 6, fill="#334155", outline="#334155")
+        prog_fill = prog_canvas.create_rectangle(0, 0, 0, 6, fill="#64748b", outline="#64748b")
+        self.asin_hints[asin]=hint
+        self.asin_row_widgets[asin] = {
+            "idx": idx,
+            "row": row,
+            "cb": cb,
+            "lbl": lbl,
+            "dot": dot,
+            "hint": hint,
+            "prog_wrap": prog_wrap,
+            "prog_text": prog_text,
+            "prog_canvas": prog_canvas,
+            "prog_fill": prog_fill,
+        }
+        lbl.bind("<Button-1>",lambda e,a=asin:self._click(a))
+        row.bind("<Button-1>",lambda e,a=asin:self._click(a))
+        lbl.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
+        row.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
+        dot.bind("<Double-Button-1>",lambda e,a=asin:self._dbl_select_asin(a))
+        self._apply_asin_row_style(asin)
+        st = self.asin_status.get(asin, "imported")
+        if st:
+            self._set_asin_status(asin, st)
+        pg = self.asin_progress.get(asin)
+        if isinstance(pg, dict):
+            self._set_asin_progress(asin, pg.get("pct", 0), pg.get("text", "未上品"), pg.get("state", "idle"))
+        else:
+            self._set_asin_progress(asin, 0, "未上品", state="idle")
+
+    def _destroy_asin_row_widget(self, asin):
+        ws = self.asin_row_widgets.pop(asin, None) or {}
+        row = ws.get("row")
+        if row:
+            try:
+                row.destroy()
+            except Exception:
+                pass
+        self.asin_dots.pop(asin, None)
+        self.asin_hints.pop(asin, None)
+
+    def _refresh_visible_asin_rows(self, force=False):
+        cv = getattr(self, "acv", None)
+        if cv is None:
+            return
+        total = len(self.asin_list)
+        if total <= 0:
+            for asin in list(self.asin_row_widgets.keys()):
+                self._destroy_asin_row_widget(asin)
+            self._asin_visible_range = (-1, -1)
+            return
+        try:
+            top = float(cv.canvasy(0))
+            height = max(1, int(cv.winfo_height()))
+        except Exception:
+            top = 0.0
+            height = 1
+        bottom = top + height
+        row_h = max(1, int(self._asin_row_height))
+        start = max(0, int(top // row_h) - int(self._asin_row_buffer))
+        end = min(total, int(bottom // row_h) + int(self._asin_row_buffer) + 1)
+        if (not force) and (start, end) == self._asin_visible_range:
+            return
+        self._asin_visible_range = (start, end)
+        visible_asins = set(self.asin_list[start:end])
+        for asin in list(self.asin_row_widgets.keys()):
+            if asin not in visible_asins:
+                self._destroy_asin_row_widget(asin)
+        for idx in range(start, end):
+            asin = self.asin_list[idx]
+            if asin not in self.asin_row_widgets:
+                self._create_asin_row_widget(asin, idx)
 
     def _apply_asin_row_style(self, asin):
         """仅刷新单个 ASIN 行样式，避免切换时全量遍历。"""
@@ -2173,18 +2330,20 @@ class SheinApp(tk.Tk):
         self._click(asin)
 
     def _scroll_to_asin(self, asin):
-        ws = self.asin_row_widgets.get(asin) or {}
-        row = ws.get("row")
-        if row is None or not hasattr(self, "acv"):
+        if not hasattr(self, "acv"):
             return
         try:
             self.update_idletasks()
-            row_y = row.winfo_y()
-            list_h = max(1, self.lf.winfo_height())
+            idx = self._asin_index_map.get(asin, -1)
+            if idx < 0:
+                return
+            row_y = idx * self._asin_row_height
+            list_h = max(1, len(self.asin_list) * self._asin_row_height)
             canvas_h = max(1, self.acv.winfo_height())
             target_top = max(0, row_y - canvas_h // 2)
             frac = min(1.0, max(0.0, float(target_top) / float(list_h)))
             self.acv.yview_moveto(frac)
+            self._refresh_visible_asin_rows(force=True)
         except Exception:
             pass
 
