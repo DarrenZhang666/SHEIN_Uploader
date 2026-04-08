@@ -1824,6 +1824,156 @@ class SheinPublisher:
                 except Exception:
                     continue
 
+            # 材质 Material 专项处理（不依赖 * 必填）：
+            # 规则：清空已有值 -> 点击下拉 -> 选择首项
+            try:
+                root = attr_card if attr_card is not None else driver
+                material_items = root.find_elements(
+                    By.XPATH,
+                    ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
+                    "and .//span[contains(@class,'spmp_style__productAttrLabel') and "
+                    "(contains(normalize-space(.),'材质') or contains(normalize-space(.),'Material') or contains(normalize-space(.),'Materail'))]]"
+                )
+            except Exception:
+                material_items = []
+
+            for material_item in material_items:
+                try:
+                    if not material_item.is_displayed():
+                        continue
+
+                    # A) 清空已有值（优先 clear 按钮）
+                    try:
+                        for cx in [
+                            ".//a[@data-role='close' and contains(@class,'so-select-close')]",
+                            ".//*[contains(@class,'so-select-close-warpper')]//a[contains(@class,'so-select-close')]",
+                            ".//*[contains(@class,'so-select-indicator') and contains(@class,'so-select-close')]",
+                        ]:
+                            cleared_once = False
+                            try:
+                                for ce in material_item.find_elements(By.XPATH, cx):
+                                    if not ce.is_displayed():
+                                        continue
+                                    driver.execute_script(
+                                        "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                                        ce
+                                    )
+                                    cleared_once = True
+                                    time.sleep(0.12)
+                                    break
+                            except Exception:
+                                pass
+                            if cleared_once:
+                                break
+                    except Exception:
+                        pass
+
+                    # 兜底清空：可编辑输入执行 Ctrl+A + Backspace
+                    for inp in material_item.find_elements(
+                        By.XPATH,
+                        ".//span[contains(@class,'so-select-input') and @contenteditable='true'] | "
+                        ".//input[not(@type='hidden')]"
+                    ):
+                        try:
+                            if not inp.is_displayed():
+                                continue
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                            try:
+                                inp.click()
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", inp)
+                            try:
+                                inp.send_keys(Keys.CONTROL, "a")
+                                inp.send_keys(Keys.BACKSPACE)
+                            except Exception:
+                                pass
+                        except Exception:
+                            continue
+
+                    # B) 点击触发器
+                    trigger = None
+                    for sx in [
+                        ".//div[contains(@class,'so-select-inner')]",
+                        ".//div[contains(@class,'so-select-result')]",
+                        ".//a[contains(@class,'so-select-caret') or contains(@class,'so-select-multi')]",
+                        ".//span[contains(@class,'so-select-input')]",
+                    ]:
+                        try:
+                            cand = material_item.find_element(By.XPATH, sx)
+                            if cand.is_displayed():
+                                trigger = cand
+                                break
+                        except Exception:
+                            continue
+                    if trigger is None:
+                        continue
+
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});arguments[0].click();", trigger
+                    )
+                    time.sleep(0.2)
+
+                    # C) 选择当前可见下拉中的首个有效选项
+                    selected_ok = False
+                    first_option = None
+                    try:
+                        first_option = driver.execute_script(
+                            """
+                            function visible(el){
+                              if(!el) return false;
+                              const st = window.getComputedStyle(el);
+                              if(st.display==='none' || st.visibility==='hidden') return false;
+                              const r = el.getBoundingClientRect();
+                              return r.width>0 && r.height>0;
+                            }
+                            function validOption(el){
+                              if(!el || !visible(el)) return false;
+                              const cls = (el.className || '').toString();
+                              if(/disabled|is-disabled/.test(cls)) return false;
+                              const txt = (el.innerText || el.textContent || '').trim();
+                              if(!txt) return false;
+                              if(txt.includes('请选择') || txt.includes('Select')) return false;
+                              return true;
+                            }
+                            const drops = Array.from(document.querySelectorAll('div.so-select-drop-down-content')).filter(visible);
+                            const activeDrop = drops.length ? drops[drops.length - 1] : null;
+                            if(!activeDrop) return null;
+                            const cands = Array.from(activeDrop.querySelectorAll(
+                              '.so-select-option, .so-option, li[role="option"], [class*="option"]'
+                            ));
+                            for (const c of cands){
+                              if(validOption(c)) return c;
+                            }
+                            return null;
+                            """
+                        )
+                    except Exception:
+                        first_option = None
+
+                    if first_option is not None:
+                        try:
+                            driver.execute_script("arguments[0].click();", first_option)
+                            selected_ok = True
+                        except Exception:
+                            selected_ok = False
+
+                    if not selected_ok:
+                        try:
+                            trigger.send_keys(Keys.ENTER)
+                            selected_ok = True
+                        except Exception:
+                            selected_ok = False
+
+                    if selected_ok:
+                        self.log("[OK] 材质Material已清空并选择首项")
+                        try:
+                            driver.execute_script("document.body.click();")
+                        except Exception:
+                            pass
+                        time.sleep(0.15)
+                except Exception:
+                    continue
+
             auto_filled_count = 0
             for item in required_items:
                 try:
@@ -1846,6 +1996,10 @@ class SheinPublisher:
                     is_length_attr = ("长度" in label or "Length" in label)
                     # 长度由上面的“长度专项处理”统一处理，这里直接跳过避免重复操作
                     if is_length_attr:
+                        continue
+                    is_material_attr = ("材质" in label or "Material" in label or "Materail" in label)
+                    # 材质由上面的“材质专项处理”统一处理，这里直接跳过避免重复操作
+                    if is_material_attr:
                         continue
 
                     # 已有值则跳过
