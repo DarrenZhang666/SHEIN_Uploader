@@ -1258,7 +1258,7 @@ class SheinPublisher:
                 pass
 
             # 成分 Composition 专项处理：
-            # 规则：第一个框(下拉)选首项；第二个框(%数值)填 60
+            # 规则：第一个框(下拉)选首项；第二个框(%数值)填 100
             try:
                 root = attr_card if attr_card is not None else driver
                 comp_items = root.find_elements(
@@ -1352,7 +1352,7 @@ class SheinPublisher:
                         comp_select_done = True
                         self.log("[OK] 成分Composition已选择首项")
 
-                    # B) 比例输入框：定位“后面带%”的输入，空值则填60
+                    # B) 比例输入框：定位“后面带%”的输入，空值则填100
                     # 说明：该输入框有时被自定义组件托管，send_keys 不稳定，因此优先 JS 赋值。
                     ratio_inputs = []
                     try:
@@ -1395,16 +1395,16 @@ class SheinPublisher:
                                 except Exception:
                                     pass
                                 try:
-                                    ri.send_keys("60")
+                                    ri.send_keys("100")
                                     typed = True
                                 except Exception:
                                     typed = False
 
                             # 2) JS 强制写值兜底（对不可交互 input 也有效）
                             cur_after_type = str(ri.get_attribute("value") or "").strip()
-                            if (not cur_after_type) or (cur_after_type != "60"):
+                            if (not cur_after_type) or (cur_after_type != "100"):
                                 driver.execute_script(
-                                    "arguments[0].value='60';"
+                                    "arguments[0].value='100';"
                                     "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
                                     "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));"
                                     "arguments[0].dispatchEvent(new Event('blur',{bubbles:true}));",
@@ -1412,7 +1412,7 @@ class SheinPublisher:
                                 )
 
                             cur_final = str(ri.get_attribute("value") or "").strip()
-                            if cur_final == "60":
+                            if cur_final == "100":
                                 filled_this_comp = True
                                 break
                         except Exception:
@@ -1420,7 +1420,7 @@ class SheinPublisher:
 
                     if filled_this_comp:
                         comp_ratio_done = True
-                        self.log("[OK] 成分Composition比例已填写: 60%")
+                        self.log("[OK] 成分Composition比例已填写: 100%")
                     else:
                         try:
                             self.log("[WARN] 成分Composition比例未写入：未找到可用数字输入框或写入失败")
