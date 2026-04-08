@@ -1114,12 +1114,13 @@ class SheinPublisher:
             #     self._handle_other_specs(product_info)
             # except Exception as e:
             #     self.log("[DEBUG] 其他规格处理步骤异常，继续后续流程: {}".format(str(e)[:60]))
-            # 7. 上传主规格图和细节图（非阻塞：失败不影响后续“规格及供应信息”流程）
+            # 7. 上传主规格图和细节图（关键步骤：失败则终止，避免发布不完整数据）
             self.log("[DEBUG] 上传商品图片...")
             try:
                 self._upload_product_images(product_info)
             except Exception as e:
-                self.log("[DEBUG] 上传商品图片步骤异常，继续后续流程: {}".format(str(e)[:60]))
+                self.log("[ERROR] 上传商品图片失败，终止当前商品发布: {}".format(str(e)[:120]))
+                return False
             self.log("[OK] 商品基础信息填写完成")
             return True
         except Exception as e:
@@ -4611,6 +4612,14 @@ class SheinPublisher:
             if not main_images and product_info.get("image_url"):
                 main_images = [product_info["image_url"]]
             fallback_images = main_images[:max_imgs_per_sku]
+            def _collect_detail_rows():
+                try:
+                    _rows = driver.find_elements(By.CSS_SELECTOR,
+                        "#userguide_commodities_info_skc_title_table tbody tr,"
+                        "div.detail_img_container tbody tr")
+                    return [r for r in _rows if r.is_displayed()]
+                except Exception:
+                    return []
             if not sku_list:
                 # No SKU list: fallback to old single-input upload
                 if not fallback_images:
@@ -4631,24 +4640,35 @@ class SheinPublisher:
             except Exception:
                 pass
             # Find all <tr> rows in the detail image table body
-            try:
-                rows = driver.find_elements(By.CSS_SELECTOR,
-                    "#userguide_commodities_info_skc_title_table tbody tr,"
-                    "div.detail_img_container tbody tr")
-            except Exception:
-                rows = []
+            rows = _collect_detail_rows()
             if not rows:
                 self.log("[WARN] 未找到细节图表格行，回退单框模式")
                 self._upload_images_to_single_input(fallback_images)
                 return
             expected_sku_rows = len(sku_list)
+            # 等待 SKU 行渲染完成（不同电脑/网络速度下会延迟）
+            if len(rows) < expected_sku_rows:
+                self.log("[WARN] 初次检测细节图行数({})少于SKU数({})，等待页面补渲染...".format(
+                    len(rows), expected_sku_rows))
+                for _ in range(30):
+                    try:
+                        driver.execute_script(
+                            "var el=document.querySelector('#userguide_commodities_info_skc_title_table,div.detail_img_container');"
+                            "if(el){el.scrollIntoView({block:'center'});}else{window.scrollTo(0, document.body.scrollHeight*0.65);}"
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(0.35)
+                    rows = _collect_detail_rows()
+                    if len(rows) >= expected_sku_rows:
+                        break
             if len(rows) > expected_sku_rows:
                 self.log("[INFO] 细节图行数({})超过SKU数({})，仅按SKU数处理".format(
                     len(rows), expected_sku_rows))
                 rows = rows[:expected_sku_rows]
             elif len(rows) < expected_sku_rows:
-                self.log("[WARN] 细节图行数({})少于SKU数({})，将按当前可见行继续".format(
-                    len(rows), expected_sku_rows))
+                # 关键一致性校验：禁止缺行继续发布
+                raise RuntimeError("细节图行数不足: 页面{}行 / SKU{}行".format(len(rows), expected_sku_rows))
             self.log("[DEBUG] 找到 {} 行 SKU 细节图行（期望 {} 行）".format(
                 len(rows), expected_sku_rows))
 
@@ -4684,6 +4704,44 @@ class SheinPublisher:
             self.log("[DEBUG] 列索引: 细节图={}, 方形图={}, 色块图={}".format(
                 _col_detail, _col_square, _col_color_block))
             row_sku_map = []
+            # 供后续颜色校验统一使用（避免 A/B/C 模式下局部函数未定义）
+            _CN_EN = {
+                "黑色": "black", "白色": "white", "灰色": "grey", "红色": "red", "蓝色": "blue",
+                "绿色": "green", "黄色": "yellow", "粉色": "pink", "粉红色": "pink", "紫色": "purple",
+                "棕色": "brown", "褐色": "brown", "橙色": "orange", "金色": "gold", "银色": "silver",
+                "米色": "beige", "米白色": "beige", "酒红色": "wine", "卡其色": "khaki", "杏色": "apricot",
+            }
+            def _norm_color(s):
+                return re.sub(r"[\s\-_&/]+", "", (s or "")).lower()
+            def _sku_color_val(sku):
+                attrs = str((sku or {}).get("sku_attributes") or "")
+                cv = attrs.split("/")[0].strip() if attrs else ""
+                if ":" in cv:
+                    cv = cv.split(":", 1)[1].strip()
+                return cv
+            def _read_row_color(row_el):
+                try:
+                    tds = row_el.find_elements(By.TAG_NAME, "td")
+                    if tds:
+                        raw = tds[0].text or ""
+                        lns = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+                        if lns:
+                            return lns[0]
+                except Exception:
+                    pass
+                return ""
+            def _split_cn_en(text):
+                t = (text or "").strip()
+                cn_part = ""
+                en_part = ""
+                for ch in t:
+                    if '\u4e00' <= ch <= '\u9fff':
+                        cn_part += ch
+                    elif ch.isascii() and ch.isalpha():
+                        en_part += ch
+                    elif ch == ' ' and en_part:
+                        en_part += ch
+                return cn_part.strip(), en_part.strip()
 
             # A/B/C 兜底模式：严格按顺序绑定，避免颜色匹配导致错位
             if bool(getattr(self, "_main_spec_force_abc_mode", False)):
@@ -4825,31 +4883,86 @@ class SheinPublisher:
                         self.log("[MAP] 行{:02d} 页面='{}' -> 未匹配".format(
                             ri + 1, page_color))
 
+            def _resolve_row_and_detail_td(_row_idx):
+                _rows = _collect_detail_rows()
+                if _row_idx >= len(_rows):
+                    return None, None
+                _row = _rows[_row_idx]
+                try:
+                    _tds = _row.find_elements(By.TAG_NAME, "td")
+                except Exception:
+                    _tds = []
+                _detail_td = None
+                if _tds:
+                    if 0 <= _col_detail < len(_tds):
+                        _detail_td = _tds[_col_detail]
+                    elif len(_tds) >= 3:
+                        _detail_td = _tds[2]
+                    else:
+                        _detail_td = _tds[-1]
+                return _row, _detail_td
+
+            def _find_row_detail_input(_row_idx):
+                _row, _detail_td = _resolve_row_and_detail_td(_row_idx)
+                if _row is None or _detail_td is None:
+                    return None, _row, _detail_td
+                _inputs = []
+                try:
+                    _inputs = _detail_td.find_elements(By.CSS_SELECTOR, "input[type='file'][multiple]")
+                except Exception:
+                    _inputs = []
+                if not _inputs:
+                    try:
+                        _inputs = _detail_td.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                    except Exception:
+                        _inputs = []
+                return (_inputs[0] if _inputs else None), _row, _detail_td
+
+            def _count_detail_uploaded_imgs(_row_idx):
+                _, _detail_td = _resolve_row_and_detail_td(_row_idx)
+                if _detail_td is None:
+                    return 0
+                try:
+                    _imgs = _detail_td.find_elements(By.CSS_SELECTOR, "img")
+                    _cnt = 0
+                    for _im in _imgs:
+                        try:
+                            if not _im.is_displayed():
+                                continue
+                            _src = (_im.get_attribute("src") or "").strip()
+                            if _src.startswith("http"):
+                                _cnt += 1
+                        except Exception:
+                            continue
+                    return _cnt
+                except Exception:
+                    return 0
+
             # 细节图全局进度计数：跨 SKU 连续累加，不在每个 SKU 内重置
             global_detail_img_idx = 0
             for row_idx in range(len(row_sku_map)):
                 self._ensure_not_stopped()
-                # Re-find rows each iteration to avoid stale DOM references
-                # (swatch upload / crop dialog may trigger table re-render)
-                try:
-                    rows = driver.find_elements(By.CSS_SELECTOR,
-                        "#userguide_commodities_info_skc_title_table tbody tr,"
-                        "div.detail_img_container tbody tr")
-                except Exception:
-                    pass
-                if row_idx >= len(rows):
-                    self.log("[WARN] 行 {} 超出当前表格行数 {}，跳过".format(row_idx + 1, len(rows)))
-                    break
-                row = rows[row_idx]
+                row, _ = _resolve_row_and_detail_td(row_idx)
+                cur_rows = _collect_detail_rows()
+                if row is None:
+                    raise RuntimeError("第{}行SKU在上传时不存在（当前仅{}行）".format(
+                        row_idx + 1, len(cur_rows)))
                 page_color, matched_sku = row_sku_map[row_idx]
                 if matched_sku is not None:
-                    sku_imgs = (matched_sku.get("images") or [])[:max_imgs_per_sku]
+                    sku_imgs = list((matched_sku.get("images") or []))
                     sku_attr = matched_sku.get("sku_attributes", "")
                 else:
-                    sku_imgs = fallback_images
+                    sku_imgs = list(fallback_images)
                     sku_attr = page_color or "(未匹配)"
                 if not sku_imgs:
-                    sku_imgs = fallback_images
+                    sku_imgs = list(fallback_images)
+                # 强制补齐到最多 5 张：SKU图不足时用主图兜底补足
+                if len(sku_imgs) < max_imgs_per_sku and fallback_images:
+                    for _fu in fallback_images:
+                        if len(sku_imgs) >= max_imgs_per_sku:
+                            break
+                        sku_imgs.append(_fu)
+                sku_imgs = sku_imgs[:max_imgs_per_sku]
                 self.log("[DEBUG] SKU行 {} (页面:{} -> SKU:{}): 准备上传 {} 张图片".format(
                     row_idx + 1, page_color, sku_attr, len(sku_imgs)))
                 # Scroll row into view
@@ -4858,30 +4971,10 @@ class SheinPublisher:
                     time.sleep(0.2)
                 except Exception:
                     pass
-                # Find the detail image file input in the 3rd <td> of this row
-                # The 3rd td (index 2) has class uploadSimpleDragBox with file input
-                fi = None
-                try:
-                    # Target specifically the detail img column (3rd td, index 2)
-                    tds = row.find_elements(By.TAG_NAME, "td")
-                    detail_td = None
-                    if len(tds) >= 3:
-                        detail_td = tds[2]  # 3rd column = 细节图
-                    elif tds:
-                        detail_td = tds[-1]
-                    if detail_td:
-                        # Find file input with multiple attribute (detail img accepts multiple)
-                        inputs = detail_td.find_elements(By.CSS_SELECTOR, "input[type='file'][multiple]")
-                        if not inputs:
-                            inputs = detail_td.find_elements(By.CSS_SELECTOR, "input[type='file']")
-                        if inputs:
-                            fi = inputs[0]
-                except Exception as e:
-                    self.log("[WARN] 行 {} 定位细节图 input 失败: {}".format(row_idx+1, str(e)[:60]))
+                # Find the detail image file input in detail column
+                fi, row, _ = _find_row_detail_input(row_idx)
                 if fi is None:
-                    self.log("[WARN] SKU行 {} 未找到 file input, 跳过".format(row_idx + 1))
-                    continue
-                # Upload all images for this SKU row at once via send_keys
+                    raise RuntimeError("SKU行{} 未找到细节图上传 input".format(row_idx + 1))
                 # Collect all temp paths first
                 img_paths = []
                 for img_url in sku_imgs:
@@ -4892,42 +4985,54 @@ class SheinPublisher:
                     except Exception as e:
                         self.log("[WARN] 图片下载失败: {}".format(str(e)[:60]))
                 if not img_paths:
-                    self.log("[WARN] SKU行 {} 所有图片下载失败, 跳过".format(row_idx + 1))
-                    continue
-                # Upload images one by one for this SKU row, handling crop dialog per image
+                    raise RuntimeError("SKU行{} 所有图片下载失败".format(row_idx + 1))
+                # Upload images one by one for this SKU row, per-image retry +落库校验
                 upload_ok_count = 0
                 for img_idx, img_path in enumerate(img_paths):
-                    try:
-                        self._dismiss_switch_confirm_modal()
-                        # Re-find the file input for this row each time (DOM may refresh)
-                        fi_cur = fi
+                    one_ok = False
+                    for _up_try in range(3):
                         try:
-                            tds_cur = row.find_elements(By.TAG_NAME, "td")
-                            detail_td_cur = tds_cur[2] if len(tds_cur) >= 3 else (tds_cur[-1] if tds_cur else None)
-                            if detail_td_cur:
-                                inputs_cur = detail_td_cur.find_elements(By.CSS_SELECTOR, "input[type='file'][multiple]")
-                                if not inputs_cur:
-                                    inputs_cur = detail_td_cur.find_elements(By.CSS_SELECTOR, "input[type='file']")
-                                if inputs_cur:
-                                    fi_cur = inputs_cur[0]
-                        except Exception:
-                            pass
-                        driver.execute_script(
-                            "arguments[0].style.display='block';"
-                            "arguments[0].style.visibility='visible';"
-                            "arguments[0].style.opacity='1';", fi_cur)
-                        fi_cur.send_keys(img_path)
-                        global_detail_img_idx += 1
-                        self.log("[DEBUG] SKU行 {} 图{}已提交".format(
-                            row_idx + 1, global_detail_img_idx))
-                        self._dismiss_switch_confirm_modal()
-                        self._handle_crop_dialog()
-                        time.sleep(0.4)
-                        upload_ok_count += 1
-                    except Exception as e:
-                        self.log("[ERROR] SKU行 {} 图{} 上传失败: {}".format(row_idx+1, img_idx+1, str(e)[:60]))
+                            self._dismiss_switch_confirm_modal()
+                            fi_cur, row, _ = _find_row_detail_input(row_idx)
+                            if fi_cur is None:
+                                raise RuntimeError("未找到细节图input")
+                            before_cnt = _count_detail_uploaded_imgs(row_idx)
+                            driver.execute_script(
+                                "arguments[0].style.display='block';"
+                                "arguments[0].style.visibility='visible';"
+                                "arguments[0].style.opacity='1';", fi_cur)
+                            fi_cur.send_keys(img_path)
+                            global_detail_img_idx += 1
+                            self.log("[DEBUG] SKU行 {} 图{}已提交(第{}次)".format(
+                                row_idx + 1, img_idx + 1, _up_try + 1))
+                            self._dismiss_switch_confirm_modal()
+                            self._handle_crop_dialog()
+                            # 校验本张是否真正落库到当前行
+                            landed = False
+                            for _ in range(10):
+                                time.sleep(0.25)
+                                now_cnt = _count_detail_uploaded_imgs(row_idx)
+                                if now_cnt >= before_cnt + 1:
+                                    landed = True
+                                    break
+                            if not landed:
+                                raise RuntimeError("上传后未检测到新增图片")
+                            one_ok = True
+                            upload_ok_count += 1
+                            break
+                        except Exception as e:
+                            self.log("[WARN] SKU行 {} 图{} 第{}次上传失败: {}".format(
+                                row_idx + 1, img_idx + 1, _up_try + 1, str(e)[:80]))
+                            if _up_try < 2:
+                                time.sleep(0.4)
+                    if not one_ok:
+                        self.log("[ERROR] SKU行 {} 图{} 上传失败(已重试3次)".format(
+                            row_idx + 1, img_idx + 1))
                 self.log("[OK] SKU行 {} 已成功上传 {}/{} 张细节图".format(
                     row_idx + 1, upload_ok_count, len(img_paths)))
+                if upload_ok_count < len(img_paths):
+                    raise RuntimeError("SKU行{} 细节图未传全: 成功{} / 目标{}".format(
+                        row_idx + 1, upload_ok_count, len(img_paths)))
 
                 # -- 上传后颜色校验：重读当前行颜色，与预期 SKU 比对 --
                 try:
