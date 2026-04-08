@@ -3440,6 +3440,25 @@ return false;
                 self._set_publish_status(target_asin, msg, stage)
                 self._update_publish_progress_by_msg(target_asin, msg)
 
+            def _update_publish_fail_reason(reason_text):
+                try:
+                    reason = str(reason_text or "").strip()
+                    if not isinstance(product_info, dict):
+                        return
+                    if reason:
+                        product_info["publish_fail_reason"] = reason[:300]
+                    else:
+                        product_info.pop("publish_fail_reason", None)
+                    if target_asin in self.product_cache and isinstance(self.product_cache.get(target_asin), dict):
+                        if reason:
+                            self.product_cache[target_asin]["publish_fail_reason"] = reason[:300]
+                        else:
+                            self.product_cache[target_asin].pop("publish_fail_reason", None)
+                    if self.current_asin == target_asin:
+                        self.after(0, self._show_current_asin_now)
+                except Exception:
+                    pass
+
             try:
                 self._shein_publisher._dismiss_announcements()
             except Exception:
@@ -3780,15 +3799,29 @@ return false;
                             time.sleep(1)
 
                         if _submit_ok:
+                            _update_publish_fail_reason("")
                             _set_status('✓ 商品已提交发布', "上品成功")
                             if dot:
                                 self.after(0, lambda a=target_asin: self._set_asin_status(a, "success"))
                             self._pub_log('商品 {} 已提交发布'.format(target_asin))
                         else:
-                            _set_status('✗ 发布失败：未检测到“提交成功，等待审核中”', "上品失败")
+                            fail_reason = ""
+                            try:
+                                if hasattr(self._shein_publisher, "get_publish_failure_reason"):
+                                    fail_reason = self._shein_publisher.get_publish_failure_reason(wait_seconds=1.5)
+                            except Exception:
+                                fail_reason = ""
+                            _update_publish_fail_reason(fail_reason)
+                            if fail_reason:
+                                _set_status('✗ 发布失败：未检测到“提交成功，等待审核中”；上品失败原因：{}'.format(fail_reason[:80]), "上品失败")
+                            else:
+                                _set_status('✗ 发布失败：未检测到“提交成功，等待审核中”', "上品失败")
                             if dot:
                                 self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
-                            self._pub_log('[ERROR] 商品 {} 发布失败：点击一件翻译并发布后未出现“提交成功，等待审核中”'.format(target_asin))
+                            if fail_reason:
+                                self._pub_log('[ERROR] 商品 {} 发布失败：点击一件翻译并发布后未出现“提交成功，等待审核中”；失败原因: {}'.format(target_asin, fail_reason))
+                            else:
+                                self._pub_log('[ERROR] 商品 {} 发布失败：点击一件翻译并发布后未出现“提交成功，等待审核中”'.format(target_asin))
                     else:
                         _set_status('✗ 发布失败：15秒内未检测到"一键翻译并发布"确认弹窗', "上品失败")
                         if dot:
@@ -4071,7 +4104,31 @@ return false;
         def row(t,sz=10,col=TEXT_MAIN,bold=False):
             tk.Label(inf,text=t,font=("Segoe UI",sz,"bold" if bold else "normal"),
                 fg=col,bg=BG_PANEL,wraplength=560,justify="left",anchor="w").pack(fill="x",padx=4,pady=2)
-        row(info.get("title",""),13,TEXT_MAIN,True)
+        title_bar = tk.Frame(inf, bg=BG_PANEL)
+        title_bar.pack(fill="x", padx=4, pady=2)
+        title_bar.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            title_bar,
+            text=info.get("title",""),
+            font=("Segoe UI",13,"bold"),
+            fg=TEXT_MAIN,
+            bg=BG_PANEL,
+            anchor="w",
+            justify="left",
+            wraplength=380
+        ).grid(row=0, column=0, sticky="w")
+        publish_fail_reason = str(info.get("publish_fail_reason", "") or "").strip()
+        if publish_fail_reason:
+            tk.Label(
+                title_bar,
+                text="上品失败原因：{}".format(publish_fail_reason),
+                font=("Segoe UI",10,"bold"),
+                fg=RED,
+                bg=BG_PANEL,
+                anchor="w",
+                justify="left",
+                wraplength=320
+            ).grid(row=0, column=1, sticky="w", padx=(8, 0))
         row("ASIN: {}  货号: XYZ-{}".format(info.get("asin",""), info.get("asin","")),10,TEXT_SUB)
         row("品牌: {}".format(info.get("brand","N/A")),10,YELLOW)
         asin = str(info.get("asin", "") or "").strip()
@@ -4552,13 +4609,32 @@ return false;
 
             dot = self.asin_dots.get(asin)
             if ok:
+                try:
+                    if asin in self.product_cache and isinstance(self.product_cache.get(asin), dict):
+                        self.product_cache[asin].pop("publish_fail_reason", None)
+                except Exception:
+                    pass
                 if dot: self.after(0, lambda a=asin: self._set_asin_status(a, "success"))
                 self._log_publish_progress(asin, "上品成功")
                 self._pub_log("[OK {}/{}] {} 上品成功".format(s, total, asin))
             else:
+                try:
+                    if asin in self.product_cache and isinstance(self.product_cache.get(asin), dict):
+                        _cached_info = self.product_cache.get(asin) or {}
+                        _existing_reason = str(_cached_info.get("publish_fail_reason", "") or "").strip()
+                        _err_reason = str(err or "").strip()
+                        if (not _existing_reason) and _err_reason:
+                            _cached_info["publish_fail_reason"] = _err_reason[:300]
+                except Exception:
+                    pass
                 if dot: self.after(0, lambda a=asin: self._set_asin_status(a, "fail"))
                 self._log_publish_progress(asin, "上品失败")
                 self._pub_log("[FAIL {}/{}] {} 失败: {}".format(f, total, asin, str(err)[:80]))
+                try:
+                    if self.current_asin == asin:
+                        self.after(0, self._show_current_asin_now)
+                except Exception:
+                    pass
 
             self.after(0, lambda dd=d, tt=total, ss=s, ff=f:
                 self.status_lbl.config(text="并发上品进度 {}/{}（成功{}，失败{}）".format(dd, tt, ss, ff)))

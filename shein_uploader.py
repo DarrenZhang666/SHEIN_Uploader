@@ -5360,6 +5360,14 @@ class SheinPublisher:
         if isinstance(category, str):
             category = [category]
         driver = self.driver
+        def _set_publish_fail_reason(reason_text):
+            if not isinstance(info, dict):
+                return
+            reason = re.sub(r"\s+", " ", str(reason_text or "")).strip()
+            if reason:
+                info["publish_fail_reason"] = reason[:300]
+            else:
+                info.pop("publish_fail_reason", None)
         # Step1: 导航到商品发布页
         self.log("导航到商品发布页面...")
         def _save_debug_screenshot(tag):
@@ -5778,6 +5786,7 @@ class SheinPublisher:
             time.sleep(0.5)
         if not _confirm_clicked:
             self.log("[WARN] 未找到'一件翻译并发布'按鈕，弹窗可能未出现或已自动关闭")
+            _set_publish_fail_reason(self.get_publish_failure_reason(wait_seconds=1.5))
             return False
 
         # Step9: 严格按指定文案判定成功
@@ -5804,10 +5813,16 @@ class SheinPublisher:
         )
 
         if publish_ok:
+            _set_publish_fail_reason("")
             self.log("商品已提交发布")
             return True
 
-        self.log("[ERROR] 发布失败：未检测到“提交成功，等待审核中”文案")
+        fail_reason = self.get_publish_failure_reason(wait_seconds=2.0)
+        _set_publish_fail_reason(fail_reason)
+        if fail_reason:
+            self.log("[ERROR] 发布失败：未检测到“提交成功，等待审核中”文案；弹窗原因: {}".format(fail_reason))
+        else:
+            self.log("[ERROR] 发布失败：未检测到“提交成功，等待审核中”文案")
         if is_dev_mode():
             self.log("[DEV] 开发者模式：停留在当前页面，不做跳转")
         else:
@@ -5821,6 +5836,79 @@ class SheinPublisher:
             except Exception as nav_e:
                 self.log("[WARN] 返回发布页异常: {}".format(str(nav_e)[:60]))
         return False
+
+    def get_publish_failure_reason(self, wait_seconds=0.0):
+        """从页面弹窗/错误提示中提取上品失败原因文本。"""
+        driver = self.driver
+        if driver is None:
+            return ""
+        end_time = time.time() + max(0.0, float(wait_seconds or 0.0))
+        while True:
+            reason = ""
+            try:
+                reason = driver.execute_script(
+                    """
+                    function visible(el){
+                      if(!el) return false;
+                      const st = window.getComputedStyle(el);
+                      if(st.display==='none' || st.visibility==='hidden' || Number(st.opacity)===0) return false;
+                      const r = el.getBoundingClientRect();
+                      return r.width > 0 && r.height > 0;
+                    }
+                    function pickText(nodes){
+                      for (const n of nodes){
+                        if(!visible(n)) continue;
+                        const t = (n.innerText || n.textContent || '').trim();
+                        if(t) return t;
+                      }
+                      return '';
+                    }
+                    const groups = [
+                      '.so-message-top .so-alert-danger .so-alert-content',
+                      '.so-message .so-alert-danger .so-alert-content',
+                      '.so-alert-danger .so-alert-content',
+                      '.so-message-msg .so-alert-content',
+                      '.so-message-msg',
+                      '.so-message .so-alert-content',
+                      '.so-form-custom-error'
+                    ];
+                    for (const sel of groups){
+                      const nodes = Array.from(document.querySelectorAll(sel));
+                      const txt = pickText(nodes);
+                      if(txt) return txt;
+                    }
+                    return '';
+                    """
+                ) or ""
+            except Exception:
+                reason = ""
+            reason = re.sub(r"\s+", " ", str(reason or "")).strip()
+            if reason:
+                return reason[:300]
+            try:
+                # JS 失效时的 Selenium 兜底
+                xps = [
+                    "//div[contains(@class,'so-message-top')]//div[contains(@class,'so-alert-danger')]//div[contains(@class,'so-alert-content')]",
+                    "//div[contains(@class,'so-alert-danger')]//div[contains(@class,'so-alert-content')]",
+                    "//div[contains(@class,'so-message-msg')]",
+                    "//div[contains(@class,'so-form-custom-error')]",
+                ]
+                for xp in xps:
+                    for el in driver.find_elements(By.XPATH, xp):
+                        try:
+                            if not el.is_displayed():
+                                continue
+                            txt = re.sub(r"\s+", " ", str(el.text or "")).strip()
+                            if txt:
+                                return txt[:300]
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+            if time.time() >= end_time:
+                break
+            time.sleep(0.25)
+        return ""
 
     def _upload_detail_images(self, image_urls):
         """
