@@ -774,6 +774,88 @@ def _extract_non_color_specs(soup):
             result[dim_name] = values
     return result
 
+def _extract_twister_dimension_skus(soup):
+    """
+    从亚马逊 Twister 区域提取 SKU 维度信息（HTML 兜底）：
+    - 返回 (asin_dim_map, dim_order)
+    - asin_dim_map: {asin: {dim_name: dim_value, ...}, ...}
+    - dim_order: 页面出现顺序的维度名列表（如 ["color", "size"]）
+    """
+    asin_dim_map = {}
+    dim_order = []
+    if soup is None:
+        return asin_dim_map, dim_order
+
+    def _extract_dim_name_from_row(row, row_id):
+        # 先尝试标签文案
+        try:
+            label = row.select_one(".a-form-label, .a-color-secondary")
+            if label:
+                txt = str(label.get_text(" ", strip=True) or "").strip().rstrip(":：")
+                if txt:
+                    return _clean_dimension_name(txt)
+        except Exception:
+            pass
+        # 再从 id 推断
+        rid = str(row_id or "")
+        rid = rid.replace("inline-twister-row-", "").replace("_name", "").strip()
+        return _clean_dimension_name(rid)
+
+    def _extract_value_from_li(li):
+        # 文字型
+        for sel in [".swatch-title-text-display", ".a-button-text", ".a-size-base"]:
+            try:
+                el = li.select_one(sel)
+                if el:
+                    txt = str(el.get_text(" ", strip=True) or "").strip()
+                    if txt and txt not in ("Currently unavailable.",):
+                        return txt
+            except Exception:
+                continue
+        # 图片型
+        try:
+            img = li.select_one("img[alt]")
+            if img:
+                txt = str(img.get("alt") or "").strip()
+                if txt:
+                    return txt
+        except Exception:
+            pass
+        # 属性兜底
+        for attr in ["title", "aria-label", "data-defaultasin"]:
+            try:
+                txt = str(li.get(attr) or "").strip()
+                if txt:
+                    return txt
+            except Exception:
+                continue
+        return ""
+
+    for row in soup.select("[id^='inline-twister-row-']"):
+        try:
+            row_id = row.get("id", "")
+            dim_name = _extract_dim_name_from_row(row, row_id)
+            if not dim_name:
+                continue
+            if dim_name not in dim_order:
+                dim_order.append(dim_name)
+            for li in row.select("li[data-asin]"):
+                asin_val = str(li.get("data-asin") or "").strip()
+                if not asin_val:
+                    continue
+                dim_value = _extract_value_from_li(li)
+                if not dim_value:
+                    continue
+                if asin_val not in asin_dim_map:
+                    asin_dim_map[asin_val] = {}
+                # 同一维度保留首次非空值
+                if not asin_dim_map[asin_val].get(dim_name):
+                    asin_dim_map[asin_val][dim_name] = dim_value
+        except Exception:
+            continue
+
+    return asin_dim_map, dim_order
+
 def _extract_color_only_asins(soup):
     """
     从亚马逊商品页面直接解析 Color 维度的 SKU ASIN 列表。
@@ -1948,6 +2030,52 @@ def fetch_amazon_product(asin, region="美国"):
                     "dimension_basis": basis,
                     "images": sku_images[:image_limit]
                 })
+
+            # 路径 C（兜底）：dimensionToAsinMap 缺失/失效时，从 HTML Twister 直接提取
+            if not sku_list:
+                tw_map, tw_dims = _extract_twister_dimension_skus(s)
+                if isinstance(tw_map, dict) and tw_map:
+                    tw_asins = [a for a in tw_map.keys() if str(a).strip()]
+                    if len(tw_asins) > max_sku_fetch:
+                        _mark_sku_too_many(len(tw_asins))
+                        return res
+                    image_limit = _get_sku_image_limit(len(tw_asins))
+                    sku_asin_list = [a for a in tw_asins if a != asin]
+                    sku_image_cache = _fetch_all_sku_images_concurrently(
+                        sess, domain, sku_asin_list, hdrs, max_workers=2, max_count=image_limit
+                    )
+                    sku_image_cache[asin] = fallback_images[:image_limit]
+
+                    for sku_asin in tw_asins:
+                        dim_vals = tw_map.get(sku_asin) or {}
+                        basis = [d for d in tw_dims if d in dim_vals]
+                        parts = []
+                        for d in tw_dims:
+                            v = str(dim_vals.get(d) or "").strip()
+                            if v:
+                                parts.append("{}: {}".format(d.capitalize(), v))
+                        sku_attr_text = " / ".join(parts) if parts else "默认规格"
+
+                        sku_images = sku_image_cache.get(sku_asin, [])
+                        if not sku_images:
+                            # 尝试按已提取维度值从 colorImages 映射图片
+                            sku_images = _pick_images_from_color_map(
+                                color_image_map,
+                                dim_vals.get("color", ""),
+                                dim_vals.get("colour", ""),
+                                sku_asin,
+                                max_count=image_limit
+                            )
+                        if not sku_images:
+                            sku_images = fallback_images[:image_limit]
+
+                        sku_list.append({
+                            "sku_asin": sku_asin,
+                            "sku_attributes": sku_attr_text,
+                            "dimension_basis": basis,
+                            "images": sku_images[:image_limit]
+                        })
+                    res["sku_parse_fallback"] = "html_twister"
 
         # 对所有 color SKU 执行统一颜色唯一化（覆盖所有构建路径）
         sku_list = _enforce_unique_color_skus(sku_list)
