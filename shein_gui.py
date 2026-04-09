@@ -3712,6 +3712,8 @@ return false;
                 return
 
             category_selected = False
+            last_step_err = ""
+            last_recognition_state = ""
             for attempt in range(1, 4):
                 if self._check_stop_or_return(session_id=session_id):
                     return
@@ -3757,17 +3759,31 @@ return false;
                     no_cat_hint = bool(self._shein_publisher.has_no_category_recommend_hint())
                 except Exception:
                     no_cat_hint = False
+                rec_state = str(getattr(self._shein_publisher, "_last_recognition_state", "") or "").strip()
+                step_text = str(step_err or "")
+                last_step_err = step_text
+                last_recognition_state = rec_state
+                no_category_case = (
+                    no_cat_hint
+                    or rec_state in ("no_category", "timeout")
+                    or ("暂无分类推荐" in step_text)
+                    or ("未识别到推荐类目" in step_text)
+                )
 
-                if no_cat_hint and attempt < 3:
-                    _set_status('✗ 识图暂无分类推荐，第{}/3次：重开实例后重试...'.format(attempt), "上品中")
-                    self._pub_log('[RETRY] 命中“暂无分类推荐”，开始第{}/3次重试'.format(attempt + 1))
+                if no_category_case and attempt < 3:
+                    _set_status('✗ 识图后未出现可选类目，第{}/3次：重开实例后重试...'.format(attempt), "上品中")
+                    self._pub_log(
+                        '[RETRY] 类目未出现（err={} state={} hint={}），开始第{}/3次重试'.format(
+                            step_text or "N/A", rec_state or "N/A", no_cat_hint, attempt + 1
+                        )
+                    )
                     if not _restart_instance_and_open_publish():
                         _set_status('✗ 重开实例失败，归属上品失败', "上品失败")
                         if dot:
                             self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                         return
                     continue
-                if no_cat_hint and attempt >= 3:
+                if no_category_case and attempt >= 3:
                     break
                 _set_status('✗ 识图流程失败（{}），归属上品失败'.format(step_err), "上品失败")
                 if dot:
@@ -3775,8 +3791,12 @@ return false;
                 return
 
             if not category_selected:
-                _set_status('✗ 识图发品失败：3次均提示“暂无分类推荐”，归属上品失败', "上品失败")
-                self._pub_log('[ERROR] 商品 {} 识图发品失败：3次均提示“暂无分类推荐”'.format(target_asin))
+                _set_status('✗ 识图发品失败：3次重试后仍未出现可选类目，归属上品失败', "上品失败")
+                self._pub_log(
+                    '[ERROR] 商品 {} 识图发品失败：3次重试后仍未出现可选类目（最后错误={}，识别状态={}）'.format(
+                        target_asin, last_step_err or "N/A", last_recognition_state or "N/A"
+                    )
+                )
                 if dot:
                     self.after(0, lambda a=target_asin: self._set_asin_status(a, "fail"))
                 return
