@@ -2347,7 +2347,44 @@ class SheinPublisher:
                     if target_box is None:
                         target_box = power_item
 
-                    # 关键：电源项无论是否已有值，都先清空后再“选首项”
+                    # 若当前电源已是“无/None”，直接跳过该框，不重复操作
+                    current_power_value = ""
+                    try:
+                        current_power_value = driver.execute_script(
+                            """
+                            const box = arguments[0];
+                            if(!box) return '';
+                            function visible(el){
+                              if(!el) return false;
+                              const st = window.getComputedStyle(el);
+                              if(st.display==='none' || st.visibility==='hidden') return false;
+                              const r = el.getBoundingClientRect();
+                              return r.width>0 && r.height>0;
+                            }
+                            const nodes = Array.from(box.querySelectorAll(
+                              '.so-select-item, .renderItemEllipsis, .so-tag, .so-select-result, .so-select-input, input[type="text"], input:not([type])'
+                            ));
+                            for(const n of nodes){
+                              if(!visible(n)) continue;
+                              const txt = (n.value || n.innerText || n.textContent || '').trim();
+                              if(!txt) continue;
+                              if(txt.includes('请选择') || txt.includes('Select')) continue;
+                              return txt;
+                            }
+                            return '';
+                            """,
+                            target_box
+                        )
+                    except Exception:
+                        current_power_value = ""
+                    power_norm = str(current_power_value or "").strip().lower().replace(" ", "")
+                    if power_norm and (
+                        ("无" in str(current_power_value or "")) or ("none" in power_norm) or ("without" in power_norm)
+                    ):
+                        self.log("[OK] 电源属性已是“无”，跳过该框: {}".format(str(current_power_value).strip()[:60]))
+                        continue
+
+                    # 关键：电源项无论是否已有值，都先清空后再执行“输入无 + 选首项”
                     try:
                         for cx in [
                             ".//a[@data-role='close' and contains(@class,'so-select-close')]",
@@ -2415,87 +2452,203 @@ class SheinPublisher:
                     if trigger is None:
                         continue
 
-                    driver.execute_script(
-                        "arguments[0].scrollIntoView({block:'center'});arguments[0].click();", trigger
-                    )
-                    time.sleep(0.2)
-
-                    first_option = None
-                    try:
-                        first_option = driver.execute_script(
-                            """
-                            function visible(el){
-                              if(!el) return false;
-                              const st = window.getComputedStyle(el);
-                              if(st.display==='none' || st.visibility==='hidden') return false;
-                              const r = el.getBoundingClientRect();
-                              return r.width>0 && r.height>0;
-                            }
-                            function validOption(el){
-                              if(!el || !visible(el)) return false;
-                              const cls = (el.className || '').toString();
-                              if(/disabled|is-disabled/.test(cls)) return false;
-                              const txt = (el.innerText || el.textContent || '').trim();
-                              if(!txt) return false;
-                              if(txt.includes('请选择') || txt.includes('Select')) return false;
-                              return true;
-                            }
-                            const trg = arguments[0];
-                            if(!trg) return null;
-                            const tr = trg.getBoundingClientRect();
-                            const tcx = (tr.left + tr.right) / 2;
-                            const tcy = (tr.top + tr.bottom) / 2;
-                            const drops = Array.from(document.querySelectorAll('div.so-select-drop-down-content')).filter(visible);
-                            if(!drops.length) return null;
-                            let best = null, bestDist = Number.POSITIVE_INFINITY;
-                            for(const d of drops){
-                              const r = d.getBoundingClientRect();
-                              const cx = (r.left + r.right) / 2;
-                              const cy = (r.top + r.bottom) / 2;
-                              const dist = Math.hypot(cx - tcx, cy - tcy);
-                              if(dist < bestDist){
-                                bestDist = dist;
-                                best = d;
-                              }
-                            }
-                            if(!best) return null;
-                            const cands = Array.from(best.querySelectorAll(
-                              '.so-select-option, .so-option, li[role="option"], [class*="option"]'
-                            ));
-                            for (const c of cands){
-                              if(validOption(c)) return c;
-                            }
-                            return null;
-                            """,
-                            trigger
-                        )
-                    except Exception:
-                        first_option = None
-
+                    # 先写“无”，再选下拉首项；加 2 次重试，提升页面抖动下的成功率
                     selected_ok = False
-                    if first_option is not None:
+                    typed_none = False
+                    selected_label = ""
+                    for _attempt in range(2):
+                        # 1) 打开下拉
                         try:
-                            driver.execute_script("arguments[0].click();", first_option)
-                            selected_ok = True
+                            driver.execute_script(
+                                "arguments[0].scrollIntoView({block:'center'});arguments[0].click();", trigger
+                            )
                         except Exception:
-                            selected_ok = False
+                            try:
+                                trigger.click()
+                            except Exception:
+                                pass
+                        time.sleep(0.25)
 
-                    if not selected_ok:
+                        # 2) 在激活输入框写入“无”（用于过滤出“无”相关首项）
+                        typed_none = False
                         try:
-                            trigger.send_keys(Keys.ENTER)
-                            selected_ok = True
+                            typed_none = bool(driver.execute_script(
+                                """
+                                const box = arguments[0];
+                                function visible(el){
+                                  if(!el) return false;
+                                  const st = window.getComputedStyle(el);
+                                  if(st.display==='none' || st.visibility==='hidden') return false;
+                                  const r = el.getBoundingClientRect();
+                                  return r.width>0 && r.height>0;
+                                }
+                                function writeNone(el){
+                                  if(!el || !visible(el)) return false;
+                                  try{ el.focus(); }catch(e){}
+                                  if(el.isContentEditable){
+                                    el.textContent = '';
+                                    el.textContent = '无';
+                                  }else{
+                                    el.value = '';
+                                    el.value = '无';
+                                  }
+                                  ['input','change','keyup'].forEach(evt=>{
+                                    try{ el.dispatchEvent(new Event(evt,{bubbles:true})); }catch(e){}
+                                  });
+                                  const t = ((el.isContentEditable ? el.textContent : el.value) || '').trim();
+                                  return t.indexOf('无') >= 0;
+                                }
+                                const active = document.activeElement;
+                                if(writeNone(active)) return true;
+                                const cands = Array.from((box || document).querySelectorAll(
+                                  "input:not([type='hidden']), span.so-select-input[contenteditable='true']"
+                                ));
+                                for(const el of cands){
+                                  if(writeNone(el)) return true;
+                                }
+                                return false;
+                                """,
+                                target_box
+                            ))
                         except Exception:
-                            selected_ok = False
+                            typed_none = False
+                        if not typed_none:
+                            try:
+                                trigger.send_keys("无")
+                                typed_none = True
+                            except Exception:
+                                typed_none = False
+                        time.sleep(0.25)
+
+                        # 3) 选“首个有效选项”（按过滤后首项）
+                        first_option = None
+                        try:
+                            first_option = driver.execute_script(
+                                """
+                                function visible(el){
+                                  if(!el) return false;
+                                  const st = window.getComputedStyle(el);
+                                  if(st.display==='none' || st.visibility==='hidden') return false;
+                                  const r = el.getBoundingClientRect();
+                                  return r.width>0 && r.height>0;
+                                }
+                                function validOption(el){
+                                  if(!el || !visible(el)) return false;
+                                  const cls = (el.className || '').toString();
+                                  if(/disabled|is-disabled/.test(cls)) return false;
+                                  const txt = (el.innerText || el.textContent || '').trim();
+                                  if(!txt) return false;
+                                  if(txt.includes('请选择') || txt.includes('Select')) return false;
+                                  return true;
+                                }
+                                const trg = arguments[0];
+                                if(!trg) return null;
+                                const tr = trg.getBoundingClientRect();
+                                const tcx = (tr.left + tr.right) / 2;
+                                const tcy = (tr.top + tr.bottom) / 2;
+                                const drops = Array.from(document.querySelectorAll('div.so-select-drop-down-content')).filter(visible);
+                                if(!drops.length) return null;
+                                let best = null, bestDist = Number.POSITIVE_INFINITY;
+                                for(const d of drops){
+                                  const r = d.getBoundingClientRect();
+                                  const cx = (r.left + r.right) / 2;
+                                  const cy = (r.top + r.bottom) / 2;
+                                  const dist = Math.hypot(cx - tcx, cy - tcy);
+                                  if(dist < bestDist){
+                                    bestDist = dist;
+                                    best = d;
+                                  }
+                                }
+                                if(!best) return null;
+                                const cands = Array.from(best.querySelectorAll(
+                                  '.so-select-option, .so-option, li[role="option"], [class*="option"]'
+                                ));
+                                for (const c of cands){
+                                  if(validOption(c)) return c;
+                                }
+                                return null;
+                                """,
+                                trigger
+                            )
+                        except Exception:
+                            first_option = None
+
+                        selected_ok = False
+                        target_option = first_option
+                        if target_option is not None:
+                            try:
+                                driver.execute_script("arguments[0].click();", target_option)
+                                selected_ok = True
+                            except Exception:
+                                selected_ok = False
+
+                        if not selected_ok:
+                            try:
+                                trigger.send_keys(Keys.ARROW_DOWN)
+                                time.sleep(0.08)
+                                trigger.send_keys(Keys.ENTER)
+                                selected_ok = True
+                            except Exception:
+                                selected_ok = False
+
+                        # 4) 读回已选值做校验，避免“假成功”
+                        selected_label = ""
+                        if selected_ok:
+                            try:
+                                selected_label = driver.execute_script(
+                                    """
+                                    const box = arguments[0];
+                                    if(!box) return '';
+                                    function visible(el){
+                                      if(!el) return false;
+                                      const st = window.getComputedStyle(el);
+                                      if(st.display==='none' || st.visibility==='hidden') return false;
+                                      const r = el.getBoundingClientRect();
+                                      return r.width>0 && r.height>0;
+                                    }
+                                    const nodes = Array.from(box.querySelectorAll(
+                                      '.so-select-item, .renderItemEllipsis, .so-tag, .so-select-result, .so-select-input, input[type="text"], input:not([type])'
+                                    ));
+                                    for(const n of nodes){
+                                      if(!visible(n)) continue;
+                                      const txt = (n.value || n.innerText || n.textContent || '').trim();
+                                      if(!txt) continue;
+                                      if(txt.includes('请选择') || txt.includes('Select')) continue;
+                                      return txt;
+                                    }
+                                    return '';
+                                    """,
+                                    target_box
+                                )
+                            except Exception:
+                                selected_label = ""
+                            normalized = str(selected_label or "").strip().lower().replace(" ", "")
+                            selected_ok = bool(normalized) and (
+                                ("无" in str(selected_label or "")) or ("none" in normalized) or ("without" in normalized)
+                            )
+
+                        if selected_ok:
+                            break
+                        time.sleep(0.12)
 
                     if selected_ok:
-                        self.log("[OK] 电源属性已按规则选择下拉首项（下方框）")
+                        self.log("[OK] 电源属性已填写“无”并确认选中: {}".format(str(selected_label or "").strip()[:60]))
                         try:
-                            driver.execute_script("document.body.click();")
+                            driver.execute_script(
+                                "const e=document.body||document.documentElement;"
+                                "if(e){"
+                                "e.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,clientX:5,clientY:5}));"
+                                "e.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:5,clientY:5}));"
+                                "e.click();"
+                                "}"
+                            )
                         except Exception:
                             pass
                         time.sleep(0.12)
                     else:
-                        self.log("[WARN] 电源属性未能完成重选首项")
+                        self.log("[WARN] 电源属性未能完成“写无+选首项”（typed_none={} selected='{}')".format(
+                            typed_none, str(selected_label or "").strip()[:40]
+                        ))
                 except Exception:
                     continue
 
@@ -2514,6 +2667,9 @@ class SheinPublisher:
                         pass
                     # 产品型号单独按“/”填写，不走下拉首项逻辑
                     if "产品型号" in label or "Product Model" in label:
+                        continue
+                    # 电源由上面的“电源专项处理”统一处理，避免重复操作导致覆盖
+                    if ("电源" in label) or ("Power Supply" in label) or ("Power Source" in label) or ("Power" in label):
                         continue
 
                     # 长度 Length 专项规则：
