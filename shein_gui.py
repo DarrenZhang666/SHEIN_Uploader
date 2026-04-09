@@ -1905,6 +1905,9 @@ class SheinApp(tk.Tk):
                 or "结果文案" in m or "一键翻译并发布" in m):
             # 业务期望：确认其他信息阶段约在半程，避免从基础信息阶段跃迁过大
             self._set_asin_progress(asin, 50, "确认其他信息中", state="running"); return
+        if "上传商品图片" in m:
+            # 上传阶段开始时先推进到 48%，避免长时间显示“填写基础信息”。
+            self._set_asin_progress(asin, 48, "上传商品图片中", state="running"); return
         if "细节图上传完成" in m:
             self._set_asin_progress(asin, 75, "细节图上传完成", state="running"); return
         if ("SKU行" in m and "图" in m and "已提交" in m) or "开始上传细节图" in m or "上传细节图" in m:
@@ -4666,7 +4669,31 @@ return false;
         success_list = []
         fail_list = []
         total = len(asins)
-        per_asin_timeout_sec = 420
+        def _read_timeout_env(name, default_value, min_sec, max_sec):
+            raw = str(os.environ.get(name, "") or "").strip()
+            try:
+                val = int(float(raw)) if raw else int(default_value)
+            except Exception:
+                val = int(default_value)
+            return max(int(min_sec), min(int(max_sec), val))
+
+        # 双阈值超时策略：
+        # 1) 无进度超时：长期没有阶段变化才判定卡死（默认 420s）
+        # 2) 硬超时：总耗时兜底，防止极端情况下无限等待（默认 1200s）
+        per_asin_stall_timeout_sec = _read_timeout_env(
+            "SHEIN_PUBLISH_STALL_TIMEOUT_SEC", 420, 180, 3600
+        )
+        per_asin_hard_timeout_sec = _read_timeout_env(
+            "SHEIN_PUBLISH_HARD_TIMEOUT_SEC",
+            max(1200, per_asin_stall_timeout_sec * 2),
+            per_asin_stall_timeout_sec + 120,
+            10800,
+        )
+        self._pub_log(
+            "[CFG] 单商品超时策略：无进度{}秒，总耗时{}秒".format(
+                per_asin_stall_timeout_sec, per_asin_hard_timeout_sec
+            )
+        )
         done = 0
         result_lock = threading.Lock()
         task_lock = threading.Lock()
@@ -5040,8 +5067,70 @@ return false;
                                 cat_path if cat_path else [cat_name],
                                 _price_mult
                             )
+                            result = False
+                            _start_ts = time.time()
+                            _last_progress_ts = _start_ts
+                            _last_snapshot = None
+                            _last_wait_log_ts = 0.0
                             try:
-                                result = _f.result(timeout=per_asin_timeout_sec)
+                                while True:
+                                    try:
+                                        result = _f.result(timeout=8)
+                                        break
+                                    except FutureTimeoutError:
+                                        if _f.done():
+                                            continue
+                                        now_ts = time.time()
+                                        pg = self.asin_progress.get(asin) or {}
+                                        pg_pct = int(pg.get("pct", 0) or 0)
+                                        pg_text = str(pg.get("text", "") or "").strip()
+                                        pg_state = str(pg.get("state", "") or "").strip()
+                                        snapshot = (pg_pct, pg_text, pg_state)
+                                        if snapshot != _last_snapshot:
+                                            _last_snapshot = snapshot
+                                            _last_progress_ts = now_ts
+
+                                        elapsed_sec = int(now_ts - _start_ts)
+                                        no_progress_sec = int(now_ts - _last_progress_ts)
+                                        stage_text = pg_text or "处理中"
+
+                                        if now_ts - _last_wait_log_ts >= 30:
+                                            _worker_log(
+                                                "ASIN={} 上品进行中 {}秒（当前阶段：{}）".format(
+                                                    asin, elapsed_sec, stage_text[:50]
+                                                )
+                                            )
+                                            _last_wait_log_ts = now_ts
+
+                                        hit_stall_timeout = (no_progress_sec >= per_asin_stall_timeout_sec)
+                                        hit_hard_timeout = (elapsed_sec >= per_asin_hard_timeout_sec)
+                                        if not hit_stall_timeout and not hit_hard_timeout:
+                                            continue
+
+                                        try:
+                                            if hasattr(pub, "request_stop"):
+                                                pub.request_stop(force_quit=True)
+                                        except Exception:
+                                            pass
+                                        worker_has_failure = True
+                                        if hit_stall_timeout:
+                                            timeout_reason = (
+                                                "超时：{}秒内无阶段进展（总耗时{}秒，当前阶段：{}）".format(
+                                                    no_progress_sec, elapsed_sec, stage_text[:60]
+                                                )
+                                            )
+                                        else:
+                                            timeout_reason = (
+                                                "超时：总耗时{}秒仍未完成（当前阶段：{}）".format(
+                                                    elapsed_sec, stage_text[:60]
+                                                )
+                                            )
+                                        _record_result(asin, False, timeout_reason)
+                                        _worker_log("ASIN={} 上品超时，已中断并准备重建实例".format(asin))
+                                        if not _rebuild_worker_instance("单商品上品超时"):
+                                            _worker_log("超时后重建失败，结束当前worker")
+                                            return
+                                        break
                             except FutureTimeoutError:
                                 try:
                                     if hasattr(pub, "request_stop"):
@@ -5052,18 +5141,25 @@ return false;
                                 _record_result(
                                     asin,
                                     False,
-                                    "超时：{}秒内未完成（卡在上传阶段已自动中断）".format(per_asin_timeout_sec)
+                                    "超时：{}秒内未完成".format(per_asin_hard_timeout_sec)
                                 )
                                 _worker_log("ASIN={} 上品超时，已中断并准备重建实例".format(asin))
                                 if not _rebuild_worker_instance("单商品上品超时"):
                                     _worker_log("超时后重建失败，结束当前worker")
                                     return
                                 continue
+                            if not _f.done():
+                                continue
                         if result:
                             _record_result(asin, True)
                         else:
                             worker_has_failure = True
-                            _record_result(asin, False, '发布流程未能确认成功')
+                            _fail_reason = ""
+                            try:
+                                _fail_reason = str((info or {}).get("publish_fail_reason", "") or "").strip()
+                            except Exception:
+                                _fail_reason = ""
+                            _record_result(asin, False, _fail_reason or '发布流程未能确认成功')
                     except Exception as e:
                         worker_has_failure = True
                         _record_result(asin, False, str(e))
