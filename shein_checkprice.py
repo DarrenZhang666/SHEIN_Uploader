@@ -885,6 +885,7 @@ return true;
 def open_shein_suggest_price_popup(
     publisher=None,
     account="",
+    clone_from_account="",
     log_cb=None,
     headless=False,
     should_stop=None,
@@ -898,6 +899,7 @@ def open_shein_suggest_price_popup(
         pub = SheinPublisher(log_cb=log)
         pub.start_browser(
             account=account or "default",
+            clone_from_account=clone_from_account or "",
             headless=headless,
             force_new=bool(force_new_browser),
         )
@@ -953,6 +955,7 @@ def open_shein_suggest_price_popup(
 def fetch_shein_pending_bargain_rows(
     publisher=None,
     account="",
+    clone_from_account="",
     log_cb=None,
     headless=False,
     should_stop=None,
@@ -963,6 +966,7 @@ def fetch_shein_pending_bargain_rows(
     ok, msg, pub = open_shein_suggest_price_popup(
         publisher=publisher,
         account=account,
+        clone_from_account=clone_from_account,
         log_cb=log,
         headless=headless,
         should_stop=should_stop,

@@ -397,14 +397,18 @@ class SheinApp(tk.Tk):
             return
 
         dev_mode = bool(is_dev_mode())
-        fetch_publisher = self._shein_publisher if dev_mode else None
+        # 与上品流程彻底隔离：议价始终使用独立浏览器实例，避免互相抢页面与状态。
+        fetch_publisher = getattr(self, "_bargain_runtime_publisher", None)
+        if not self._is_publisher_reusable(fetch_publisher):
+            fetch_publisher = None
         headless_mode = (not dev_mode)
-        force_new_browser = (not dev_mode)
+        force_new_browser = True
+        bargain_account = "{}__bargain".format(account)
 
         self._stop_bargain_fetch = False
         self._bargain_fetch_running = True
-        self._bargain_runtime_publisher = None
-        self._bargain_runtime_is_temp = (not dev_mode)
+        self._bargain_runtime_publisher = fetch_publisher
+        self._bargain_runtime_is_temp = True
         self.status_lbl.config(text='议价功能：正在抓取“待确认”数据...')
         self._set_bargain_progress("进入议价界面", state="running", percent=25)
 
@@ -462,13 +466,14 @@ class SheinApp(tk.Tk):
                         return
 
                 run_pub = fetch_publisher
-                if not dev_mode:
+                if run_pub is None:
                     run_pub = SheinPublisher(log_cb=_progress_log)
                     self._bargain_runtime_publisher = run_pub
 
                 ok, msg, pub, rows = fetch_shein_pending_bargain_rows(
                     publisher=run_pub,
-                    account=account,
+                    account=bargain_account,
+                    clone_from_account=account,
                     log_cb=_progress_log,
                     headless=headless_mode,
                     should_stop=lambda: bool(self._stop_bargain_fetch or self._app_closing),
@@ -476,9 +481,6 @@ class SheinApp(tk.Tk):
                 )
                 self._bargain_runtime_publisher = pub
                 temp_pub = pub
-                if dev_mode:
-                    self._shein_publisher = pub
-                    self._shein_publisher_account = account
                 self._bargain_rows = rows or []
                 self.after(0, self._render_bargain_rows)
                 amazon_done = True
@@ -489,7 +491,7 @@ class SheinApp(tk.Tk):
                         self.after(0, lambda: self._set_bargain_progress("已停止", state="fail"))
                         self.after(0, lambda: self.status_lbl.config(text="议价流程已停止"))
                     else:
-                        keep_runtime_after_fetch = (not dev_mode) and (temp_pub is not None)
+                        keep_runtime_after_fetch = (temp_pub is not None)
                         self.after(0, lambda: self._set_bargain_progress("完毕", state="success", percent=100))
                         self.after(0, lambda: self.status_lbl.config(text=msg))
                         self.after(0, lambda: messagebox.showinfo('议价', msg))
@@ -508,13 +510,13 @@ class SheinApp(tk.Tk):
                 self.after(0, lambda: messagebox.showerror('议价', '议价流程失败：' + err))
             finally:
                 keep_runtime = bool(keep_runtime_after_fetch)
-                close_runtime = bool((not dev_mode) and temp_pub is not None and self._stop_bargain_fetch)
+                close_runtime = bool(temp_pub is not None and self._stop_bargain_fetch)
                 if close_runtime:
                     self._close_publisher_instance(temp_pub, reason="用户停止议价抓取")
                     self._bargain_runtime_publisher = None
                     self._bargain_runtime_is_temp = False
                 elif keep_runtime:
-                    # 非开发者模式：抓取完成后保留后台浏览器，用于“操作”列按钮回传网页点击。
+                    # 抓取完成后保留议价专属浏览器，用于“操作”列按钮回传网页点击。
                     self._bargain_runtime_publisher = temp_pub
                     self._bargain_runtime_is_temp = True
                     self._pub_log("议价流程：已保留后台浏览器实例，等待执行“操作”按钮")
@@ -1138,7 +1140,7 @@ class SheinApp(tk.Tk):
                 return
             self._bargain_action_running = True
         row = dict(rows[row_idx] or {})
-        pub = getattr(self, "_bargain_runtime_publisher", None) or getattr(self, "_shein_publisher", None)
+        pub = getattr(self, "_bargain_runtime_publisher", None)
         if pub is None:
             self._bargain_action_running = False
             messagebox.showwarning("议价", "未找到可用浏览器实例，请先抓取“待确认”数据。")
@@ -1172,7 +1174,7 @@ class SheinApp(tk.Tk):
         threading.Thread(target=_run_action, daemon=True).start()
 
     def _execute_bargain_action(self, row, action_label):
-        pub = getattr(self, "_bargain_runtime_publisher", None) or getattr(self, "_shein_publisher", None)
+        pub = getattr(self, "_bargain_runtime_publisher", None)
         if pub is None:
             return False, "未找到可用浏览器实例，请先抓取“待确认”数据。"
         return trigger_shein_pending_bargain_action(
@@ -5473,12 +5475,16 @@ return false;
     def _stop_publish_action(self):
         """停止上品进程。"""
         dev_mode = bool(is_dev_mode())
-        if getattr(self, "_bargain_fetch_running", False):
+        stop_bargain_first = bool(
+            getattr(self, "_bargain_fetch_running", False)
+            and (self.current_view_mode == "bargain" or not self._publish_running)
+        )
+        if stop_bargain_first:
             self._stop_bargain_fetch = True
             self._set_bargain_progress("正在停止...", state="fail")
             self.status_lbl.config(text="正在停止议价抓取...")
             try:
-                pub = self._bargain_runtime_publisher or self._shein_publisher
+                pub = self._bargain_runtime_publisher
                 if pub is not None:
                     setattr(pub, "_stop_publish", True)
             except Exception:
@@ -5488,14 +5494,14 @@ return false;
                 is_temp_runtime = bool(self._bargain_runtime_is_temp)
                 try:
                     pub = self._bargain_runtime_publisher
-                    # 非开发者模式：议价抓取使用临时后台浏览器，停止时立即关闭实例与进程
-                    if (not dev_mode) and is_temp_runtime and pub is not None:
+                    # 议价使用独立实例，停止议价时可安全关闭，不影响上品流程。
+                    if is_temp_runtime and pub is not None:
                         self._close_publisher_instance(pub, reason="用户停止议价抓取")
                 finally:
-                    if (not dev_mode) and is_temp_runtime:
+                    if is_temp_runtime:
                         self.after(0, lambda: self.status_lbl.config(text="已停止议价抓取，后台浏览器已关闭"))
                     elif dev_mode:
-                        self.after(0, lambda: self.status_lbl.config(text="开发者模式：已暂停议价抓取，保留当前页面"))
+                        self.after(0, lambda: self.status_lbl.config(text="开发者模式：已暂停议价抓取"))
                     else:
                         self.after(0, lambda: self.status_lbl.config(text="已停止议价抓取"))
 
