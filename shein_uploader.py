@@ -4630,6 +4630,47 @@ class SheinPublisher:
                 # Find the next NEW empty 'please select or customize' input box
                 # Key: use data-id to skip boxes we've already filled
                 value_inner = None
+                def _is_value_inner_ready(_el):
+                    """仅选择“待填写”的主规格值框，避免误用已有选值的历史框导致行数膨胀。"""
+                    try:
+                        cls = str(_el.get_attribute("class") or "").lower()
+                        if "so-select-empty" in cls:
+                            return True
+                    except Exception:
+                        pass
+                    try:
+                        selected_tags = _el.find_elements(
+                            By.XPATH,
+                            ".//*[contains(@class,'so-select-item') and normalize-space(.)!='']"
+                        )
+                        if selected_tags:
+                            # 若当前是 invalid 且只有“无/none”等无效值，允许重用；否则视为已填
+                            try:
+                                _cls = str(_el.get_attribute("class") or "").lower()
+                            except Exception:
+                                _cls = ""
+                            if "invalid" in _cls:
+                                texts = []
+                                for t in selected_tags:
+                                    try:
+                                        texts.append((t.text or "").strip().lower())
+                                    except Exception:
+                                        continue
+                                if texts and all(x in ("", "无", "none", "null") for x in texts):
+                                    return True
+                            return False
+                    except Exception:
+                        pass
+                    try:
+                        placeholders = _el.find_elements(
+                            By.XPATH,
+                            ".//*[contains(@class,'so-input-placeholder') and not(contains(@style,'display: none'))]"
+                        )
+                        if placeholders:
+                            return True
+                    except Exception:
+                        pass
+                    return True
                 # 主规格值每填一个，SHEIN 渲染下一行较慢，重试次数提高
                 for _retry in range(20):
                     candidates = []
@@ -4650,11 +4691,21 @@ class SheinPublisher:
                     for c in candidates:
                         try:
                             did = (c.get_attribute('data-id') or '').strip()
-                            if did and did not in used_data_ids:
+                            if did and did not in used_data_ids and _is_value_inner_ready(c):
                                 value_inner = c
                                 break
                         except Exception:
                             continue
+                    # 若暂时没有“空框”，兜底取一个未使用框，避免极端页面结构导致完全卡住
+                    if value_inner is None:
+                        for c in candidates:
+                            try:
+                                did = (c.get_attribute('data-id') or '').strip()
+                                if did and did not in used_data_ids:
+                                    value_inner = c
+                                    break
+                            except Exception:
+                                continue
                     if value_inner is not None:
                         break
                     # Not found yet - SHEIN may not have rendered new box yet
@@ -5435,9 +5486,25 @@ class SheinPublisher:
                             matched_sku.get("sku_attributes", ""),
                             len((matched_sku.get("images") or [])[:max_imgs_per_sku])))
                     else:
-                        row_sku_map.append((page_color, None))
-                        self.log("[MAP] 行{:02d} 页面='{}' -> 未匹配".format(
-                            ri + 1, page_color))
+                        # 颜色文本不匹配时，按剩余SKU顺序补位，避免图片集中上传到前几行
+                        fallback_sku = None
+                        fallback_idx = -1
+                        for _i, _sku in enumerate(sku_list):
+                            if _i not in used_sku_indices:
+                                fallback_sku = _sku
+                                fallback_idx = _i
+                                break
+                        if fallback_sku is not None:
+                            used_sku_indices.add(fallback_idx)
+                            row_sku_map.append((page_color, fallback_sku))
+                            self.log("[MAP-FALLBACK] 行{:02d} 页面='{}' -> 顺序补位SKU='{}' | imgs={}".format(
+                                ri + 1, page_color,
+                                fallback_sku.get("sku_attributes", ""),
+                                len((fallback_sku.get("images") or [])[:max_imgs_per_sku])))
+                        else:
+                            row_sku_map.append((page_color, None))
+                            self.log("[MAP] 行{:02d} 页面='{}' -> 未匹配".format(
+                                ri + 1, page_color))
 
             def _resolve_row_and_detail_td(_row_idx):
                 _rows = _collect_detail_rows()
