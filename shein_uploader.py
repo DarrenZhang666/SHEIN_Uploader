@@ -1989,6 +1989,249 @@ class SheinPublisher:
                 except Exception:
                     continue
 
+            # 数量 Quantity 专项处理（不依赖 * 必填）：
+            # 规则：定位“数量/Quantity”属性下的“正整数”输入框（第二框），必须写入正整数 1。
+            try:
+                root = attr_card if attr_card is not None else driver
+                quantity_items = root.find_elements(
+                    By.XPATH,
+                    ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
+                    "and .//span[contains(@class,'spmp_style__productAttrLabel') and "
+                    "(contains(normalize-space(.),'数量') or contains(normalize-space(.),'Quantity'))]]"
+                )
+            except Exception:
+                quantity_items = []
+
+            for quantity_item in quantity_items:
+                try:
+                    if not quantity_item.is_displayed():
+                        continue
+
+                    # 第1框：先点击下拉，再选择第一个可用选项
+                    try:
+                        qty_box = None
+                        try:
+                            qty_boxes = quantity_item.find_elements(
+                                By.XPATH, ".//div[contains(@class,'spmp_style__appendBox')]"
+                            )
+                            if qty_boxes:
+                                qty_box = qty_boxes[0]
+                        except Exception:
+                            qty_box = None
+                        if qty_box is None:
+                            qty_box = quantity_item
+
+                        # 若第1框已有选值，先尝试清空，保证“点击后选首项”动作稳定执行
+                        try:
+                            clear_btn = None
+                            for cx in [
+                                ".//a[@data-role='close' and contains(@class,'so-select-close')]",
+                                ".//*[contains(@class,'so-select-close-warpper')]//a[contains(@class,'so-select-close')]",
+                                ".//*[contains(@class,'so-select-indicator') and contains(@class,'so-select-close')]",
+                            ]:
+                                try:
+                                    for ce in qty_box.find_elements(By.XPATH, cx):
+                                        if ce.is_displayed():
+                                            clear_btn = ce
+                                            break
+                                except Exception:
+                                    continue
+                                if clear_btn is not None:
+                                    break
+                            if clear_btn is not None:
+                                driver.execute_script(
+                                    "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                                    clear_btn
+                                )
+                                time.sleep(0.12)
+                        except Exception:
+                            pass
+
+                        qty_trigger = None
+                        for sx in [
+                            ".//div[contains(@class,'so-select-inner')]",
+                            ".//div[contains(@class,'so-select-result')]",
+                            ".//a[contains(@class,'so-select-caret') or contains(@class,'so-select-multi')]",
+                        ]:
+                            try:
+                                cand = qty_box.find_element(By.XPATH, sx)
+                                if cand.is_displayed():
+                                    qty_trigger = cand
+                                    break
+                            except Exception:
+                                continue
+
+                        qty_select_ok = False
+                        if qty_trigger is not None:
+                            driver.execute_script(
+                                "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                                qty_trigger
+                            )
+                            time.sleep(0.2)
+
+                            first_option = None
+                            try:
+                                first_option = driver.execute_script(
+                                    """
+                                    function visible(el){
+                                      if(!el) return false;
+                                      const st = window.getComputedStyle(el);
+                                      if(st.display==='none' || st.visibility==='hidden') return false;
+                                      const r = el.getBoundingClientRect();
+                                      return r.width>0 && r.height>0;
+                                    }
+                                    function validOption(el){
+                                      if(!el || !visible(el)) return false;
+                                      const cls = (el.className || '').toString();
+                                      if(/disabled|is-disabled/.test(cls)) return false;
+                                      const txt = (el.innerText || el.textContent || '').trim();
+                                      if(!txt) return false;
+                                      if(txt.includes('请选择') || txt.includes('Select')) return false;
+                                      return true;
+                                    }
+                                    const trg = arguments[0];
+                                    if(!trg) return null;
+                                    const tr = trg.getBoundingClientRect();
+                                    const tcx = (tr.left + tr.right) / 2;
+                                    const tcy = (tr.top + tr.bottom) / 2;
+                                    const drops = Array.from(document.querySelectorAll('div.so-select-drop-down-content')).filter(visible);
+                                    if(!drops.length) return null;
+                                    let best = null, bestDist = Number.POSITIVE_INFINITY;
+                                    for(const d of drops){
+                                      const r = d.getBoundingClientRect();
+                                      const cx = (r.left + r.right) / 2;
+                                      const cy = (r.top + r.bottom) / 2;
+                                      const dist = Math.hypot(cx - tcx, cy - tcy);
+                                      if(dist < bestDist){
+                                        bestDist = dist;
+                                        best = d;
+                                      }
+                                    }
+                                    if(!best) return null;
+                                    const cands = Array.from(best.querySelectorAll(
+                                      '.so-select-option, .so-option, li[role="option"], [class*="option"]'
+                                    ));
+                                    for (const c of cands){
+                                      if(validOption(c)) return c;
+                                    }
+                                    return null;
+                                    """,
+                                    qty_trigger
+                                )
+                            except Exception:
+                                first_option = None
+
+                            if first_option is not None:
+                                try:
+                                    driver.execute_script("arguments[0].click();", first_option)
+                                    qty_select_ok = True
+                                except Exception:
+                                    qty_select_ok = False
+
+                            if not qty_select_ok:
+                                # 兜底：键盘选第一项
+                                try:
+                                    active = driver.switch_to.active_element
+                                    active.send_keys(Keys.ARROW_DOWN)
+                                    time.sleep(0.08)
+                                    active.send_keys(Keys.ENTER)
+                                except Exception:
+                                    pass
+
+                            # 校验：第1框应出现选中值（非空且非占位）
+                            try:
+                                selected_nodes = qty_box.find_elements(
+                                    By.XPATH,
+                                    ".//span[contains(@class,'so-select-input') and normalize-space(.)!='' and "
+                                    "not(contains(@class,'so-input-placeholder'))]"
+                                )
+                                qty_select_ok = bool(selected_nodes)
+                            except Exception:
+                                pass
+
+                        if qty_select_ok:
+                            self.log("[OK] 数量Quantity首框已选择首项")
+                            try:
+                                driver.execute_script("document.body.click();")
+                            except Exception:
+                                pass
+                            time.sleep(0.1)
+                        else:
+                            self.log("[WARN] 数量Quantity首框未能确认选中首项")
+                    except Exception as _q1e:
+                        self.log("[WARN] 数量Quantity首框处理异常: {}".format(str(_q1e)[:80]))
+
+                    qty_inputs = []
+                    try:
+                        qty_inputs = quantity_item.find_elements(
+                            By.XPATH,
+                            ".//input[contains(@name,'attribute_extra_value') or contains(@placeholder,'正整数')]"
+                        )
+                    except Exception:
+                        qty_inputs = []
+
+                    # 兜底：按可见文本输入框补充
+                    if not qty_inputs:
+                        try:
+                            qty_inputs = quantity_item.find_elements(
+                                By.XPATH,
+                                ".//input[@type='text' or not(@type)]"
+                            )
+                        except Exception:
+                            qty_inputs = []
+
+                    # 目标为“第二个框”；若只有一个则使用唯一输入框。
+                    target_input = None
+                    if len(qty_inputs) >= 2:
+                        target_input = qty_inputs[1]
+                    elif len(qty_inputs) == 1:
+                        target_input = qty_inputs[0]
+                    if target_input is None:
+                        continue
+
+                    cur_val = str(target_input.get_attribute("value") or "").strip()
+                    if cur_val.isdigit() and int(cur_val) > 0:
+                        continue
+
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target_input)
+                    try:
+                        target_input.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", target_input)
+
+                    # 先常规输入，再用 JS 兜底，确保 React/Vue 受控输入框识别到变更。
+                    typed_ok = False
+                    try:
+                        target_input.send_keys(Keys.CONTROL, "a")
+                        target_input.send_keys(Keys.BACKSPACE)
+                    except Exception:
+                        pass
+                    try:
+                        target_input.send_keys("1")
+                        typed_ok = True
+                    except Exception:
+                        typed_ok = False
+
+                    if (not typed_ok) or (str(target_input.get_attribute("value") or "").strip() != "1"):
+                        driver.execute_script(
+                            "arguments[0].value='1';"
+                            "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
+                            "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));"
+                            "arguments[0].dispatchEvent(new Event('blur',{bubbles:true}));",
+                            target_input
+                        )
+
+                    final_val = str(target_input.get_attribute("value") or "").strip()
+                    if final_val == "1":
+                        self.log("[OK] 数量Quantity正整数已填写: 1")
+                        try:
+                            driver.execute_script("document.body.click();")
+                        except Exception:
+                            pass
+                        time.sleep(0.1)
+                except Exception:
+                    continue
+
             auto_filled_count = 0
             for item in required_items:
                 try:
