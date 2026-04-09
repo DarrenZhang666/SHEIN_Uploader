@@ -181,6 +181,34 @@ class SheinApp(tk.Tk):
         if asin and stage_for_non_dev:
             self.after(0, lambda a=asin, s=stage_for_non_dev: self.status_lbl.config(text="{} {}".format(a, s)))
 
+    @staticmethod
+    def _is_publish_page_ready(driver):
+        """判定是否已进入 SHEIN 商品发布页（URL+DOM 双通道）。"""
+        if driver is None:
+            return False
+        try:
+            cur = str(driver.current_url or "").lower()
+        except Exception:
+            cur = ""
+        if ("followsales-pro/list" in cur) and ("commoditiescategory" in cur or "commodities-category" in cur):
+            return True
+        try:
+            return bool(driver.execute_script(r"""
+                const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+                const body = document && document.body ? clean(document.body.innerText || '') : '';
+                if (body.includes('识图发品') || body.includes('上传图片') || body.includes('商品发布')) return true;
+                if (document.querySelector("input[type='file']")) return true;
+                const nodes = Array.from(document.querySelectorAll('button,span,div,a'));
+                for (const n of nodes) {
+                    const t = clean(n.innerText || n.textContent || '');
+                    if (!t) continue;
+                    if (t.includes('识图发品') || t.includes('上传图片') || t.includes('确认，下一步')) return true;
+                }
+                return false;
+            """))
+        except Exception:
+            return False
+
     def _is_chinese_page(self, driver):
         """检测当前页面是否为中文界面。"""
         try:
@@ -3336,8 +3364,6 @@ return false;
                         pass
                     self._shein_publisher = None
 
-                # 没有可用实例时，启动/连接浏览器
-                pub = SheinPublisher(log_cb=self._pub_log)
                 target_account = (self.shein_account.get().strip()
                                   or self._login_session_account
                                   or self._shein_publisher_account
@@ -3347,43 +3373,77 @@ return false;
                 _set_status('正在启动后台发布实例...' if run_headless else '正在连接或启动浏览器...')
                 launch_account = target_account
                 launch_clone_from = ""
-                try:
-                    pub.start_browser(
-                        account=launch_account,
-                        clone_from_account=launch_clone_from,
-                        headless=run_headless,
-                        force_new=(not run_headless),
-                    )
-                except Exception as first_e:
-                    # 兼容场景：先登录(非Dev)后切Dev，原账号profile可能短时残留锁，重试独立Dev profile。
-                    if not dev_mode:
-                        raise
-                    self._pub_log("[DEV] 首次启动失败，重试独立可视实例: {}".format(str(first_e)[:80]))
-                    launch_account = "{}__dev".format(target_account)
-                    launch_clone_from = target_account
-                    pub.start_browser(
-                        account=launch_account,
-                        clone_from_account=launch_clone_from,
-                        headless=False,
-                        force_new=True,
-                    )
-                self._shein_publisher = pub
-                self._shein_publisher_account = launch_account
-                # 注入已保存登录会话，确保无需重新登录
-                if login_cookies or login_storage or login_session_storage:
+
+                def _launch_publisher_instance(preferred_account, preferred_clone):
+                    _pub = SheinPublisher(log_cb=self._pub_log)
+                    _launch_account = preferred_account
+                    _launch_clone_from = preferred_clone
                     try:
-                        pub.driver.get("https://sso.geiwohuo.com/#/login")
-                        time.sleep(0.5)
+                        _pub.start_browser(
+                            account=_launch_account,
+                            clone_from_account=_launch_clone_from,
+                            headless=run_headless,
+                            force_new=(not run_headless),
+                        )
+                    except Exception as first_e:
+                        # 兼容场景：先登录(非Dev)后切Dev，原账号profile可能短时残留锁，重试独立Dev profile。
+                        if not dev_mode:
+                            raise
+                        self._pub_log("[DEV] 首次启动失败，重试独立可视实例: {}".format(str(first_e)[:80]))
+                        _launch_account = "{}__dev".format(target_account)
+                        _launch_clone_from = target_account
+                        _pub.start_browser(
+                            account=_launch_account,
+                            clone_from_account=_launch_clone_from,
+                            headless=False,
+                            force_new=True,
+                        )
+                    self._shein_publisher = _pub
+                    self._shein_publisher_account = _launch_account
+                    # 注入已保存登录会话，确保无需重新登录
+                    if login_cookies or login_storage or login_session_storage:
+                        try:
+                            _pub.driver.get("https://sso.geiwohuo.com/#/login")
+                            time.sleep(0.5)
+                        except Exception:
+                            pass
+                        self._inject_login_session_to_driver(
+                            _pub.driver, login_cookies, login_storage, login_session_storage
+                        )
+                        self._pub_log("已注入登录会话(cookies:{} storage:{})".format(
+                            len(login_cookies), len(login_storage)))
+                    return _pub, _launch_account, _launch_clone_from
+
+                pub, launch_account, launch_clone_from = _launch_publisher_instance(
+                    launch_account, launch_clone_from
+                )
+                _set_status('浏览器已就绪，正在打开商品发布页...')
+
+                open_ok = False
+                for open_try in range(1, 4):
+                    try:
+                        pub.driver.get(SHEIN_PUBLISH_URL)
+                    except Exception as nav_e:
+                        self._pub_log("[WARN] 打开商品发布页异常(第{}/3次): {}".format(
+                            open_try, str(nav_e)[:80]))
+                    time.sleep(2)
+                    if self._is_publish_page_ready(pub.driver):
+                        open_ok = True
+                        break
+                    self._pub_log("[WARN] 未进入商品发布页（第{}/3次），关闭实例并重开".format(open_try))
+                    if open_try >= 3:
+                        break
+                    try:
+                        if getattr(pub, "driver", None):
+                            pub.driver.quit()
                     except Exception:
                         pass
-                    self._inject_login_session_to_driver(
-                        pub.driver, login_cookies, login_storage, login_session_storage
+                    self._shein_publisher = None
+                    pub, launch_account, launch_clone_from = _launch_publisher_instance(
+                        target_account, ""
                     )
-                    self._pub_log("已注入登录会话(cookies:{} storage:{})".format(
-                        len(login_cookies), len(login_storage)))
-                _set_status('浏览器已就绪，正在打开商品发布页...')
-                pub.driver.get(SHEIN_PUBLISH_URL)
-                time.sleep(2)
+                if not open_ok:
+                    raise RuntimeError("未能进入商品发布页：已自动重开实例3次仍失败")
                 _set_status('正在上传商品图片...')
                 threading.Thread(target=self._auto_upload_image, args=(current_session_id,), daemon=True).start()
             except Exception as e:
@@ -3502,32 +3562,46 @@ return false;
                                       or self._login_session_account
                                       or self._shein_publisher_account
                                       or 'default')
-                    pub = SheinPublisher(log_cb=self._pub_log)
-                    pub.start_browser(
-                        account=target_account,
-                        headless=run_headless,
-                        force_new=(not run_headless),
-                    )
-                    self._shein_publisher = pub
-                    self._shein_publisher_account = target_account
-
                     login_cookies, login_storage, login_session_storage = self._get_saved_login_session()
-                    if login_cookies or login_storage or login_session_storage:
+                    pub = None
+                    for reopen_try in range(1, 4):
+                        pub = SheinPublisher(log_cb=self._pub_log)
+                        pub.start_browser(
+                            account=target_account,
+                            headless=run_headless,
+                            force_new=(not run_headless),
+                        )
+                        self._shein_publisher = pub
+                        self._shein_publisher_account = target_account
+
+                        if login_cookies or login_storage or login_session_storage:
+                            try:
+                                pub.driver.get("https://sso.geiwohuo.com/#/login")
+                                time.sleep(0.5)
+                            except Exception:
+                                pass
+                            self._inject_login_session_to_driver(
+                                pub.driver, login_cookies, login_storage, login_session_storage
+                            )
                         try:
-                            pub.driver.get("https://sso.geiwohuo.com/#/login")
-                            time.sleep(0.5)
+                            pub.driver.get(SHEIN_PUBLISH_URL)
                         except Exception:
                             pass
-                        self._inject_login_session_to_driver(
-                            pub.driver, login_cookies, login_storage, login_session_storage
-                        )
-                    pub.driver.get(SHEIN_PUBLISH_URL)
-                    time.sleep(2)
-                    try:
-                        pub._dismiss_announcements()
-                    except Exception:
-                        pass
-                    return True
+                        time.sleep(2)
+                        if self._is_publish_page_ready(pub.driver):
+                            try:
+                                pub._dismiss_announcements()
+                            except Exception:
+                                pass
+                            return True
+                        self._pub_log("[WARN] 重开后未进入商品发布页（第{}/3次），继续重开".format(reopen_try))
+                        try:
+                            if getattr(pub, "driver", None):
+                                pub.driver.quit()
+                        except Exception:
+                            pass
+                        self._shein_publisher = None
+                    return False
                 except Exception as _re_e:
                     self._pub_log('[ERROR] 重开实例失败: {}'.format(str(_re_e)[:80]))
                     return False
