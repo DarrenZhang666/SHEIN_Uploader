@@ -307,6 +307,80 @@ class SheinPublisher:
             return False
         return False
 
+    def _dismiss_publish_userguide(self):
+        """关闭商品发布页引导浮层（如“退出引导”），避免遮挡“识图发品”。"""
+        try:
+            if self.driver is None:
+                return False
+            clicked_any = False
+            for _ in range(3):
+                clicked = False
+                try:
+                    clicked = bool(self.driver.execute_script(r"""
+                        function visible(el){
+                          if(!el) return false;
+                          const st = window.getComputedStyle(el);
+                          if(st.display==='none' || st.visibility==='hidden') return false;
+                          const r = el.getBoundingClientRect();
+                          return r.width>0 && r.height>0;
+                        }
+                        const btns = Array.from(document.querySelectorAll("button,span,a")).filter(visible);
+                        for (const b of btns){
+                          const txt = (b.innerText || b.textContent || '').replace(/\s+/g,' ').trim();
+                          if (!txt) continue;
+                          if (txt === '退出引导' || txt.includes('退出引导')){
+                            b.click();
+                            return true;
+                          }
+                        }
+                        for (const b of btns){
+                          const title = (b.getAttribute('title') || '').trim();
+                          if (title === 'Last') {
+                            b.click();
+                            return true;
+                          }
+                        }
+                        return false;
+                    """))
+                except Exception:
+                    clicked = False
+
+                if not clicked:
+                    xps = [
+                        "//button[.//span[contains(normalize-space(.),'退出引导')] or contains(normalize-space(.),'退出引导')]",
+                        "//*[contains(@class,'userguide') or contains(@class,'__floater')]//button[@title='Last']",
+                    ]
+                    for xp in xps:
+                        try:
+                            for el in self.driver.find_elements(By.XPATH, xp):
+                                try:
+                                    if not el.is_displayed():
+                                        continue
+                                    self.driver.execute_script(
+                                        "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                                        el
+                                    )
+                                    clicked = True
+                                    break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            continue
+                        if clicked:
+                            break
+
+                if clicked:
+                    clicked_any = True
+                    time.sleep(0.2)
+                    continue
+                break
+
+            if clicked_any:
+                self.log("[OK] 检测到引导浮层，已点击'退出引导'")
+            return clicked_any
+        except Exception:
+            return False
+
     def _reopen_browser_to_publish_page(self):
         """关闭当前浏览器并新开实例，重新进入商品发布页。"""
         try:
@@ -329,6 +403,10 @@ class SheinPublisher:
             self._wait_ready_state(timeout=10)
             try:
                 self._dismiss_announcements()
+            except Exception:
+                pass
+            try:
+                self._dismiss_publish_userguide()
             except Exception:
                 pass
             self._wait_ready_state(timeout=3)
@@ -368,6 +446,10 @@ class SheinPublisher:
         """点击'识图发品'按钮。"""
         try:
             self._ensure_not_stopped()
+            try:
+                self._dismiss_publish_userguide()
+            except Exception:
+                pass
             if not self.ensure_identify_entry_ready(timeout=10, interval=1):
                 self.log("[ERROR] 识图发品入口不可用：已尝试重开浏览器仍未出现")
                 return False
@@ -6511,7 +6593,32 @@ class SheinPublisher:
         self._wait_ready_state(timeout=3)
         # 关闭可能弹出的公告弹窗，避免影响类目选择等后续操作
         self._dismiss_announcements()
+        self._dismiss_publish_userguide()
         self._wait_ready_state(timeout=2)
+
+        def _reopen_instance_and_back_publish(reason_text=""):
+            """关闭当前实例并重开，确保回到商品发布页。"""
+            nonlocal driver
+            try:
+                self.log("[Step2] 触发容错重开: {}".format(reason_text or "unknown"))
+                try:
+                    if self.driver:
+                        self.driver.quit()
+                except Exception:
+                    pass
+                self.driver = None
+                self.wait = None
+                self.start_browser(
+                    account=self._browser_account,
+                    clone_from_account=self._clone_from_account,
+                    headless=self._headless_mode,
+                )
+                driver = self.driver
+                return _goto_publish()
+            except Exception as _re_e:
+                self.log("[Step2] 容错重开失败: {}".format(str(_re_e)[:80]))
+                return False
+
         # Step2: 选择类目（优先识图，其次关键词树，最后列表模式）
         # 使用与单线程上品完全相同的函数链：
         #   click_identify_image_button → upload_product_image → select_first_category → click_confirm_button
@@ -6551,30 +6658,26 @@ class SheinPublisher:
                     self.log("[Step2] 第{}/3次识图失败: {} | 无推荐提示={}".format(
                         attempt, step_err, no_cat_hint))
 
+                    # 新增容错：未找到识图按钮通常是页面/实例状态异常，按“关实例重开再试”处理
+                    if ("未找到识图发品按钮" in str(step_err or "")) and attempt < 3:
+                        self.log("[Step2] 未找到识图发品按钮，关闭当前实例并新开实例重试...")
+                        if not _reopen_instance_and_back_publish("未找到识图发品按钮"):
+                            raise Exception("识图重试时重开实例失败: 未能进入商品发布页")
+                        self._wait_ready_state(timeout=3)
+                        self._dismiss_announcements()
+                        self._dismiss_publish_userguide()
+                        self._wait_ready_state(timeout=2)
+                        continue
+
                     if no_cat_hint and attempt < 3:
                         self.log("[Step2] 命中“暂无分类推荐”，关闭当前实例并新开实例重试...")
-                        try:
-                            try:
-                                if self.driver:
-                                    self.driver.quit()
-                            except Exception:
-                                pass
-                            self.driver = None
-                            self.wait = None
-                            self.start_browser(
-                                account=self._browser_account,
-                                clone_from_account=self._clone_from_account,
-                                headless=self._headless_mode,
-                            )
-                            driver = self.driver
-                            if not _goto_publish():
-                                raise Exception("新实例未能进入商品发布页")
-                            self._wait_ready_state(timeout=3)
-                            self._dismiss_announcements()
-                            self._wait_ready_state(timeout=2)
-                            continue
-                        except Exception as _re_e:
-                            raise Exception("识图重试时重开实例失败: {}".format(str(_re_e)[:80]))
+                        if not _reopen_instance_and_back_publish("识图发品暂无分类推荐"):
+                            raise Exception("识图重试时重开实例失败: 未能进入商品发布页")
+                        self._wait_ready_state(timeout=3)
+                        self._dismiss_announcements()
+                        self._dismiss_publish_userguide()
+                        self._wait_ready_state(timeout=2)
+                        continue
                     if no_cat_hint and attempt >= 3:
                         raise Exception("识图发品失败：3次均提示“暂无分类推荐”")
                     raise Exception("识图发品失败：{}".format(step_err))
@@ -6853,6 +6956,7 @@ class SheinPublisher:
                 driver.get(self.PUBLISH_URL)
                 time.sleep(3)
                 self._dismiss_announcements()
+                self._dismiss_publish_userguide()
                 self.log("[OK] 已返回商品发布列表页，等待下一次发布")
             except Exception as nav_e:
                 self.log("[WARN] 返回发布页异常: {}".format(str(nav_e)[:60]))
