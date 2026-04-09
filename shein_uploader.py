@@ -4620,7 +4620,8 @@ class SheinPublisher:
             self._ensure_not_stopped()
             driver = self.driver
             sku_list = product_info.get("sku_list", []) or []
-            max_imgs_per_sku = 5
+            # 规则：SKU 数量超过 5 时，每个 SKU 仅上传 3 张细节图，降低上传负载与失败率
+            max_imgs_per_sku = 3 if len(sku_list) > 5 else 5
             self.log("[DEBUG] SKU数={}, 每SKU最多上传{}张细节图".format(len(sku_list), max_imgs_per_sku))
             main_images = product_info.get("main_images", [])
             if not main_images and product_info.get("image_url"):
