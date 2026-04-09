@@ -38,6 +38,7 @@ class SheinPublisher:
         self.log    = log_cb or print
         self.login_manager = SheinLoginManager(log_cb=self.log)
         self._stop_publish = False
+        self._last_alive_check_ts = 0.0
         self._browser_account = ""
         self._clone_from_account = ""
         self._headless_mode = False
@@ -50,6 +51,19 @@ class SheinPublisher:
     def _ensure_not_stopped(self):
         if self._stop_publish:
             raise RuntimeError("用户已停止上品")
+        # 关键防卡死：浏览器被手动关闭/崩溃时尽快中断当前流程
+        now = time.time()
+        if now - float(getattr(self, "_last_alive_check_ts", 0.0)) < 0.8:
+            return
+        self._last_alive_check_ts = now
+        drv = getattr(self, "driver", None)
+        if drv is None:
+            raise RuntimeError("浏览器实例已关闭")
+        try:
+            _ = drv.window_handles
+            _ = drv.current_url
+        except Exception:
+            raise RuntimeError("浏览器实例已关闭")
 
     def _wait_until(self, check_fn, timeout=10, interval=1, desc="条件"):
         """轮询等待：在 timeout 内每 interval 秒检查一次。"""
@@ -4612,12 +4626,50 @@ class SheinPublisher:
             if not main_images and product_info.get("image_url"):
                 main_images = [product_info["image_url"]]
             fallback_images = main_images[:max_imgs_per_sku]
+            expected_sku_rows = len(sku_list)
+            _detail_row_selector_in_use = ""
             def _collect_detail_rows():
                 try:
-                    _rows = driver.find_elements(By.CSS_SELECTOR,
-                        "#userguide_commodities_info_skc_title_table tbody tr,"
-                        "div.detail_img_container tbody tr")
-                    return [r for r in _rows if r.is_displayed()]
+                    nonlocal _detail_row_selector_in_use
+                    _candidates = []
+                    for _sel in [
+                        "#userguide_commodities_info_skc_title_table tbody tr",
+                        "div.detail_img_container tbody tr",
+                    ]:
+                        try:
+                            _rows = driver.find_elements(By.CSS_SELECTOR, _sel)
+                        except Exception:
+                            _rows = []
+                        _visible_rows = []
+                        for _r in _rows:
+                            try:
+                                if not _r.is_displayed():
+                                    continue
+                                _tds = _r.find_elements(By.TAG_NAME, "td")
+                                if len(_tds) < 2:
+                                    continue
+                                _visible_rows.append(_r)
+                            except Exception:
+                                continue
+                        if _visible_rows:
+                            _candidates.append((_sel, _visible_rows))
+                    if not _candidates:
+                        return []
+                    # 优先选择“行数最接近期望SKU行数”的容器，避免并集导致错行。
+                    _best_sel = ""
+                    _best_rows = []
+                    _best_score = 10**9
+                    for _sel, _rows in _candidates:
+                        _score = abs(len(_rows) - int(expected_sku_rows or 0))
+                        if _score < _best_score:
+                            _best_score = _score
+                            _best_sel = _sel
+                            _best_rows = _rows
+                    if _best_sel and _best_sel != _detail_row_selector_in_use:
+                        _detail_row_selector_in_use = _best_sel
+                        self.log("[DEBUG] SKU行容器采用: {} ({}行)".format(
+                            _detail_row_selector_in_use, len(_best_rows)))
+                    return _best_rows
                 except Exception:
                     return []
             if not sku_list:
@@ -4645,7 +4697,6 @@ class SheinPublisher:
                 self.log("[WARN] 未找到细节图表格行，回退单框模式")
                 self._upload_images_to_single_input(fallback_images)
                 return
-            expected_sku_rows = len(sku_list)
             # 等待 SKU 行渲染完成（不同电脑/网络速度下会延迟）
             if len(rows) < expected_sku_rows:
                 self.log("[WARN] 初次检测细节图行数({})少于SKU数({})，等待页面补渲染...".format(
@@ -4706,10 +4757,24 @@ class SheinPublisher:
             row_sku_map = []
             # 供后续颜色校验统一使用（避免 A/B/C 模式下局部函数未定义）
             _CN_EN = {
-                "黑色": "black", "白色": "white", "灰色": "grey", "红色": "red", "蓝色": "blue",
-                "绿色": "green", "黄色": "yellow", "粉色": "pink", "粉红色": "pink", "紫色": "purple",
-                "棕色": "brown", "褐色": "brown", "橙色": "orange", "金色": "gold", "银色": "silver",
-                "米色": "beige", "米白色": "beige", "酒红色": "wine", "卡其色": "khaki", "杏色": "apricot",
+                "黑色": "black", "白色": "white", "灰色": "grey",
+                "红色": "red", "蓝色": "blue", "绿色": "green",
+                "黄色": "yellow", "粉色": "pink", "粉红色": "pink",
+                "紫色": "purple", "棕色": "brown", "褐色": "brown",
+                "橙色": "orange", "金色": "gold", "银色": "silver",
+                "米色": "beige", "米白色": "beige",
+                "酒红色": "wine", "卡其色": "khaki",
+                "深灰色": "darkgrey", "浅灰色": "lightgrey",
+                "深蓝色": "darkblue", "天蓝色": "skyblue",
+                "藏青色": "navy", "咖啡色": "coffee",
+                "墨绿色": "darkgreen", "浅绿色": "lightgreen",
+                "浅蓝色": "lightblue", "深红色": "darkred",
+                "橘色": "orange", "灰白色": "greywhite",
+                "奶白色": "creamwhite", "米黄色": "cream",
+                "原木色": "natural", "驼色": "camel",
+                "透明": "clear", "黑白色": "blackandwhite",
+                "花色": "floral", "多色": "multicolor",
+                "杏色": "apricot",
             }
             def _norm_color(s):
                 return re.sub(r"[\s\-_&/]+", "", (s or "")).lower()
@@ -4743,6 +4808,56 @@ class SheinPublisher:
                         en_part += ch
                 return cn_part.strip(), en_part.strip()
 
+            def _match_sku_by_color(page_color, _sku_list, used_indices):
+                nc = _norm_color(page_color)
+                if not nc:
+                    return None, -1
+                # Layer 1: direct normalized match
+                for i, sku in enumerate(_sku_list):
+                    if i in used_indices:
+                        continue
+                    if _norm_color(_sku_color_val(sku)) == nc:
+                        return sku, i
+                # Layer 2: extract Chinese/English parts and match via CN_EN dict
+                cn_part, en_part = _split_cn_en(page_color)
+                # 2a: look up Chinese part in CN_EN
+                for cn_key in [page_color.strip(), cn_part]:
+                    cn_en_hit = _CN_EN.get(cn_key)
+                    if cn_en_hit:
+                        nc_en = _norm_color(cn_en_hit)
+                        for i, sku in enumerate(_sku_list):
+                            if i in used_indices:
+                                continue
+                            if _norm_color(_sku_color_val(sku)) == nc_en:
+                                return sku, i
+                # 2b: use English part directly (e.g. page="白色White" -> en_part="White")
+                if en_part:
+                    nc_en = _norm_color(en_part)
+                    for i, sku in enumerate(_sku_list):
+                        if i in used_indices:
+                            continue
+                        nc_attr = _norm_color(_sku_color_val(sku))
+                        if nc_attr == nc_en:
+                            return sku, i
+                # Layer 3: match via filled_values prefix
+                filled_vals = getattr(self, "_last_main_spec_filled_values", []) or []
+                filled_idxs = getattr(self, "_main_spec_filled_sku_indices", []) or []
+                for fi, fv in enumerate(filled_vals):
+                    nfv = _norm_color(fv)
+                    if nc and nfv and (nfv.startswith(nc) or nc.startswith(nfv) or nc == nfv):
+                        if fi < len(filled_idxs):
+                            si = filled_idxs[fi]
+                            if si not in used_indices and 0 <= si < len(_sku_list):
+                                return _sku_list[si], si
+                # Layer 4: substring containment (fuzzy)
+                for i, sku in enumerate(_sku_list):
+                    if i in used_indices:
+                        continue
+                    nc_attr = _norm_color(_sku_color_val(sku))
+                    if nc_attr and (nc_attr in nc or nc in nc_attr):
+                        return sku, i
+                return None, -1
+
             # A/B/C 兜底模式：严格按顺序绑定，避免颜色匹配导致错位
             if bool(getattr(self, "_main_spec_force_abc_mode", False)):
                 self.log("[INFO] A/B/C固定映射模式：SKU1->A, SKU2->B, SKU3->C")
@@ -4759,113 +4874,6 @@ class SheinPublisher:
                     row_sku_map.append((_label, None))
             # -- 普通模式：读取页面每行第1列颜色文本，反查 sku_list 找对应 SKU --
             if not row_sku_map:
-                _CN_EN = {
-                "黑色": "black", "白色": "white", "灰色": "grey",
-                "红色": "red", "蓝色": "blue", "绿色": "green",
-                "黄色": "yellow", "粉色": "pink", "粉红色": "pink",
-                "紫色": "purple", "棕色": "brown", "褐色": "brown",
-                "橙色": "orange", "金色": "gold", "银色": "silver",
-                "米色": "beige", "米白色": "beige",
-                "酒红色": "wine", "卡其色": "khaki",
-                "深灰色": "darkgrey", "浅灰色": "lightgrey",
-                "深蓝色": "darkblue", "天蓝色": "skyblue",
-                "藏青色": "navy", "咖啡色": "coffee",
-                "墨绿色": "darkgreen", "浅绿色": "lightgreen",
-                "浅蓝色": "lightblue", "深红色": "darkred",
-                "橘色": "orange", "灰白色": "greywhite",
-                "奶白色": "creamwhite", "米黄色": "cream",
-                "原木色": "natural", "驼色": "camel",
-                "透明": "clear", "黑白色": "blackandwhite",
-                "花色": "floral", "多色": "multicolor",
-                "杏色": "apricot",
-            }
-
-                def _norm_color(s):
-                    return re.sub(r"[\s\-_&/]+", "", (s or "")).lower()
-
-                def _sku_color_val(sku):
-                    attrs = str(sku.get("sku_attributes") or "")
-                    cv = attrs.split("/")[0].strip() if attrs else ""
-                    if ":" in cv:
-                        cv = cv.split(":", 1)[1].strip()
-                    return cv
-
-                def _read_row_color(row_el):
-                    try:
-                        tds = row_el.find_elements(By.TAG_NAME, "td")
-                        if tds:
-                            raw = tds[0].text or ""
-                            lns = [l.strip() for l in raw.strip().splitlines() if l.strip()]
-                            if lns:
-                                return lns[0]
-                    except Exception:
-                        pass
-                    return ""
-
-                def _split_cn_en(text):
-                    """Split '白色White' into ('白色', 'White')."""
-                    t = (text or "").strip()
-                    cn_part = ""
-                    en_part = ""
-                    for ch in t:
-                        if '\u4e00' <= ch <= '\u9fff':
-                            cn_part += ch
-                        elif ch.isascii() and ch.isalpha():
-                            en_part += ch
-                        elif ch == ' ' and en_part:
-                            en_part += ch
-                    return cn_part.strip(), en_part.strip()
-
-                def _match_sku_by_color(page_color, _sku_list, used_indices):
-                    nc = _norm_color(page_color)
-                    if not nc:
-                        return None, -1
-                    # Layer 1: direct normalized match
-                    for i, sku in enumerate(_sku_list):
-                        if i in used_indices:
-                            continue
-                        if _norm_color(_sku_color_val(sku)) == nc:
-                            return sku, i
-                    # Layer 2: extract Chinese/English parts and match via CN_EN dict
-                    cn_part, en_part = _split_cn_en(page_color)
-                    # 2a: look up Chinese part in CN_EN
-                    for cn_key in [page_color.strip(), cn_part]:
-                        cn_en_hit = _CN_EN.get(cn_key)
-                        if cn_en_hit:
-                            nc_en = _norm_color(cn_en_hit)
-                            for i, sku in enumerate(_sku_list):
-                                if i in used_indices:
-                                    continue
-                                if _norm_color(_sku_color_val(sku)) == nc_en:
-                                    return sku, i
-                    # 2b: use English part directly (e.g. page="白色White" -> en_part="White")
-                    if en_part:
-                        nc_en = _norm_color(en_part)
-                        for i, sku in enumerate(_sku_list):
-                            if i in used_indices:
-                                continue
-                            nc_attr = _norm_color(_sku_color_val(sku))
-                            if nc_attr == nc_en:
-                                return sku, i
-                    # Layer 3: match via filled_values prefix
-                    filled_vals = getattr(self, "_last_main_spec_filled_values", []) or []
-                    filled_idxs = getattr(self, "_main_spec_filled_sku_indices", []) or []
-                    for fi, fv in enumerate(filled_vals):
-                        nfv = _norm_color(fv)
-                        if nc and nfv and (nfv.startswith(nc) or nc.startswith(nfv) or nc == nfv):
-                            if fi < len(filled_idxs):
-                                si = filled_idxs[fi]
-                                if si not in used_indices and 0 <= si < len(_sku_list):
-                                    return _sku_list[si], si
-                    # Layer 4: substring containment (fuzzy)
-                    for i, sku in enumerate(_sku_list):
-                        if i in used_indices:
-                            continue
-                        nc_attr = _norm_color(_sku_color_val(sku))
-                        if nc_attr and (nc_attr in nc or nc in nc_attr):
-                            return sku, i
-                    return None, -1
-
                 used_sku_indices = set()
                 for ri, r in enumerate(rows):
                     page_color = _read_row_color(r)
@@ -4906,6 +4914,18 @@ class SheinPublisher:
                 _row, _detail_td = _resolve_row_and_detail_td(_row_idx)
                 if _row is None or _detail_td is None:
                     return None, _row, _detail_td
+                def _input_belongs_to_row(_input_el, _expect_idx):
+                    try:
+                        _cur_rows = _collect_detail_rows()
+                        if _expect_idx >= len(_cur_rows):
+                            return False
+                        _expect_row = _cur_rows[_expect_idx]
+                        _parent_row = driver.execute_script(
+                            "return arguments[0] ? arguments[0].closest('tr') : null;", _input_el
+                        )
+                        return (_parent_row is not None) and (_parent_row == _expect_row)
+                    except Exception:
+                        return False
                 _inputs = []
                 try:
                     _inputs = _detail_td.find_elements(By.CSS_SELECTOR, "input[type='file'][multiple]")
@@ -4916,7 +4936,14 @@ class SheinPublisher:
                         _inputs = _detail_td.find_elements(By.CSS_SELECTOR, "input[type='file']")
                     except Exception:
                         _inputs = []
-                return (_inputs[0] if _inputs else None), _row, _detail_td
+                if not _inputs:
+                    return None, _row, _detail_td
+                # 防错位：优先选择确认为当前行的 input。
+                for _inp in _inputs:
+                    if _input_belongs_to_row(_inp, _row_idx):
+                        return _inp, _row, _detail_td
+                self.log("[WARN] SKU行 {} 细节图input行归属校验未通过，跳过本次input".format(_row_idx + 1))
+                return None, _row, _detail_td
 
             def _count_detail_uploaded_imgs(_row_idx):
                 _, _detail_td = _resolve_row_and_detail_td(_row_idx)
@@ -4937,6 +4964,48 @@ class SheinPublisher:
                     return _cnt
                 except Exception:
                     return 0
+
+            def _snapshot_detail_counts(_row_limit):
+                _rows = _collect_detail_rows()
+                _limit = min(int(_row_limit or 0), len(_rows))
+                _counts = []
+                for _i in range(_limit):
+                    try:
+                        _counts.append(_count_detail_uploaded_imgs(_i))
+                    except Exception:
+                        _counts.append(0)
+                return _counts
+
+            def _download_one_with_retry(_url, _max_try=3):
+                _last_err = ""
+                for _try_idx in range(int(_max_try or 1)):
+                    try:
+                        _p = self._save_img_temp(_url)
+                        if _p:
+                            return _p, ""
+                    except Exception as _e:
+                        _last_err = str(_e)[:80]
+                    if _try_idx < int(_max_try or 1) - 1:
+                        time.sleep(0.25)
+                return None, _last_err
+
+            def _build_temp_paths_strict(_desired_urls, _fallback_urls, _target_count):
+                _paths = []
+                _targets = list(_desired_urls or [])
+                _extras = [u for u in (_fallback_urls or []) if u and u not in _targets]
+                _queue = _targets + _extras
+                for _u in _queue:
+                    if len(_paths) >= _target_count:
+                        break
+                    _u = str(_u or "").strip()
+                    if not _u:
+                        continue
+                    _p, _err = _download_one_with_retry(_u, _max_try=3)
+                    if _p:
+                        _paths.append(_p)
+                    else:
+                        self.log("[WARN] 图片下载失败(已重试3次): {}".format((_err or _u)[:80]))
+                return _paths
 
             # 细节图全局进度计数：跨 SKU 连续累加，不在每个 SKU 内重置
             global_detail_img_idx = 0
@@ -4975,17 +5044,16 @@ class SheinPublisher:
                 fi, row, _ = _find_row_detail_input(row_idx)
                 if fi is None:
                     raise RuntimeError("SKU行{} 未找到细节图上传 input".format(row_idx + 1))
-                # Collect all temp paths first
-                img_paths = []
-                for img_url in sku_imgs:
-                    try:
-                        p = self._save_img_temp(img_url)
-                        if p:
-                            img_paths.append(p)
-                    except Exception as e:
-                        self.log("[WARN] 图片下载失败: {}".format(str(e)[:60]))
-                if not img_paths:
-                    raise RuntimeError("SKU行{} 所有图片下载失败".format(row_idx + 1))
+                target_img_count = len(sku_imgs)
+                img_paths = _build_temp_paths_strict(
+                    sku_imgs, fallback_images, target_img_count
+                )
+                if len(img_paths) < target_img_count:
+                    raise RuntimeError(
+                        "SKU行{} 图片准备不足: 目标{} / 已准备{}".format(
+                            row_idx + 1, target_img_count, len(img_paths)
+                        )
+                    )
                 # Upload images one by one for this SKU row, per-image retry +落库校验
                 upload_ok_count = 0
                 for img_idx, img_path in enumerate(img_paths):
@@ -4996,7 +5064,8 @@ class SheinPublisher:
                             fi_cur, row, _ = _find_row_detail_input(row_idx)
                             if fi_cur is None:
                                 raise RuntimeError("未找到细节图input")
-                            before_cnt = _count_detail_uploaded_imgs(row_idx)
+                            before_all = _snapshot_detail_counts(len(row_sku_map))
+                            before_cnt = before_all[row_idx] if row_idx < len(before_all) else _count_detail_uploaded_imgs(row_idx)
                             driver.execute_script(
                                 "arguments[0].style.display='block';"
                                 "arguments[0].style.visibility='visible';"
@@ -5011,10 +5080,22 @@ class SheinPublisher:
                             landed = False
                             for _ in range(10):
                                 time.sleep(0.25)
-                                now_cnt = _count_detail_uploaded_imgs(row_idx)
+                                now_all = _snapshot_detail_counts(len(row_sku_map))
+                                now_cnt = now_all[row_idx] if row_idx < len(now_all) else _count_detail_uploaded_imgs(row_idx)
                                 if now_cnt >= before_cnt + 1:
                                     landed = True
                                     break
+                                # 检测错位：若其他行增长，说明本次图片传错行。
+                                wrong_row = -1
+                                _check_len = min(len(before_all), len(now_all))
+                                for _ri in range(_check_len):
+                                    if _ri == row_idx:
+                                        continue
+                                    if now_all[_ri] > before_all[_ri]:
+                                        wrong_row = _ri
+                                        break
+                                if wrong_row >= 0:
+                                    raise RuntimeError("图片疑似上传到第{}行".format(wrong_row + 1))
                             if not landed:
                                 raise RuntimeError("上传后未检测到新增图片")
                             one_ok = True
@@ -5030,9 +5111,17 @@ class SheinPublisher:
                             row_idx + 1, img_idx + 1))
                 self.log("[OK] SKU行 {} 已成功上传 {}/{} 张细节图".format(
                     row_idx + 1, upload_ok_count, len(img_paths)))
-                if upload_ok_count < len(img_paths):
+                if upload_ok_count < target_img_count:
                     raise RuntimeError("SKU行{} 细节图未传全: 成功{} / 目标{}".format(
-                        row_idx + 1, upload_ok_count, len(img_paths)))
+                        row_idx + 1, upload_ok_count, target_img_count))
+
+                final_cnt = _count_detail_uploaded_imgs(row_idx)
+                if final_cnt < target_img_count:
+                    raise RuntimeError(
+                        "SKU行{} 上传后数量校验失败: 当前{} / 目标{}".format(
+                            row_idx + 1, final_cnt, target_img_count
+                        )
+                    )
 
                 # -- 上传后颜色校验：重读当前行颜色，与预期 SKU 比对 --
                 try:
@@ -6052,6 +6141,25 @@ class SheinPublisher:
             导航到商品发布页面。
             仅直达 URL，不再走首页菜单，减少失败点。
             """
+            def _is_auth_url(_u):
+                _ul = str(_u or "").lower()
+                return ("/auth/" in _ul) or ("gmpsso" in _ul) or ("authorize" in _ul and "sso" in _ul)
+
+            def _wait_auth_back(_sec=18):
+                _end = time.time() + float(_sec)
+                while time.time() < _end:
+                    try:
+                        _cu = driver.current_url or ""
+                    except Exception:
+                        _cu = ""
+                    if _cu and (not _is_auth_url(_cu)):
+                        return _cu
+                    time.sleep(0.8)
+                try:
+                    return driver.current_url or ""
+                except Exception:
+                    return ""
+
             current_url = driver.current_url or ""
             # 检查是否已在发布页面
             if "followsales-pro/list" in current_url and ("commoditiesCategory" in current_url or "commodities-category" in current_url):
@@ -6061,19 +6169,23 @@ class SheinPublisher:
             # 直接导航到发布页面（带重试，处理授权中跳转）
             self.log("直接导航到商品发布页面...")
             try:
-                for attempt in range(1, 4):
+                for attempt in range(1, 6):
                     driver.get(self.PUBLISH_URL)
-                    time.sleep(2)
+                    time.sleep(1.4 if attempt == 1 else (1.8 + 0.5 * attempt))
                     cur = driver.current_url or ""
                     if "followsales-pro/list" in cur and ("commoditiesCategory" in cur or "commodities-category" in cur):
                         self.log("已直接打开商品发布页")
                         return True
                     # 命中授权中页：先到 home 再回发布页
-                    if "/auth/" in cur or "GMPSSO" in cur:
-                        self.log("检测到授权中页面，第{}/3次重试...".format(attempt))
+                    if _is_auth_url(cur):
+                        self.log("检测到授权中页面，第{}/5次重试...".format(attempt))
+                        cur2 = _wait_auth_back(18 + attempt * 2)
+                        if "followsales-pro/list" in cur2 and ("commoditiesCategory" in cur2 or "commodities-category" in cur2):
+                            self.log("授权回跳后已进入商品发布页")
+                            return True
                         try:
                             driver.get("https://sso.geiwohuo.com/#/home")
-                            time.sleep(1.2)
+                            time.sleep(1.2 + 0.3 * attempt)
                         except Exception:
                             pass
                         continue

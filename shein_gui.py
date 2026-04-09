@@ -2,7 +2,7 @@
 """GUI layer for SHEIN app."""
 
 from shein_main import *
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 import tkinter.font as tkfont
 import subprocess
 from shein_developer_mode import DevModeToggle, is_dev_mode
@@ -4657,6 +4657,7 @@ return false;
         success_list = []
         fail_list = []
         total = len(asins)
+        per_asin_timeout_sec = 420
         done = 0
         result_lock = threading.Lock()
         task_lock = threading.Lock()
@@ -4683,6 +4684,9 @@ return false;
         max_workers = min(max_workers, 3)
         dev_mode_now = bool(is_dev_mode())
         reusable_main_pub = self._shein_publisher if self._is_publisher_reusable(self._shein_publisher) else None
+        # 非开发者模式下，避免复用主实例导致授权态污染扩散到并发 worker
+        if (not dev_mode_now):
+            reusable_main_pub = None
         # 开发者模式要求可视化：若当前主实例是无界面浏览器，禁止复用并重建可视实例。
         if dev_mode_now and reusable_main_pub is not None:
             old_headless = bool(getattr(reusable_main_pub, "_headless_mode", False))
@@ -4784,6 +4788,8 @@ return false;
                         pass
                 self._pub_log('[W{}] {}'.format(worker_idx, _msg))
             worker_has_failure = False
+            auth_fail_streak = 0
+            worker_headless = not is_dev_mode()
 
             def _inject_login_session(driver):
                 """将主登录实例的 cookies/localStorage/sessionStorage 注入 worker 浏览器。"""
@@ -4792,15 +4798,57 @@ return false;
                 )
 
             def _is_on_publish_page(url):
-                return ("followsales-pro/list" in url
-                        and ("commoditiesCategory" in url or "commodities-category" in url))
+                u = str(url or "").lower()
+                return ("followsales-pro/list" in u
+                        and ("commoditiescategory" in u or "commodities-category" in u))
+
+            def _has_publish_dom(driver):
+                """URL 不稳定时，用页面关键特征兜底判定是否已在发布页。"""
+                try:
+                    return bool(driver.execute_script(r"""
+                        const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+                        const body = document && document.body ? clean(document.body.innerText || '') : '';
+                        if (body.includes('识图发品') || body.includes('上传图片') || body.includes('商品发布')) return true;
+                        const fileInput = document.querySelector("input[type='file']");
+                        if (fileInput) return true;
+                        const nodes = Array.from(document.querySelectorAll('button,span,div,a'));
+                        for (const n of nodes) {
+                            const t = clean(n.innerText || n.textContent || '');
+                            if (!t) continue;
+                            if (t.includes('识图发品') || t.includes('上传图片') || t.includes('确认，下一步')) return true;
+                        }
+                        return false;
+                    """))
+                except Exception:
+                    return False
+
+            def _is_auth_page(url):
+                u = str(url or "").lower()
+                return ("/auth/" in u) or ("gmpsso" in u) or ("authorize" in u and "sso" in u)
+
+            def _wait_leave_auth_page(driver, wait_sec=18):
+                end_ts = time.time() + float(wait_sec)
+                while time.time() < end_ts:
+                    try:
+                        cur = driver.current_url or ""
+                    except Exception:
+                        cur = ""
+                    if (not _is_auth_page(cur)) and cur:
+                        return cur
+                    if _has_publish_dom(driver):
+                        return cur
+                    time.sleep(0.8)
+                try:
+                    return driver.current_url or ""
+                except Exception:
+                    return ""
 
             def _ensure_publish_page(driver):
                 try:
                     cur = driver.current_url or ""
                 except Exception:
                     cur = ""
-                if _is_on_publish_page(cur):
+                if _is_on_publish_page(cur) or _has_publish_dom(driver):
                     return True
 
                 _has_session = bool(login_cookies or login_storage)
@@ -4816,21 +4864,34 @@ return false;
                     _worker_log("已注入登录会话(cookies:{} storage:{})".format(
                         len(login_cookies), len(login_storage)))
 
-                for _attempt in range(3):
+                for _attempt in range(7):
                     try:
                         driver.get(SHEIN_PUBLISH_URL)
-                        time.sleep(1.0 if _attempt == 0 else 2.0)
+                        time.sleep(1.4 if _attempt == 0 else (2.0 + 0.6 * _attempt))
                         cur = driver.current_url or ""
-                        if _is_on_publish_page(cur):
+                        if _is_on_publish_page(cur) or _has_publish_dom(driver):
                             return True
-                        if "/auth/" in cur or "GMPSSO" in cur:
-                            _worker_log("授权中页面，第{}/3次重试".format(_attempt + 1))
+                        if _is_auth_page(cur):
+                            _worker_log("授权中页面，第{}/7次重试".format(_attempt + 1))
+                            # 先等待 SSO 回跳，有些机器会慢几秒
+                            cur2 = _wait_leave_auth_page(driver, wait_sec=18 + _attempt * 2)
+                            if _is_on_publish_page(cur2) or _has_publish_dom(driver):
+                                return True
                             try:
                                 driver.get("https://sso.geiwohuo.com/#/home")
-                                time.sleep(1.0)
+                                time.sleep(1.2 + 0.3 * _attempt)
                             except Exception:
                                 pass
                             continue
+                        # URL 不是授权页但也不是发布页时，强制 replace 一次，避免历史回退/拦截导致的假跳转
+                        try:
+                            driver.execute_script("window.location.replace(arguments[0]);", SHEIN_PUBLISH_URL)
+                            time.sleep(1.2 + 0.3 * _attempt)
+                            cur3 = driver.current_url or ""
+                            if _is_on_publish_page(cur3) or _has_publish_dom(driver):
+                                return True
+                        except Exception:
+                            pass
                     except Exception:
                         pass
 
@@ -4838,31 +4899,80 @@ return false;
                 if _has_session:
                     _inject_login_session(driver)
                     try:
+                        driver.get("https://sso.geiwohuo.com/#/home")
+                        time.sleep(1.2)
                         driver.get(SHEIN_PUBLISH_URL)
-                        time.sleep(2.0)
+                        time.sleep(2.2)
                         cur = driver.current_url or ""
                     except Exception:
                         cur = ""
-                    return _is_on_publish_page(cur)
+                    return _is_on_publish_page(cur) or _has_publish_dom(driver)
                 return False
 
             worker_account = '{}__w{}'.format(base_account, worker_idx)
             use_main_pub = (reusable_main_pub is not None and worker_idx == 1)
             pub = reusable_main_pub if use_main_pub else SheinPublisher(log_cb=_worker_log)
+
+            def _rebuild_worker_instance(reason_text="", force_visible=False):
+                """当前 worker 连续授权失败时，重建浏览器实例并恢复到发布页。"""
+                nonlocal pub, use_main_pub, auth_fail_streak, worker_headless
+                try:
+                    if force_visible and worker_headless:
+                        worker_headless = False
+                        _worker_log("授权链路降级：自动切换可视浏览器模式")
+                    _worker_log("触发实例重建: {}".format(reason_text or "unknown"))
+                    old_pub = pub
+                    try:
+                        if old_pub and getattr(old_pub, "driver", None):
+                            old_pub.driver.quit()
+                    except Exception:
+                        pass
+                    if use_main_pub:
+                        # 主实例已失效，避免后续误复用
+                        self._shein_publisher = None
+                    rebuilt = SheinPublisher(log_cb=_worker_log)
+                    rebuilt_account = "{}__w{}_r{}".format(
+                        base_account, worker_idx, int(time.time()) % 100000
+                    )
+                    rebuilt.start_browser(
+                        account=rebuilt_account,
+                        clone_from_account=base_account,
+                        headless=worker_headless,
+                        force_new=True,
+                    )
+                    pub = rebuilt
+                    use_main_pub = False
+                    with self._worker_publishers_lock:
+                        self._worker_publishers[worker_idx] = pub
+                    if not _ensure_publish_page(pub.driver):
+                        _worker_log("重建后仍未进入发布页")
+                        return False
+                    auth_fail_streak = 0
+                    _worker_log("重建后已恢复商品发布页")
+                    return True
+                except Exception as _rb_e:
+                    _worker_log("重建实例失败: {}".format(str(_rb_e)[:100]))
+                    return False
             try:
                 if not use_main_pub:
                     # 先克隆已登录账号 profile，再补会话注入，尽量避免每个线程从登录页慢跳转
                     pub.start_browser(
                         account=worker_account,
                         clone_from_account=base_account,
-                        headless=(not is_dev_mode()),
-                        force_new=is_dev_mode(),
+                        headless=worker_headless,
+                        force_new=True,
                     )
                 else:
                     _worker_log("复用主浏览器实例")
                 with self._worker_publishers_lock:
                     self._worker_publishers[worker_idx] = pub
-                if not _ensure_publish_page(pub.driver):
+                _startup_ok = _ensure_publish_page(pub.driver)
+                if not _startup_ok and worker_headless:
+                    if not _rebuild_worker_instance("启动阶段授权中", force_visible=True):
+                        self._pub_log('[W{}] 启动阶段授权失败，结束 worker'.format(worker_idx))
+                        return
+                    _startup_ok = True
+                if not _startup_ok:
                     self._pub_log('[W{}] 会话注入后仍未进入发布页'.format(worker_idx))
                 else:
                     self._pub_log('[W{}] 已进入商品发布页'.format(worker_idx))
@@ -4896,14 +5006,50 @@ return false;
                         self.after(0, lambda a=asin: self._set_asin_status(a, "publishing"))
                         self.after(0, lambda a=asin: self._set_asin_progress(a, 15, "上品中", state="running"))
                         self._log_publish_progress(asin, "上品中")
-                        if not _ensure_publish_page(pub.driver):
+                        ok_page = _ensure_publish_page(pub.driver)
+                        if not ok_page:
+                            if _rebuild_worker_instance("ASIN授权中", force_visible=True):
+                                ok_page = _ensure_publish_page(pub.driver)
+                        if not ok_page:
+                            auth_fail_streak += 1
                             worker_has_failure = True
                             _record_result(asin, False, '未能进入商品发布页（授权中）')
+                            if auth_fail_streak >= 1:
+                                _worker_log("连续{}次进入发布页失败，尝试重建实例".format(auth_fail_streak))
+                                if not _rebuild_worker_instance("连续授权失败", force_visible=True):
+                                    _worker_log("重建失败，结束当前worker")
+                                    return
                             continue
+                        auth_fail_streak = 0
                         cat_result = auto_match_category(info)
                         cat_name = cat_result["name"]
                         cat_path = cat_result["path"]
-                        result = pub.publish_product(info, cat_path if cat_path else [cat_name], price_multiplier=_price_mult)
+                        with ThreadPoolExecutor(max_workers=1) as _asin_exec:
+                            _f = _asin_exec.submit(
+                                pub.publish_product,
+                                info,
+                                cat_path if cat_path else [cat_name],
+                                _price_mult
+                            )
+                            try:
+                                result = _f.result(timeout=per_asin_timeout_sec)
+                            except FutureTimeoutError:
+                                try:
+                                    if hasattr(pub, "request_stop"):
+                                        pub.request_stop(force_quit=True)
+                                except Exception:
+                                    pass
+                                worker_has_failure = True
+                                _record_result(
+                                    asin,
+                                    False,
+                                    "超时：{}秒内未完成（卡在上传阶段已自动中断）".format(per_asin_timeout_sec)
+                                )
+                                _worker_log("ASIN={} 上品超时，已中断并准备重建实例".format(asin))
+                                if not _rebuild_worker_instance("单商品上品超时"):
+                                    _worker_log("超时后重建失败，结束当前worker")
+                                    return
+                                continue
                         if result:
                             _record_result(asin, True)
                         else:

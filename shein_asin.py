@@ -1872,8 +1872,9 @@ def fetch_amazon_product(asin, region="美国"):
         dimension_names, value_display_map = _build_variation_value_maps(page_html)
         fallback_images = main_images[:5] if main_images else ([res["image_url"]] if res.get("image_url") else [])
         def _get_sku_image_limit(sku_count):
-            # 需求：SKU >= 5 时，每个 SKU 最多抓取 3 张；否则最多 5 张
-            return 3 if int(sku_count or 0) >= 5 else 5
+            # 稳定优先：统一抓取到 5 张，避免后续上品细节图数量不足。
+            # （此前 SKU 较多时降到 3 张，容易触发“明明应有5张却只上传3张”的问题）
+            return 5
         def _basis_has_style(_basis):
             return any("style" in str(_b).lower() for _b in (_basis or []))
 
@@ -2092,8 +2093,9 @@ def fetch_amazon_product(asin, region="美国"):
         # 对所有 color SKU 执行统一颜色唯一化（覆盖所有构建路径）
         sku_list = _enforce_unique_color_skus(sku_list)
 
-        # 业务规则：每个 SKU 必须至少 2 张图；不足 2 张的 SKU 直接删除。
-        sku_list, dropped_by_images = _filter_skus_by_min_images(sku_list, min_images=2)
+        # 稳定性优先：不同网络/电脑抓图成功率有波动，不能因临时抓图不足而删掉 SKU。
+        # 这里仅做去重规范化，不按图片张数过滤，后续上传阶段会再做兜底补图与强校验。
+        sku_list, dropped_by_images = _filter_skus_by_min_images(sku_list, min_images=0)
         if dropped_by_images:
             res["sku_removed_for_few_images"] = dropped_by_images
 
