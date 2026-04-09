@@ -4954,8 +4954,8 @@ class SheinPublisher:
             # 版本指纹：用于确认运行中的进程已加载到最新上传逻辑
             self.log("[DEBUG] 细节图上传逻辑版本: 2026-04-09-r3")
             sku_list = product_info.get("sku_list", []) or []
-            # 规则：SKU 数量超过 5 时，每个 SKU 仅上传 3 张细节图，降低上传负载与失败率
-            max_imgs_per_sku = 3 if len(sku_list) > 5 else 5
+            # 规则：SKU 数量达到 5（含）及以上时，每个 SKU 仅上传 3 张细节图，降低上传负载与失败率
+            max_imgs_per_sku = 3 if len(sku_list) >= 5 else 5
             self.log("[DEBUG] SKU数={}, 每SKU最多上传{}张细节图".format(len(sku_list), max_imgs_per_sku))
             main_images = product_info.get("main_images", [])
             if not main_images and product_info.get("image_url"):
