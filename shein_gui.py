@@ -3961,6 +3961,15 @@ return false;
                         self._log_publish_progress(target_asin, "上品失败")
             except Exception:
                 pass
+            # 单商品流程结束后强制释放浏览器与驱动，避免后台残留线程
+            try:
+                if self._shein_publisher and getattr(self._shein_publisher, "driver", None):
+                    self._shein_publisher.quit()
+                    self._pub_log('[CLEANUP] 当前商品结束，已关闭浏览器实例与driver')
+            except Exception as _qe:
+                self._pub_log('[WARN] 清理浏览器实例失败: {}'.format(str(_qe)[:80]))
+            finally:
+                self._shein_publisher = None
             self._active_publish_asin = None
             self._publish_running = False
     def _upload_product_image_btn(self):
@@ -5116,6 +5125,12 @@ return false;
                         self.after(0, lambda a=asin: self._set_asin_status(a, "publishing"))
                         self.after(0, lambda a=asin: self._set_asin_progress(a, 15, "上品中", state="running"))
                         self._log_publish_progress(asin, "上品中")
+                        if not getattr(pub, "driver", None):
+                            _worker_log("检测到浏览器实例已关闭，准备为当前商品重建实例")
+                            if not _rebuild_worker_instance("单商品开始前初始化实例"):
+                                worker_has_failure = True
+                                _record_result(asin, False, '实例重建失败：无法启动浏览器')
+                                return
                         ok_page = _ensure_publish_page(pub.driver)
                         if not ok_page:
                             if _rebuild_worker_instance("ASIN授权中", force_visible=True):
@@ -5238,6 +5253,13 @@ return false;
                         worker_has_failure = True
                         _record_result(asin, False, str(e))
                     finally:
+                        # 每个商品结束后都强制关闭实例，避免 Chrome/driver 线程后台累积
+                        try:
+                            if pub is not None and getattr(pub, "driver", None):
+                                pub.quit()
+                                _worker_log("ASIN={} 收尾完成：已关闭浏览器实例与驱动".format(asin))
+                        except Exception as _close_e:
+                            _worker_log("ASIN={} 收尾关闭实例失败: {}".format(asin, str(_close_e)[:80]))
                         try:
                             with self._worker_publishers_lock:
                                 if self._worker_active_asins.get(worker_idx) == asin:

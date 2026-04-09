@@ -415,7 +415,7 @@ class SheinPublisher:
             self.log("[ERROR] 重开浏览器并打开商品发布页失败: {}".format(str(e)[:100]))
             return False
 
-    def ensure_identify_entry_ready(self, timeout=10, interval=1):
+    def ensure_identify_entry_ready(self, timeout=20, interval=1):
         """
         确保“识图发品”入口可见：
         - 先在 timeout 内每 interval 秒轮询
@@ -430,7 +430,7 @@ class SheinPublisher:
         ):
             return True
 
-        self.log("[WARN] 10秒内未检测到'识图发品'入口，准备重开浏览器并回到商品发布页")
+        self.log("[WARN] {}秒内未检测到'识图发品'入口，准备重开浏览器并回到商品发布页".format(int(timeout)))
         if not self._reopen_browser_to_publish_page():
             return False
 
@@ -450,7 +450,7 @@ class SheinPublisher:
                 self._dismiss_publish_userguide()
             except Exception:
                 pass
-            if not self.ensure_identify_entry_ready(timeout=10, interval=1):
+            if not self.ensure_identify_entry_ready(timeout=20, interval=1):
                 self.log("[ERROR] 识图发品入口不可用：已尝试重开浏览器仍未出现")
                 return False
             self.log("[DEBUG] 查找'识图发品'按钮...")
@@ -6632,7 +6632,8 @@ class SheinPublisher:
                 if not _tmp_img:
                     raise Exception("识图图片下载失败")
 
-                # 新策略：仅当出现“暂无分类推荐”提示时，关闭实例重开后重试（最多3次）
+                # 容错策略：识图后若未出现可选类目（含“暂无分类推荐”或未识别到推荐类目），
+                # 关闭实例重开后重试，最多3次
                 for attempt in range(1, 4):
                     step_err = None
                     try:
@@ -6669,8 +6670,13 @@ class SheinPublisher:
                         self._wait_ready_state(timeout=2)
                         continue
 
-                    if no_cat_hint and attempt < 3:
-                        self.log("[Step2] 命中“暂无分类推荐”，关闭当前实例并新开实例重试...")
+                    # 新增容错：识图后未出现可选类目（无推荐提示/未识别到推荐类目）都执行重开重试
+                    no_category_detected = (
+                        no_cat_hint
+                        or ("未识别到推荐类目" in str(step_err or ""))
+                    )
+                    if no_category_detected and attempt < 3:
+                        self.log("[Step2] 识图后未出现可选类目，关闭当前实例并新开实例重试...")
                         if not _reopen_instance_and_back_publish("识图发品暂无分类推荐"):
                             raise Exception("识图重试时重开实例失败: 未能进入商品发布页")
                         self._wait_ready_state(timeout=3)
@@ -6678,8 +6684,8 @@ class SheinPublisher:
                         self._dismiss_publish_userguide()
                         self._wait_ready_state(timeout=2)
                         continue
-                    if no_cat_hint and attempt >= 3:
-                        raise Exception("识图发品失败：3次均提示“暂无分类推荐”")
+                    if no_category_detected and attempt >= 3:
+                        raise Exception("识图发品失败：3次均未出现可选类目")
                     raise Exception("识图发品失败：{}".format(step_err))
 
                 # 第3次仍失败：直接判定上品失败（不再回退关键词类目）
