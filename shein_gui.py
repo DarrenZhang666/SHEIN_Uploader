@@ -3961,15 +3961,23 @@ return false;
                         self._log_publish_progress(target_asin, "上品失败")
             except Exception:
                 pass
-            # 单商品流程结束后强制释放浏览器与驱动，避免后台残留线程
+            # 单商品流程结束后默认清理实例；开发者模式点击停止时保留当前页面。
             try:
-                if self._shein_publisher and getattr(self._shein_publisher, "driver", None):
+                stop_requested = bool(
+                    self._stop_publish or
+                    (session_id is not None and session_id != self._publish_session_id)
+                )
+                keep_alive_for_dev_stop = bool(is_dev_mode() and stop_requested)
+                if keep_alive_for_dev_stop:
+                    self._pub_log('[STOP][DEV] 保留当前浏览器页面，不关闭实例与driver')
+                elif self._shein_publisher and getattr(self._shein_publisher, "driver", None):
                     self._shein_publisher.quit()
                     self._pub_log('[CLEANUP] 当前商品结束，已关闭浏览器实例与driver')
             except Exception as _qe:
                 self._pub_log('[WARN] 清理浏览器实例失败: {}'.format(str(_qe)[:80]))
             finally:
-                self._shein_publisher = None
+                if not (is_dev_mode() and bool(self._stop_publish)):
+                    self._shein_publisher = None
             self._active_publish_asin = None
             self._publish_running = False
     def _upload_product_image_btn(self):
@@ -5253,9 +5261,16 @@ return false;
                         worker_has_failure = True
                         _record_result(asin, False, str(e))
                     finally:
-                        # 每个商品结束后都强制关闭实例，避免 Chrome/driver 线程后台累积
+                        # 每个商品结束后默认关闭实例；开发者模式点击停止时保留当前页面。
                         try:
-                            if pub is not None and getattr(pub, "driver", None):
+                            stop_requested = bool(
+                                self._stop_publish or
+                                (session_id is not None and session_id != self._publish_session_id)
+                            )
+                            keep_alive_for_dev_stop = bool(is_dev_mode() and stop_requested)
+                            if keep_alive_for_dev_stop:
+                                _worker_log("ASIN={} 开发者模式停止：保留当前浏览器页面".format(asin))
+                            elif pub is not None and getattr(pub, "driver", None):
                                 pub.quit()
                                 _worker_log("ASIN={} 收尾完成：已关闭浏览器实例与驱动".format(asin))
                         except Exception as _close_e:

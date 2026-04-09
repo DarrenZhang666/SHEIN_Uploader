@@ -1410,6 +1410,75 @@ def _filter_skus_by_min_images(sku_list, min_images=2):
     return kept, dropped
 
 
+def _backfill_sku_images(sku_list, min_images=2):
+    """
+    SKU 图片互补：
+    - 当某 SKU 图片不足 min_images 时，优先从“其他 SKU 图片池”补齐
+    - 若仍不足且该 SKU 至少有 1 张图，则复制首图做兜底，避免仅 1 张图导致上品失败
+    返回：(new_sku_list, backfilled_count, duplicated_fallback_count)
+    """
+    target = max(0, int(min_images or 0))
+    if not sku_list or target <= 0:
+        return sku_list, 0, 0
+
+    normalized = []
+    for sku in (sku_list or []):
+        sku2 = dict(sku or {})
+        sku2["images"] = _normalize_image_list(sku2.get("images", []))
+        normalized.append(sku2)
+
+    # 全局图片池（去重后按出现顺序）
+    global_pool = []
+    for sku in normalized:
+        for img in (sku.get("images") or []):
+            if img and img not in global_pool:
+                global_pool.append(img)
+
+    backfilled = 0
+    duplicated_fallback = 0
+    out = []
+    for idx, sku in enumerate(normalized):
+        imgs = list(sku.get("images") or [])
+        before = len(imgs)
+
+        if len(imgs) < target:
+            # 优先从其它 SKU 借图补齐
+            other_pool = []
+            for j, other in enumerate(normalized):
+                if j == idx:
+                    continue
+                for u in (other.get("images") or []):
+                    if u and u not in other_pool:
+                        other_pool.append(u)
+            for u in other_pool:
+                if u and u not in imgs:
+                    imgs.append(u)
+                if len(imgs) >= target:
+                    break
+
+        if len(imgs) < target:
+            # 再用全局池兜底
+            for u in global_pool:
+                if u and u not in imgs:
+                    imgs.append(u)
+                if len(imgs) >= target:
+                    break
+
+        if len(imgs) < target and imgs:
+            # 最后兜底：复制首图补足张数（保证至少 2 张）
+            while len(imgs) < target:
+                imgs.append(imgs[0])
+                duplicated_fallback += 1
+
+        sku3 = dict(sku)
+        sku3["images"] = imgs
+        out.append(sku3)
+        if len(imgs) >= target and before < target:
+            backfilled += 1
+
+    return out, backfilled, duplicated_fallback
+
+
 _SENSITIVE_REPLACEMENT_MAP = {
     "sales": "popular",
     "on sale": "special offer",
@@ -2092,6 +2161,16 @@ def fetch_amazon_product(asin, region="美国"):
 
         # 对所有 color SKU 执行统一颜色唯一化（覆盖所有构建路径）
         sku_list = _enforce_unique_color_skus(sku_list)
+
+        # 图片互补：当某 SKU 仅 1 张图时，优先借用其他 SKU 图片补齐到至少 2 张，
+        # 尽量避免上品阶段因单 SKU 图片不足而失败。
+        sku_list, backfilled_skus, duplicated_fallback_count = _backfill_sku_images(
+            sku_list, min_images=2
+        )
+        if backfilled_skus:
+            res["sku_images_backfilled"] = backfilled_skus
+        if duplicated_fallback_count:
+            res["sku_images_duplicated_fallback"] = duplicated_fallback_count
 
         # 稳定性优先：不同网络/电脑抓图成功率有波动，不能因临时抓图不足而删掉 SKU。
         # 这里仅做去重规范化，不按图片张数过滤，后续上传阶段会再做兜底补图与强校验。
