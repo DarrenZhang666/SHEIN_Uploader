@@ -2170,6 +2170,43 @@ class SheinApp(tk.Tk):
                 # 恢复为与正常抓取一致的状态文案，清除 no price 提示
                 self.status_lbl.config(text="抓取完成，共缓存 {} 个商品".format(len(self.product_cache)))
 
+    @staticmethod
+    def _parse_manual_features(raw_text):
+        """将多行商品特点文本规范化为列表。"""
+        lines = []
+        for line in str(raw_text or "").splitlines():
+            item = str(line or "").strip()
+            if not item:
+                continue
+            item = re.sub(r"^[>\-\u2022\u00b7\*\s]+", "", item).strip()
+            if item:
+                lines.append(item[:500])
+        return lines[:6]
+
+    def _save_manual_title_features(self, asin, raw_title=None, raw_features_text=None):
+        """保存详情页手动编辑的标题与商品特点，发布时优先使用。"""
+        asin = str(asin or "").strip()
+        if not asin:
+            return
+        info = self.product_cache.get(asin)
+        if not isinstance(info, dict):
+            info = {"asin": asin}
+            self.product_cache[asin] = info
+
+        if raw_title is not None:
+            title = str(raw_title or "").strip()
+            if title:
+                info["title"] = title[:300]
+            else:
+                info["title"] = ""
+
+        if raw_features_text is not None:
+            features = self._parse_manual_features(raw_features_text)
+            info["features"] = features
+            # 与上品填写逻辑保持一致：有特点时优先拼接为商品描述
+            if features:
+                info["description"] = "\n".join(features)
+
     def _import_txt(self):
         if self._license_locked:
             self._show_auth_lock_popup()
@@ -4290,16 +4327,28 @@ return false;
         title_bar = tk.Frame(inf, bg=BG_PANEL)
         title_bar.pack(fill="x", padx=4, pady=2)
         title_bar.grid_columnconfigure(0, weight=1)
+        title_edit_frame = tk.Frame(title_bar, bg=BG_PANEL)
+        title_edit_frame.grid(row=0, column=0, sticky="ew")
         tk.Label(
-            title_bar,
-            text=info.get("title",""),
-            font=("Segoe UI",13,"bold"),
-            fg=TEXT_MAIN,
+            title_edit_frame,
+            text="商品标题（可编辑）",
+            font=("Segoe UI",9),
+            fg=TEXT_SUB,
             bg=BG_PANEL,
-            anchor="w",
-            justify="left",
-            wraplength=380
-        ).grid(row=0, column=0, sticky="w")
+            anchor="w"
+        ).pack(anchor="w")
+        title_var = tk.StringVar(value=str(info.get("title", "") or ""))
+        title_entry = tk.Entry(
+            title_edit_frame,
+            textvariable=title_var,
+            font=("Segoe UI",11,"bold"),
+            fg=TEXT_MAIN,
+            bg=BG_CARD,
+            insertbackground=TEXT_MAIN,
+            relief="flat",
+            bd=2
+        )
+        title_entry.pack(fill="x", pady=(2, 0))
         publish_fail_reason = str(info.get("publish_fail_reason", "") or "").strip()
         if publish_fail_reason:
             tk.Label(
@@ -4350,24 +4399,59 @@ return false;
 
         price_entry.bind("<FocusOut>", _commit_price)
         price_entry.bind("<Return>", lambda e: (_commit_price(), "break")[1])
+        def _commit_title(_event=None, _asin=asin, _var=title_var):
+            self._save_manual_title_features(_asin, raw_title=_var.get())
+        title_entry.bind("<FocusOut>", _commit_title)
+        title_entry.bind("<Return>", lambda e: (_commit_title(), "break")[1])
         row("评分: {}  评论数: {}".format(info.get("rating","N/A"),info.get("reviews","N/A")),10,TEXT_SUB)
         url=info.get("url","")
         if url:
             tk.Button(inf,text="在亚马逊中查看",bg=BG_CARD,fg=ACCENT2,
                 font=("Segoe UI",9),relief="flat",bd=0,cursor="hand2",
                 command=lambda u=url:webbrowser.open(u)).pack(anchor="w",padx=4,pady=4)
-        feats=info.get("features",[])
-        if feats:
-            tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=6)
-            tk.Label(self.df,text="商品特点",font=("Segoe UI",11,"bold"),fg=ACCENT2,bg=BG_PANEL).pack(anchor="w",padx=20)
-            for ft in feats:
-                fr=tk.Frame(self.df,bg=BG_PANEL); fr.pack(fill="x",padx=20,pady=1)
-                tk.Label(fr,text=">",fg=ACCENT,bg=BG_PANEL,font=("Segoe UI",10)).pack(side="left")
-                tk.Label(fr,text=ft,font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL,
-                    wraplength=660,justify="left",anchor="w").pack(side="left",padx=6)
+        feats = info.get("features", [])
+        feature_lines = []
+        if isinstance(feats, (list, tuple)):
+            feature_lines = [str(ft or "").strip() for ft in feats if str(ft or "").strip()]
+        elif str(feats or "").strip():
+            feature_lines = [str(feats).strip()]
+        tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=6)
+        tk.Label(self.df,text="商品特点（可编辑，每行一条）",font=("Segoe UI",11,"bold"),fg=ACCENT2,bg=BG_PANEL).pack(anchor="w",padx=20)
+        feat_editor = tk.Text(
+            self.df,
+            height=max(4, min(8, len(feature_lines) + 1)),
+            font=("Segoe UI",10),
+            fg=TEXT_MAIN,
+            bg=BG_CARD,
+            insertbackground=TEXT_MAIN,
+            relief="flat",
+            bd=2,
+            wrap="word"
+        )
+        feat_editor.pack(fill="x", padx=20, pady=(4, 2))
+        feat_editor.insert("1.0", "\n".join(feature_lines))
+        tk.Label(self.df,text="提示：保存后将按这里的内容填写上品“商品描述”",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_PANEL).pack(anchor="w",padx=20,pady=(0,4))
+
+        def _commit_features(_event=None, _asin=asin, _text=feat_editor):
+            try:
+                raw_text = _text.get("1.0", "end-1c")
+            except Exception:
+                raw_text = ""
+            self._save_manual_title_features(_asin, raw_features_text=raw_text)
+
+        feat_editor.bind("<FocusOut>", _commit_features)
+        feat_editor.bind("<Control-Return>", lambda e: (_commit_features(), "break")[1])
+
+        def _publish_from_detail(_asin=asin):
+            _commit_price()
+            _commit_title()
+            _commit_features()
+            info_latest = self.product_cache.get(_asin) or info
+            self._publish_direct(info_latest)
+
         tk.Frame(self.df,bg=BORDER,height=1).pack(fill="x",padx=20,pady=10)
         self._btn(self.df,"发布此商品到 SHEIN",ACCENT,
-            lambda i=info:self._publish_direct(i)).pack(anchor="w",padx=20,pady=(0,16))
+            _publish_from_detail).pack(anchor="w",padx=20,pady=(0,16))
         preview_url = info.get("image_url") or ""
         self._current_preview_url = preview_url
         if preview_url:
