@@ -138,6 +138,7 @@ TITLE_SENSITIVE_WORDS = [
     "weight loss",
     "slimming",
     "firming",
+    "umbra"
     # 在此处继续添加标题敏感词
 ]
 

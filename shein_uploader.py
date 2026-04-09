@@ -2314,6 +2314,191 @@ class SheinPublisher:
                 except Exception:
                     continue
 
+            # 电源 Power 专项处理（不依赖 * 必填）：
+            # 规则：若存在“电源/Power”属性，优先点击下面的下拉框（最后一个框）并选择首项。
+            try:
+                root = attr_card if attr_card is not None else driver
+                power_items = root.find_elements(
+                    By.XPATH,
+                    ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
+                    "and .//span[contains(@class,'spmp_style__productAttrLabel') and "
+                    "("
+                    "contains(normalize-space(.),'电源') or contains(normalize-space(.),'Power') "
+                    "or contains(normalize-space(.),'Power Supply') or contains(normalize-space(.),'Power Source')"
+                    ")]]"
+                )
+            except Exception:
+                power_items = []
+
+            for power_item in power_items:
+                try:
+                    if not power_item.is_displayed():
+                        continue
+
+                    # 优先“下面的框”：取 appendBox 中最后一个可见框；否则回退整个属性项
+                    target_box = None
+                    try:
+                        boxes = power_item.find_elements(By.XPATH, ".//div[contains(@class,'spmp_style__appendBox')]")
+                        visible_boxes = [b for b in boxes if b.is_displayed()]
+                        if visible_boxes:
+                            target_box = visible_boxes[-1]
+                    except Exception:
+                        target_box = None
+                    if target_box is None:
+                        target_box = power_item
+
+                    # 关键：电源项无论是否已有值，都先清空后再“选首项”
+                    try:
+                        for cx in [
+                            ".//a[@data-role='close' and contains(@class,'so-select-close')]",
+                            ".//*[contains(@class,'so-select-close-warpper')]//a[contains(@class,'so-select-close')]",
+                            ".//*[contains(@class,'so-select-indicator') and contains(@class,'so-select-close')]",
+                        ]:
+                            removed = False
+                            try:
+                                for ce in target_box.find_elements(By.XPATH, cx):
+                                    if not ce.is_displayed():
+                                        continue
+                                    driver.execute_script(
+                                        "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                                        ce
+                                    )
+                                    removed = True
+                                    time.sleep(0.08)
+                            except Exception:
+                                pass
+                            if removed:
+                                time.sleep(0.1)
+                    except Exception:
+                        pass
+                    # 多选输入框兜底清空（例如当前值为“无”但已失效）
+                    try:
+                        for ie in target_box.find_elements(
+                            By.XPATH,
+                            ".//span[contains(@class,'so-select-input') and @contenteditable='true'] | "
+                            ".//input[not(@type='hidden')]"
+                        ):
+                            if not ie.is_displayed():
+                                continue
+                            try:
+                                ie.click()
+                            except Exception:
+                                pass
+                            try:
+                                ie.send_keys(Keys.CONTROL, "a")
+                                ie.send_keys(Keys.BACKSPACE)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    trigger = None
+                    for sx in [
+                        ".//div[contains(@class,'so-select-inner')]",
+                        ".//div[contains(@class,'so-select-result')]",
+                        ".//a[contains(@class,'so-select-caret') or contains(@class,'so-select-multi')]",
+                        ".//span[contains(@class,'so-select-input')]",
+                    ]:
+                        try:
+                            cands = target_box.find_elements(By.XPATH, sx)
+                        except Exception:
+                            cands = []
+                        for cand in cands:
+                            try:
+                                if cand.is_displayed():
+                                    trigger = cand
+                                    break
+                            except Exception:
+                                continue
+                        if trigger is not None:
+                            break
+                    if trigger is None:
+                        continue
+
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});arguments[0].click();", trigger
+                    )
+                    time.sleep(0.2)
+
+                    first_option = None
+                    try:
+                        first_option = driver.execute_script(
+                            """
+                            function visible(el){
+                              if(!el) return false;
+                              const st = window.getComputedStyle(el);
+                              if(st.display==='none' || st.visibility==='hidden') return false;
+                              const r = el.getBoundingClientRect();
+                              return r.width>0 && r.height>0;
+                            }
+                            function validOption(el){
+                              if(!el || !visible(el)) return false;
+                              const cls = (el.className || '').toString();
+                              if(/disabled|is-disabled/.test(cls)) return false;
+                              const txt = (el.innerText || el.textContent || '').trim();
+                              if(!txt) return false;
+                              if(txt.includes('请选择') || txt.includes('Select')) return false;
+                              return true;
+                            }
+                            const trg = arguments[0];
+                            if(!trg) return null;
+                            const tr = trg.getBoundingClientRect();
+                            const tcx = (tr.left + tr.right) / 2;
+                            const tcy = (tr.top + tr.bottom) / 2;
+                            const drops = Array.from(document.querySelectorAll('div.so-select-drop-down-content')).filter(visible);
+                            if(!drops.length) return null;
+                            let best = null, bestDist = Number.POSITIVE_INFINITY;
+                            for(const d of drops){
+                              const r = d.getBoundingClientRect();
+                              const cx = (r.left + r.right) / 2;
+                              const cy = (r.top + r.bottom) / 2;
+                              const dist = Math.hypot(cx - tcx, cy - tcy);
+                              if(dist < bestDist){
+                                bestDist = dist;
+                                best = d;
+                              }
+                            }
+                            if(!best) return null;
+                            const cands = Array.from(best.querySelectorAll(
+                              '.so-select-option, .so-option, li[role="option"], [class*="option"]'
+                            ));
+                            for (const c of cands){
+                              if(validOption(c)) return c;
+                            }
+                            return null;
+                            """,
+                            trigger
+                        )
+                    except Exception:
+                        first_option = None
+
+                    selected_ok = False
+                    if first_option is not None:
+                        try:
+                            driver.execute_script("arguments[0].click();", first_option)
+                            selected_ok = True
+                        except Exception:
+                            selected_ok = False
+
+                    if not selected_ok:
+                        try:
+                            trigger.send_keys(Keys.ENTER)
+                            selected_ok = True
+                        except Exception:
+                            selected_ok = False
+
+                    if selected_ok:
+                        self.log("[OK] 电源属性已按规则选择下拉首项（下方框）")
+                        try:
+                            driver.execute_script("document.body.click();")
+                        except Exception:
+                            pass
+                        time.sleep(0.12)
+                    else:
+                        self.log("[WARN] 电源属性未能完成重选首项")
+                except Exception:
+                    continue
+
             auto_filled_count = 0
             for item in required_items:
                 try:
@@ -6916,13 +7101,29 @@ class SheinPublisher:
             time.sleep(0.5)
         if not _confirm_clicked:
             self.log("[WARN] 未找到'一件翻译并发布'按鈕，弹窗可能未出现或已自动关闭")
-            _set_publish_fail_reason(self.get_publish_failure_reason(wait_seconds=1.5))
+            _reason = self.get_publish_failure_reason(wait_seconds=4.5)
+            if not _reason:
+                _reason = "点击发布后未检测到“一件翻译并发布”确认弹窗"
+            _set_publish_fail_reason(_reason)
             return False
 
         # Step9: 严格按指定文案判定成功
         # 标准：点击“一件翻译并发布”后，页面出现“提交成功，等待审核中”
         self.log("检查发布结果文案：提交成功，等待审核中")
+        captured_fail_reason = ""
+        def _capture_fail_reason(wait_seconds=0.0):
+            nonlocal captured_fail_reason
+            try:
+                _r = self.get_publish_failure_reason(wait_seconds=wait_seconds)
+            except Exception:
+                _r = ""
+            _r = re.sub(r"\s+", " ", str(_r or "")).strip()
+            if _r and (not captured_fail_reason or len(_r) > len(captured_fail_reason)):
+                captured_fail_reason = _r[:300]
+            return captured_fail_reason
         def _has_submit_success_text():
+            # 轮询成功文案期间同步抓取错误提示，避免红色错误提示短暂出现后消失
+            _capture_fail_reason(wait_seconds=0.0)
             try:
                 els = driver.find_elements(
                     By.XPATH,
@@ -6947,7 +7148,34 @@ class SheinPublisher:
             self.log("商品已提交发布")
             return True
 
-        fail_reason = self.get_publish_failure_reason(wait_seconds=2.0)
+        fail_reason = _capture_fail_reason(wait_seconds=4.5)
+        if not fail_reason:
+            fail_reason = self.get_publish_failure_reason(wait_seconds=4.5)
+        if not fail_reason:
+            # 最终兜底：再次从页面危险提示容器提取一轮纯文本
+            try:
+                fail_reason = (driver.execute_script(
+                    """
+                    const sels = [
+                      '.so-message-item.so-message-item-show-top .so-alert-content',
+                      '.so-message-item .so-alert-content',
+                      '.so-alert.so-alert-danger .so-alert-content',
+                      '.so-form-custom-error',
+                      '[role="alert"]'
+                    ];
+                    function clean(t){ return (t||'').replace(/\\s+/g,' ').trim(); }
+                    for (const s of sels){
+                      const list = Array.from(document.querySelectorAll(s));
+                      for (const n of list){
+                        const t = clean((n.innerText || n.textContent || ''));
+                        if (t) return t;
+                      }
+                    }
+                    return '';
+                    """
+                ) or "").strip()
+            except Exception:
+                fail_reason = ""
         _set_publish_fail_reason(fail_reason)
         if fail_reason:
             self.log("[ERROR] 发布失败：未检测到“提交成功，等待审核中”文案；弹窗原因: {}".format(fail_reason))
@@ -6973,6 +7201,13 @@ class SheinPublisher:
         driver = self.driver
         if driver is None:
             return ""
+        def _clean_reason_text(raw_text):
+            txt = re.sub(r"\s+", " ", str(raw_text or "")).strip()
+            # 去掉只包含关闭按钮符号的噪音内容
+            txt = re.sub(r"^[xX×✕✖\s]+$", "", txt).strip()
+            return txt[:300] if txt else ""
+
+        last_reason = ""
         end_time = time.time() + max(0.0, float(wait_seconds or 0.0))
         while True:
             reason = ""
@@ -6981,27 +7216,50 @@ class SheinPublisher:
                     """
                     function visible(el){
                       if(!el) return false;
-                      const st = window.getComputedStyle(el);
-                      if(st.display==='none' || st.visibility==='hidden' || Number(st.opacity)===0) return false;
+                      let cur = el;
+                      while(cur && cur.nodeType === 1){
+                        const st = window.getComputedStyle(cur);
+                        if(st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0){
+                          return false;
+                        }
+                        cur = cur.parentElement;
+                      }
                       const r = el.getBoundingClientRect();
                       return r.width > 0 && r.height > 0;
+                    }
+                    function norm(t){
+                      return (t || '').replace(/\\s+/g, ' ').trim();
                     }
                     function pickText(nodes){
                       for (const n of nodes){
                         if(!visible(n)) continue;
-                        const t = (n.innerText || n.textContent || '').trim();
-                        if(t) return t;
+                        const content = n.querySelector('.so-alert-content, .so-message-content, [class*="alert-content"]');
+                        let t = '';
+                        if(content && visible(content)){
+                          t = norm(content.innerText || content.textContent || '');
+                        }
+                        if(!t){
+                          t = norm(n.innerText || n.textContent || '');
+                        }
+                        if(t && t !== 'x' && t !== 'X' && t !== '×') return t;
                       }
                       return '';
                     }
                     const groups = [
+                      '.so-message-item.so-message-item-show-top .so-alert-content',
+                      '.so-message-item.so-message-item-show-top .so-message-msg .so-alert-content',
+                      '.so-message-item.so-message-item-show-top .so-alert.so-alert-danger .so-alert-content',
+                      '.so-message-item-show-top .so-alert-content',
                       '.so-message-top .so-alert-danger .so-alert-content',
                       '.so-message .so-alert-danger .so-alert-content',
                       '.so-alert-danger .so-alert-content',
+                      '.so-alert.so-alert-danger .so-alert-content',
+                      '.so-alert-content',
                       '.so-message-msg .so-alert-content',
                       '.so-message-msg',
                       '.so-message .so-alert-content',
-                      '.so-form-custom-error'
+                      '.so-form-custom-error',
+                      '[role="alert"]'
                     ];
                     for (const sel of groups){
                       const nodes = Array.from(document.querySelectorAll(sel));
@@ -7013,14 +7271,19 @@ class SheinPublisher:
                 ) or ""
             except Exception:
                 reason = ""
-            reason = re.sub(r"\s+", " ", str(reason or "")).strip()
+            reason = _clean_reason_text(reason)
             if reason:
+                last_reason = reason
                 return reason[:300]
             try:
                 # JS 失效时的 Selenium 兜底
                 xps = [
+                    "//div[contains(@class,'so-message-item') and contains(@class,'show-top')]//div[contains(@class,'so-alert-content')]",
+                    "//div[contains(@class,'so-message-item') and contains(@class,'show-top')]//div[contains(@class,'so-alert') and contains(@class,'danger')]//div[contains(@class,'so-alert-content')]",
+                    "//div[contains(@class,'so-message-item') and contains(@class,'show-top')]//div[contains(@class,'so-message-msg')]",
                     "//div[contains(@class,'so-message-top')]//div[contains(@class,'so-alert-danger')]//div[contains(@class,'so-alert-content')]",
                     "//div[contains(@class,'so-alert-danger')]//div[contains(@class,'so-alert-content')]",
+                    "//div[contains(@class,'so-alert-content')]",
                     "//div[contains(@class,'so-message-msg')]",
                     "//div[contains(@class,'so-form-custom-error')]",
                 ]
@@ -7029,8 +7292,9 @@ class SheinPublisher:
                         try:
                             if not el.is_displayed():
                                 continue
-                            txt = re.sub(r"\s+", " ", str(el.text or "")).strip()
+                            txt = _clean_reason_text(el.text)
                             if txt:
+                                last_reason = txt
                                 return txt[:300]
                         except Exception:
                             continue
@@ -7039,7 +7303,7 @@ class SheinPublisher:
             if time.time() >= end_time:
                 break
             time.sleep(0.25)
-        return ""
+        return last_reason or ""
 
     def _upload_detail_images(self, image_urls):
         """
