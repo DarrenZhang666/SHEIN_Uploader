@@ -23,6 +23,7 @@ except Exception:
 class SheinApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        self._ui_thread_id = threading.get_ident()
         self.title("SHEIN 商品采集 & 发布工具V1.25")
         self.geometry("1280x800"); self.minsize(1000,680)
         self.configure(bg=BG_DARK)
@@ -1757,6 +1758,13 @@ class SheinApp(tk.Tk):
 
     def _set_asin_progress(self, asin, pct=None, text=None, state="running"):
         """更新 ASIN 行内简化进度条与文字。"""
+        # Tkinter 只能在主线程更新控件；多线程上品时统一切回主线程刷新进度
+        try:
+            if threading.get_ident() != getattr(self, "_ui_thread_id", threading.get_ident()):
+                self.after(0, lambda a=asin, p=pct, t=text, s=state: self._set_asin_progress(a, p, t, s))
+                return
+        except Exception:
+            pass
         ws = self.asin_row_widgets.get(asin) or {}
         bar = ws.get("prog_canvas")
         fill_id = ws.get("prog_fill")
@@ -1895,7 +1903,8 @@ class SheinApp(tk.Tk):
             self._set_asin_progress(asin, 100, "发布失败", state="fail"); return
         if ("点击发布商品" in m or "等待确认弹窗" in m or "确认弹窗" in m
                 or "结果文案" in m or "一键翻译并发布" in m):
-            self._set_asin_progress(asin, 88, "确认其他信息中", state="running"); return
+            # 业务期望：确认其他信息阶段约在半程，避免从基础信息阶段跃迁过大
+            self._set_asin_progress(asin, 50, "确认其他信息中", state="running"); return
         if "细节图上传完成" in m:
             self._set_asin_progress(asin, 75, "细节图上传完成", state="running"); return
         if ("SKU行" in m and "图" in m and "已提交" in m) or "开始上传细节图" in m or "上传细节图" in m:
@@ -1947,7 +1956,7 @@ class SheinApp(tk.Tk):
                 # 与单线程一致：根据阶段文案更新进度条文字
                 self._update_publish_progress_by_msg(target_asin, worker_msg)
                 try:
-                    mm = re.search(r"图(\d+)已提交", worker_msg)
+                    mm = re.search(r"(?:全局图|图)(\d+)已提交", worker_msg)
                     if mm and ("SKU行" in worker_msg):
                         img_idx = int(mm.group(1))
                         # 细节图上传阶段：从 50% 逐步推进到 75%
@@ -1968,7 +1977,7 @@ class SheinApp(tk.Tk):
         if not asin:
             return
         try:
-            mm = re.search(r"图(\d+)已提交", m)
+            mm = re.search(r"(?:全局图|图)(\d+)已提交", m)
             if mm and ("SKU行" in m):
                 img_idx = int(mm.group(1))
                 pct = min(74, 50 + img_idx * 4)

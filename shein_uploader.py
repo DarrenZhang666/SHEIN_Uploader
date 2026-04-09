@@ -3828,14 +3828,21 @@ class SheinPublisher:
             sku_limit = sku_count if sku_count > 0 else None
 
             # 兜底规则：分类依据与主规格属性无法匹配时，
-            # 第2框固定按 A/B/C 填写（“请选择或自定义”）
+            # 第2框按固定序列值填写（A/B/C...），数量按 SKU 数对齐，避免被 3 个值限制。
             if not attr_match_success:
-                self.log("[INFO] 主规格属性核对失败，启用固定值兜底: A/B/C")
-                fixed_values = ["A", "B", "C"]
-                if sku_limit is not None and len(fixed_values) > sku_limit:
-                    self.log("[INFO] 主规格值数量限制：SKU数={}, 固定值由{}个截断为{}个".format(
-                        sku_limit, len(fixed_values), sku_limit))
-                    fixed_values = fixed_values[:sku_limit]
+                def _excel_seq_name(n):
+                    # 1->A, 26->Z, 27->AA ...
+                    n = int(n)
+                    out = []
+                    while n > 0:
+                        n -= 1
+                        out.append(chr(ord('A') + (n % 26)))
+                        n //= 26
+                    return "".join(reversed(out)) or "A"
+                fixed_target_count = sku_limit if (sku_limit is not None and sku_limit > 0) else 3
+                fixed_values = [_excel_seq_name(i + 1) for i in range(fixed_target_count)]
+                self.log("[INFO] 主规格属性核对失败，启用固定值兜底: {} 个({})".format(
+                    len(fixed_values), " | ".join(fixed_values[:8]) + (" ..." if len(fixed_values) > 8 else "")))
                 filled_vals = []
                 filled_sku_indices = []
                 used_data_ids = set()
@@ -3881,7 +3888,7 @@ class SheinPublisher:
                         picked_val = _pick_first(value_inner, "主规格値")
                     if picked_val:
                         filled_vals.append(picked_val)
-                        # A/B/C 与 SKU 顺序强绑定：A->0, B->1, C->2
+                        # 固定序列值与 SKU 顺序强绑定：A->0, B->1, C->2, D->3...
                         filled_sku_indices.append(len(filled_sku_indices))
                         self.log("[OK] 固定主规格値已填写: {}".format(picked_val))
                         time.sleep(1.0)
@@ -3894,7 +3901,7 @@ class SheinPublisher:
                     self.log("[OK] 主规格兜底完成: 属性={}，値=[{}]".format(
                         picked_attr, " | ".join(filled_vals)))
                 else:
-                    self.log("[WARN] 主规格兜底失败：A/B/C 均未写入")
+                    self.log("[WARN] 主规格兜底失败：固定序列值均未写入")
                 return
             self._main_spec_force_abc_mode = False
             # 5) 第二个框：主规格值下拉
@@ -4619,6 +4626,8 @@ class SheinPublisher:
         try:
             self._ensure_not_stopped()
             driver = self.driver
+            # 版本指纹：用于确认运行中的进程已加载到最新上传逻辑
+            self.log("[DEBUG] 细节图上传逻辑版本: 2026-04-09-r3")
             sku_list = product_info.get("sku_list", []) or []
             # 规则：SKU 数量超过 5 时，每个 SKU 仅上传 3 张细节图，降低上传负载与失败率
             max_imgs_per_sku = 3 if len(sku_list) > 5 else 5
@@ -4628,6 +4637,15 @@ class SheinPublisher:
                 main_images = [product_info["image_url"]]
             fallback_images = main_images[:max_imgs_per_sku]
             expected_sku_rows = len(sku_list)
+            # 重要：上传行数上限只按 SKU 数量，不再按“主规格已填数量”收敛。
+            # 否则会出现 3 个 SKU 仅上传 2 行的误截断问题。
+            try:
+                filled_main_spec_vals = list(getattr(self, "_last_main_spec_filled_values", []) or [])
+            except Exception:
+                filled_main_spec_vals = []
+            if filled_main_spec_vals:
+                self.log("[DEBUG] 主规格已填写 {} 项；细节图上传目标仍按 SKU {} 行计算".format(
+                    len(filled_main_spec_vals), expected_sku_rows))
             _detail_row_selector_in_use = ""
             def _collect_detail_rows():
                 try:
@@ -4719,8 +4737,20 @@ class SheinPublisher:
                     len(rows), expected_sku_rows))
                 rows = rows[:expected_sku_rows]
             elif len(rows) < expected_sku_rows:
-                # 关键一致性校验：禁止缺行继续发布
-                raise RuntimeError("细节图行数不足: 页面{}行 / SKU{}行".format(len(rows), expected_sku_rows))
+                # 容错：页面偶发少渲染行时，优先上传已出现行，避免“0张都不传”
+                if len(rows) > 0:
+                    self.log("[WARN] 细节图行数不足: 页面{}行 / 期望{}行，按可见行继续上传".format(
+                        len(rows), expected_sku_rows))
+                else:
+                    self.log("[WARN] 细节图行数不足: 页面0行 / 期望{}行，回退单框上传兜底".format(
+                        expected_sku_rows))
+                    if fallback_images:
+                        self._upload_images_to_single_input(fallback_images)
+                    else:
+                        self.log("[ERROR] 无可用兜底图片，跳过细节图上传")
+                    return
+            self.log("[DEBUG] 细节图上传目标行数: 页面{} / SKU{} / 实际{}".format(
+                len(rows), len(sku_list), min(len(rows), len(sku_list))))
             self.log("[DEBUG] 找到 {} 行 SKU 细节图行（期望 {} 行）".format(
                 len(rows), expected_sku_rows))
 
@@ -4859,19 +4889,26 @@ class SheinPublisher:
                         return sku, i
                 return None, -1
 
-            # A/B/C 兜底模式：严格按顺序绑定，避免颜色匹配导致错位
+            # 固定序列兜底模式：严格按顺序绑定，避免颜色匹配导致错位
             if bool(getattr(self, "_main_spec_force_abc_mode", False)):
-                self.log("[INFO] A/B/C固定映射模式：SKU1->A, SKU2->B, SKU3->C")
-                limit = min(3, len(rows), len(sku_list))
+                filled_vals_for_map = list(getattr(self, "_last_main_spec_filled_values", []) or [])
+                filled_idxs_for_map = list(getattr(self, "_main_spec_filled_sku_indices", []) or [])
+                # 不按已填主规格个数截断映射；按页面可见行与 SKU 行数对齐。
+                # 这样即便 A/B/C 部分值填写失败，也不会少传后续 SKU 的细节图。
+                limit = min(len(rows), len(sku_list))
+                self.log("[INFO] 固定序列映射模式：按主规格写入顺序映射，共{}行".format(limit))
                 for idx in range(limit):
-                    _sku = sku_list[idx]
-                    _label = ["A", "B", "C"][idx] if idx < 3 else "ROW{}".format(idx + 1)
+                    _sku_idx = filled_idxs_for_map[idx] if idx < len(filled_idxs_for_map) else idx
+                    if _sku_idx < 0 or _sku_idx >= len(sku_list):
+                        _sku_idx = idx
+                    _sku = sku_list[_sku_idx]
+                    _label = filled_vals_for_map[idx] if idx < len(filled_vals_for_map) else "ROW{}".format(idx + 1)
                     row_sku_map.append((_label, _sku))
                     self.log("[MAP-ABC] 行{:02d} '{}' <- SKU{} '{}'".format(
-                        idx + 1, _label, idx + 1, _sku.get("sku_attributes", "")))
-                # 行数多于SKU时，后续行跳过（此时rows通常已截断到3）
+                        idx + 1, _label, _sku_idx + 1, _sku.get("sku_attributes", "")))
+                # 行数多于可映射SKU时，后续行跳过
                 for idx in range(limit, len(rows)):
-                    _label = ["A", "B", "C"][idx] if idx < 3 else "ROW{}".format(idx + 1)
+                    _label = filled_vals_for_map[idx] if idx < len(filled_vals_for_map) else "ROW{}".format(idx + 1)
                     row_sku_map.append((_label, None))
             # -- 普通模式：读取页面每行第1列颜色文本，反查 sku_list 找对应 SKU --
             if not row_sku_map:
@@ -5010,13 +5047,17 @@ class SheinPublisher:
 
             # 细节图全局进度计数：跨 SKU 连续累加，不在每个 SKU 内重置
             global_detail_img_idx = 0
+            row_success_count = 0
+            row_failures = []
             for row_idx in range(len(row_sku_map)):
                 self._ensure_not_stopped()
                 row, _ = _resolve_row_and_detail_td(row_idx)
                 cur_rows = _collect_detail_rows()
                 if row is None:
-                    raise RuntimeError("第{}行SKU在上传时不存在（当前仅{}行）".format(
+                    row_failures.append("行{}不存在(当前{}行)".format(row_idx + 1, len(cur_rows)))
+                    self.log("[ERROR] 第{}行SKU在上传时不存在（当前仅{}行），跳过该行".format(
                         row_idx + 1, len(cur_rows)))
+                    continue
                 page_color, matched_sku = row_sku_map[row_idx]
                 if matched_sku is not None:
                     sku_imgs = list((matched_sku.get("images") or []))
@@ -5044,17 +5085,22 @@ class SheinPublisher:
                 # Find the detail image file input in detail column
                 fi, row, _ = _find_row_detail_input(row_idx)
                 if fi is None:
-                    raise RuntimeError("SKU行{} 未找到细节图上传 input".format(row_idx + 1))
+                    row_failures.append("行{}无细节图input".format(row_idx + 1))
+                    self.log("[ERROR] SKU行{} 未找到细节图上传 input，跳过该行".format(row_idx + 1))
+                    continue
                 target_img_count = len(sku_imgs)
                 img_paths = _build_temp_paths_strict(
                     sku_imgs, fallback_images, target_img_count
                 )
                 if len(img_paths) < target_img_count:
-                    raise RuntimeError(
-                        "SKU行{} 图片准备不足: 目标{} / 已准备{}".format(
-                            row_idx + 1, target_img_count, len(img_paths)
-                        )
-                    )
+                    if not img_paths:
+                        row_failures.append("行{}图片准备0/{}".format(row_idx + 1, target_img_count))
+                        self.log("[ERROR] SKU行{} 图片准备不足: 目标{} / 已准备{}，跳过该行".format(
+                            row_idx + 1, target_img_count, len(img_paths)))
+                        continue
+                    self.log("[WARN] SKU行{} 图片准备不足: 目标{} / 已准备{}，按已准备数量继续".format(
+                        row_idx + 1, target_img_count, len(img_paths)))
+                    target_img_count = len(img_paths)
                 # Upload images one by one for this SKU row, per-image retry +落库校验
                 upload_ok_count = 0
                 for img_idx, img_path in enumerate(img_paths):
@@ -5073,8 +5119,8 @@ class SheinPublisher:
                                 "arguments[0].style.opacity='1';", fi_cur)
                             fi_cur.send_keys(img_path)
                             global_detail_img_idx += 1
-                            self.log("[DEBUG] SKU行 {} 图{}已提交(第{}次)".format(
-                                row_idx + 1, img_idx + 1, _up_try + 1))
+                            self.log("[DEBUG] SKU行 {} 全局图{}已提交(本SKU第{}张, 第{}次)".format(
+                                row_idx + 1, global_detail_img_idx, img_idx + 1, _up_try + 1))
                             self._dismiss_switch_confirm_modal()
                             self._handle_crop_dialog()
                             # 校验本张是否真正落库到当前行
@@ -5112,17 +5158,18 @@ class SheinPublisher:
                             row_idx + 1, img_idx + 1))
                 self.log("[OK] SKU行 {} 已成功上传 {}/{} 张细节图".format(
                     row_idx + 1, upload_ok_count, len(img_paths)))
+                row_detail_ok = True
                 if upload_ok_count < target_img_count:
-                    raise RuntimeError("SKU行{} 细节图未传全: 成功{} / 目标{}".format(
+                    row_detail_ok = False
+                    self.log("[ERROR] SKU行{} 细节图未传全: 成功{} / 目标{}".format(
                         row_idx + 1, upload_ok_count, target_img_count))
 
                 final_cnt = _count_detail_uploaded_imgs(row_idx)
                 if final_cnt < target_img_count:
-                    raise RuntimeError(
-                        "SKU行{} 上传后数量校验失败: 当前{} / 目标{}".format(
-                            row_idx + 1, final_cnt, target_img_count
-                        )
-                    )
+                    row_detail_ok = False
+                    self.log("[ERROR] SKU行{} 上传后数量校验失败: 当前{} / 目标{}".format(
+                        row_idx + 1, final_cnt, target_img_count
+                    ))
 
                 # -- 上传后颜色校验：重读当前行颜色，与预期 SKU 比对 --
                 try:
@@ -5417,13 +5464,27 @@ class SheinPublisher:
                 except Exception as e:
                     self.log("[ERROR] SKU行 {} 色块图流程异常: {}".format(row_idx + 1, str(e)[:60]))
 
+                if row_detail_ok:
+                    row_success_count += 1
+                else:
+                    row_failures.append("行{}明细{}/{}校验{}".format(
+                        row_idx + 1, upload_ok_count, target_img_count, final_cnt))
+
                 # Cleanup temp files
                 for p in img_paths:
                     try:
                         os.remove(p)
                     except Exception:
                         pass
-            self.log("[OK] 细节图上传完成")
+            if row_failures:
+                _fail_preview = " | ".join(row_failures[:8])
+                if len(row_failures) > 8:
+                    _fail_preview += " | ..."
+                self.log("[WARN] 细节图上传完成(部分失败): 成功行 {}/{}，失败明细: {}".format(
+                    row_success_count, len(row_sku_map), _fail_preview))
+            else:
+                self.log("[OK] 细节图上传完成（全部成功）: {}/{}".format(
+                    row_success_count, len(row_sku_map)))
         except Exception as e:
             self.log("[ERROR] 上传细节图异常: {}".format(str(e)[:80]))
 
