@@ -4267,6 +4267,33 @@ class SheinPublisher:
                 self.log("[DEBUG] {} 可选项: {}".format(label, " | ".join(sample) if sample else "(空)"))
                 target = options[0]
                 picked = (target.text or "").strip().replace("\n", " ")
+                def _pick_by_priority(_opts):
+                    """
+                    主规格盲选优先级：
+                    1) 颜色 Color
+                    2) Style
+                    3) Size
+                    4) 其它（保持原顺序首项）
+                    """
+                    if not _opts:
+                        return None, ""
+                    def _n(txt):
+                        return _normalize_key((txt or "").strip().replace("\n", " "))
+                    scored = []
+                    for _o in _opts:
+                        _txt = (_o.text or "").strip().replace("\n", " ")
+                        _norm = _n(_txt)
+                        score = 99
+                        if "color" in _norm:
+                            score = 1
+                        elif "style" in _norm:
+                            score = 2
+                        elif "size" in _norm:
+                            score = 3
+                        scored.append((score, _o, _txt))
+                    scored.sort(key=lambda x: x[0])
+                    _score, _opt, _txt = scored[0]
+                    return _opt, _txt
                 if label == "主规格属性":
                     attr_match_success = False
                     preferred_basis = _collect_preferred_basis()
@@ -4309,11 +4336,32 @@ class SheinPublisher:
                                     picked, " / ".join(preferred_basis)))
                             else:
                                 attr_match_success = False
-                                self.log("[WARN] 主规格属性未匹配到分类依据({})，回退首项".format(
-                                    " / ".join(preferred_basis)))
+                                if len(options) > 1:
+                                    pr_opt, pr_txt = _pick_by_priority(options)
+                                    if pr_opt is not None:
+                                        target = pr_opt
+                                        picked = pr_txt
+                                        self.log("[WARN] 主规格属性未匹配到分类依据({})，盲选优先级命中: {}".format(
+                                            " / ".join(preferred_basis), picked or "(空文本)"))
+                                    else:
+                                        self.log("[WARN] 主规格属性未匹配到分类依据({})，回退首项".format(
+                                            " / ".join(preferred_basis)))
+                                else:
+                                    self.log("[WARN] 主规格属性未匹配到分类依据({})，回退首项".format(
+                                        " / ".join(preferred_basis)))
                     else:
                         attr_match_success = False
-                        self.log("[DEBUG] 未获取到 ASIN 分类依据，主规格属性回退首项")
+                        if len(options) > 1:
+                            pr_opt, pr_txt = _pick_by_priority(options)
+                            if pr_opt is not None:
+                                target = pr_opt
+                                picked = pr_txt
+                                self.log("[DEBUG] 未获取到 ASIN 分类依据，主规格属性按盲选优先级选择: {}".format(
+                                    picked or "(空文本)"))
+                            else:
+                                self.log("[DEBUG] 未获取到 ASIN 分类依据，主规格属性回退首项")
+                        else:
+                            self.log("[DEBUG] 未获取到 ASIN 分类依据，主规格属性回退首项")
                 ok = _click_option(target)
                 if not ok:
                     self.log("[WARN] {} 首项点击失败".format(label))
