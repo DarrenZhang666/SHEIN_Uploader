@@ -2753,6 +2753,272 @@ class SheinPublisher:
                 except Exception:
                     continue
 
+            # 产品功能 Product Features 专项处理（不依赖 * 必填）：
+            # 规则：优先选择“无”；若无该选项则选择“Wi-FI 功能”
+            try:
+                root = attr_card if attr_card is not None else driver
+                feature_items = root.find_elements(
+                    By.XPATH,
+                    ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
+                    "and .//span[contains(@class,'spmp_style__productAttrLabel') and "
+                    "("
+                    "contains(normalize-space(.),'产品功能') or contains(normalize-space(.),'Product Features')"
+                    ")]]"
+                )
+            except Exception:
+                feature_items = []
+
+            for feature_item in feature_items:
+                try:
+                    if not feature_item.is_displayed():
+                        continue
+
+                    target_box = None
+                    try:
+                        boxes = feature_item.find_elements(By.XPATH, ".//div[contains(@class,'spmp_style__appendBox')]")
+                        visible_boxes = [b for b in boxes if b.is_displayed()]
+                        if visible_boxes:
+                            target_box = visible_boxes[-1]
+                    except Exception:
+                        target_box = None
+                    if target_box is None:
+                        target_box = feature_item
+
+                    trigger = None
+                    for sx in [
+                        ".//div[contains(@class,'so-select-inner')]",
+                        ".//div[contains(@class,'so-select-result')]",
+                        ".//a[contains(@class,'so-select-caret') or contains(@class,'so-select-multi')]",
+                        ".//span[contains(@class,'so-select-input')]",
+                    ]:
+                        try:
+                            cands = target_box.find_elements(By.XPATH, sx)
+                        except Exception:
+                            cands = []
+                        for cand in cands:
+                            try:
+                                if cand.is_displayed():
+                                    trigger = cand
+                                    break
+                            except Exception:
+                                continue
+                        if trigger is not None:
+                            break
+                    if trigger is None:
+                        self.log("[WARN] 产品功能属性未找到可点击下拉框")
+                        continue
+
+                    # 若当前已是目标值（无 / Wi-Fi），直接跳过，避免“先清空后失败”导致值被删
+                    current_feature_value = ""
+                    try:
+                        current_feature_value = driver.execute_script(
+                            """
+                            const box = arguments[0];
+                            if(!box) return '';
+                            function visible(el){
+                              if(!el) return false;
+                              const st = window.getComputedStyle(el);
+                              if(st.display==='none' || st.visibility==='hidden') return false;
+                              const r = el.getBoundingClientRect();
+                              return r.width>0 && r.height>0;
+                            }
+                            const nodes = Array.from(box.querySelectorAll(
+                              '.so-select-item, .renderItemEllipsis, .so-tag, .so-select-result, .so-select-input, input[type="text"], input:not([type])'
+                            ));
+                            const vals = [];
+                            for(const n of nodes){
+                              if(!visible(n)) continue;
+                              const txt = (n.value || n.innerText || n.textContent || '').trim();
+                              if(!txt) continue;
+                              if(txt.includes('请选择') || txt.includes('Select')) continue;
+                              if(vals.indexOf(txt) < 0) vals.push(txt);
+                            }
+                            return vals.join('\\n');
+                            """,
+                            target_box
+                        ) or ""
+                    except Exception:
+                        current_feature_value = ""
+                    _fv = str(current_feature_value or "")
+                    _fv_low = _fv.lower().replace(" ", "")
+                    _feature_original_value = _fv.strip()
+                    if ("\n" not in _fv) and (
+                        ("无" in _fv) or ("wi-fi" in _fv_low) or ("wifi" in _fv_low)
+                    ):
+                        self.log("[OK] 产品功能属性已是目标值，跳过该框: {}".format(_fv[:60]))
+                        continue
+
+                    data_id = ""
+                    try:
+                        data_id = str(driver.execute_script(
+                            """
+                            const trg = arguments[0];
+                            if(!trg) return '';
+                            const inner = trg.closest('.so-select-inner') || trg;
+                            return (inner && inner.getAttribute && inner.getAttribute('data-id')) || '';
+                            """,
+                            trigger
+                        ) or "").strip()
+                    except Exception:
+                        data_id = ""
+
+                    selected_ok = False
+                    selected_label = ""
+                    picked_target = ""
+                    for _attempt in range(2):
+                        try:
+                            driver.execute_script(
+                                "arguments[0].scrollIntoView({block:'center'});arguments[0].click();", trigger
+                            )
+                        except Exception:
+                            try:
+                                trigger.click()
+                            except Exception:
+                                pass
+                        time.sleep(0.25)
+
+                        # 固定流程：先选“无”，无则选“Wi-FI 功能”
+                        pick_result = {}
+                        try:
+                            pick_result = driver.execute_script(
+                                """
+                                function visible(el){
+                                  if(!el) return false;
+                                  const st = window.getComputedStyle(el);
+                                  if(st.display==='none' || st.visibility==='hidden') return false;
+                                  const r = el.getBoundingClientRect();
+                                  return r.width>0 && r.height>0;
+                                }
+                                function validOption(el){
+                                  if(!el || !visible(el)) return false;
+                                  const cls = (el.className || '').toString();
+                                  if(/disabled|is-disabled/.test(cls)) return false;
+                                  const txt = (el.innerText || el.textContent || '').trim();
+                                  if(!txt) return false;
+                                  if(txt.includes('请选择') || txt.includes('Select')) return false;
+                                  return true;
+                                }
+                                function clickOption(el){
+                                  if(!el) return false;
+                                  const btn = el.closest('.so-select-option, .so-option, .so-checkinput, li[role="option"], label, [class*="option"]') || el;
+                                  try{
+                                    btn.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));
+                                    btn.click();
+                                    btn.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));
+                                    return true;
+                                  }catch(e){
+                                    return false;
+                                  }
+                                }
+                                const targetDataId = arguments[0] || '';
+                                const drops = Array.from(document.querySelectorAll(
+                                  "div.so-select-drop-down-content, div.so-list, .so-select-dropdown, [class*='drop-down-content']"
+                                )).filter(visible);
+                                const sorted = [];
+                                if(targetDataId){
+                                  for(const d of drops){
+                                    if((d.getAttribute('data-id') || '') === targetDataId) sorted.push(d);
+                                  }
+                                }
+                                for(let i=drops.length-1;i>=0;i--){
+                                  if(sorted.indexOf(drops[i]) < 0) sorted.push(drops[i]);
+                                }
+                                for(const d of sorted){
+                                  const cands = Array.from(d.querySelectorAll(
+                                    ".so-select-option, .so-option, .so-checkinput, label, li[role='option'], [class*='option']"
+                                  ));
+                                  for(const c of cands){
+                                    if(!validOption(c)) continue;
+                                    const txt = ((c.innerText || c.textContent || '').trim()).replace(/\\s+/g,'').replace(/[\\/（）()]/g,'');
+                                    if(txt === '无' || txt.includes('无')){
+                                      if(clickOption(c)) return {ok:true, picked:'无'};
+                                    }
+                                  }
+                                  for(const c of cands){
+                                    if(!validOption(c)) continue;
+                                    const txtRaw = (c.innerText || c.textContent || '').trim();
+                                    const txt = txtRaw.replace(/\\s+/g,'');
+                                    const low = txt.toLowerCase();
+                                    if(txt.includes('Wi-FI功能') || txt.includes('Wi-Fi功能') || txt.includes('WiFi功能')
+                                      || low.includes('wi-fi功能') || low.includes('wifi功能')
+                                      || low.includes('wi-fi') || low.includes('wifi')){
+                                      if(clickOption(c)) return {ok:true, picked:'wifi'};
+                                    }
+                                  }
+                                }
+                                return {ok:false, picked:''};
+                                """,
+                                data_id
+                            ) or {}
+                        except Exception:
+                            pick_result = {}
+
+                        clicked_ok = bool((pick_result or {}).get("ok"))
+                        picked_target = str((pick_result or {}).get("picked") or "").strip()
+
+                        # 按人工操作：选完后点击页面任意位置确认
+                        try:
+                            driver.execute_script(
+                                "const e=document.body||document.documentElement;if(e){e.click();}"
+                            )
+                        except Exception:
+                            pass
+                        time.sleep(0.15)
+
+                        if clicked_ok:
+                            try:
+                                selected_label = driver.execute_script(
+                                    """
+                                    const box = arguments[0];
+                                    if(!box) return '';
+                                    function visible(el){
+                                      if(!el) return false;
+                                      const st = window.getComputedStyle(el);
+                                      if(st.display==='none' || st.visibility==='hidden') return false;
+                                      const r = el.getBoundingClientRect();
+                                      return r.width>0 && r.height>0;
+                                    }
+                                    const nodes = Array.from(box.querySelectorAll(
+                                      '.so-select-item, .renderItemEllipsis, .so-tag, .so-select-result, .so-select-input, input[type="text"], input:not([type])'
+                                    ));
+                                    const vals = [];
+                                    for(const n of nodes){
+                                      if(!visible(n)) continue;
+                                      const txt = (n.value || n.innerText || n.textContent || '').trim();
+                                      if(!txt) continue;
+                                      if(txt.includes('请选择') || txt.includes('Select')) continue;
+                                      if(vals.indexOf(txt) < 0) vals.push(txt);
+                                    }
+                                    return vals.join('\\n');
+                                    """,
+                                    target_box
+                                ) or ""
+                            except Exception:
+                                selected_label = ""
+                            _norm = str(selected_label).lower().replace(" ", "")
+                            selected_ok = (
+                                ("无" in str(selected_label))
+                                or ("wi-fi" in _norm)
+                                or ("wifi" in _norm)
+                            )
+
+                        if selected_ok:
+                            break
+                        if _attempt == 0:
+                            self.log("[WARN] 产品功能首轮未命中目标，重试一次（优先无，兜底WiFi）")
+                        time.sleep(0.12)
+
+                    if selected_ok:
+                        self.log("[OK] 产品功能属性已按规则选择目标值(优先无，其次WiFi): {}".format(
+                            str(selected_label or "").strip()[:60]
+                        ))
+                    else:
+                        self.log("[WARN] 产品功能属性未能完成“先选无/无则WiFi”（data_id={} picked='{}' selected='{}')".format(
+                            data_id, picked_target, str(selected_label or "").strip()[:40]
+                        ))
+                except Exception:
+                    continue
+
             # 产品用途 Product Usage 专项处理（不依赖 * 必填）：
             # 规则：优先点击下面框，打开下拉并选择“ 不含光源/灯泡 ”
             try:
@@ -3097,6 +3363,9 @@ class SheinPublisher:
                         continue
                     # 产品用途由上面的“产品用途专项处理”统一处理，避免重复操作导致覆盖
                     if ("产品用途" in label) or ("Product Usage" in label):
+                        continue
+                    # 产品功能由上面的“产品功能专项处理”统一处理，避免重复操作导致覆盖
+                    if ("产品功能" in label) or ("Product Features" in label):
                         continue
 
                     # 长度 Length 专项规则：
