@@ -6114,8 +6114,15 @@ class SheinPublisher:
                     target_img_count = len(img_paths)
                 # Upload images one by one for this SKU row, per-image retry +落库校验
                 upload_ok_count = 0
+                row_base_cnt = 0
+                try:
+                    row_base_cnt = _count_detail_uploaded_imgs(row_idx)
+                except Exception:
+                    row_base_cnt = 0
                 for img_idx, img_path in enumerate(img_paths):
                     one_ok = False
+                    # 该行“本轮应达到的最小图片数”，用于防止误判后重复上传同一张
+                    expected_after_this = row_base_cnt + img_idx + 1
                     for _up_try in range(3):
                         try:
                             self._dismiss_switch_confirm_modal()
@@ -6124,6 +6131,13 @@ class SheinPublisher:
                                 raise RuntimeError("未找到细节图input")
                             before_all = _snapshot_detail_counts(len(row_sku_map))
                             before_cnt = before_all[row_idx] if row_idx < len(before_all) else _count_detail_uploaded_imgs(row_idx)
+                            # 关键防重：若该轮应有数量已达到，说明上一轮(或延迟渲染)已成功，直接视为成功
+                            if before_cnt >= expected_after_this:
+                                one_ok = True
+                                upload_ok_count += 1
+                                self.log("[DEBUG] SKU行 {} 图{} 第{}次前检测到已落库({}>={})，跳过重复提交".format(
+                                    row_idx + 1, img_idx + 1, _up_try + 1, before_cnt, expected_after_this))
+                                break
                             driver.execute_script(
                                 "arguments[0].style.display='block';"
                                 "arguments[0].style.visibility='visible';"
@@ -6136,11 +6150,12 @@ class SheinPublisher:
                             self._handle_crop_dialog()
                             # 校验本张是否真正落库到当前行
                             landed = False
-                            for _ in range(10):
+                            for _ in range(24):
                                 time.sleep(0.25)
                                 now_all = _snapshot_detail_counts(len(row_sku_map))
                                 now_cnt = now_all[row_idx] if row_idx < len(now_all) else _count_detail_uploaded_imgs(row_idx)
-                                if now_cnt >= before_cnt + 1:
+                                # 满足“本次应达数量”或“相对本次前+1”任一条件即判定成功
+                                if now_cnt >= expected_after_this or now_cnt >= before_cnt + 1:
                                     landed = True
                                     break
                                 # 检测错位：若其他行增长，说明本次图片传错行。
@@ -6154,6 +6169,12 @@ class SheinPublisher:
                                         break
                                 if wrong_row >= 0:
                                     raise RuntimeError("图片疑似上传到第{}行".format(wrong_row + 1))
+                            if not landed:
+                                # 再给一次短暂宽限，避免页面异步延迟导致误判重传
+                                time.sleep(1.2)
+                                now_cnt2 = _count_detail_uploaded_imgs(row_idx)
+                                if now_cnt2 >= expected_after_this:
+                                    landed = True
                             if not landed:
                                 raise RuntimeError("上传后未检测到新增图片")
                             one_ok = True
