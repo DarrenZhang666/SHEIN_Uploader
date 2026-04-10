@@ -2428,10 +2428,10 @@ class SheinPublisher:
                                 continue
                         except Exception:
                             pass
-                    # 电源专项固定走“写USB -> 选首项”；
-                    # 仅当已是“纯USB/DC（且不含无）”时才跳过，避免被“无”卡住。
-                    if power_norm and has_usbdc_now and (not has_none_now):
-                        self.log("[OK] 电源属性已是USB/DC目标值，跳过该框: {}".format(power_raw[:60]))
+                    # 电源专项规则：优先“无”；若无该选项再选“USB/DC”
+                    # 若当前已是“无”（且不是并存态）则直接跳过。
+                    if power_norm and has_none_now and (not has_usbdc_now):
+                        self.log("[OK] 电源属性已是目标值“无”，跳过该框: {}".format(power_raw[:60]))
                         continue
 
                     trigger = None
@@ -2541,50 +2541,7 @@ class SheinPublisher:
                                 pass
                         time.sleep(0.25)
 
-                        # 先写入 USB 作为过滤词
-                        try:
-                            driver.execute_script(
-                                """
-                                const box = arguments[0];
-                                function visible(el){
-                                  if(!el) return false;
-                                  const st = window.getComputedStyle(el);
-                                  if(st.display==='none' || st.visibility==='hidden') return false;
-                                  const r = el.getBoundingClientRect();
-                                  return r.width>0 && r.height>0;
-                                }
-                                function writeUsb(el){
-                                  if(!el || !visible(el)) return false;
-                                  try{ el.focus(); }catch(e){}
-                                  if(el.isContentEditable){
-                                    el.textContent = 'USB';
-                                  }else{
-                                    el.value = 'USB';
-                                  }
-                                  ['input','change','keyup'].forEach(evt=>{
-                                    try{ el.dispatchEvent(new Event(evt,{bubbles:true})); }catch(e){}
-                                  });
-                                  return true;
-                                }
-                                const active = document.activeElement;
-                                if(writeUsb(active)) return true;
-                                const cands = Array.from((box || document).querySelectorAll(
-                                  "input:not([type='hidden']), span.so-select-input[contenteditable='true']"
-                                ));
-                                for(const el of cands){
-                                  if(writeUsb(el)) return true;
-                                }
-                                return false;
-                                """,
-                                target_box
-                            )
-                        except Exception:
-                            try:
-                                trigger.send_keys(Keys.CONTROL, "a")
-                                trigger.send_keys("USB")
-                            except Exception:
-                                pass
-                        time.sleep(0.2)
+                        # 不再向输入框写USB，避免多选组件把“USB”作为额外标签追加
 
                         power_option = None
                         try:
@@ -2619,7 +2576,14 @@ class SheinPublisher:
                                 const cands = Array.from(best.querySelectorAll(
                                   '.so-select-option, .so-option, li[role="option"], [class*="option"]'
                                 ));
-                                // 强制命中 USB/DC 相关选项，避免误选“电池类”
+                                // 1) 优先“无”
+                                for (const c of cands){
+                                  if(!validOption(c)) continue;
+                                  const txtRaw = (c.innerText || c.textContent || '').trim();
+                                  const txt = txtRaw.replace(/\\s+/g,'').replace(/[\\/（）()]/g,'');
+                                  if(txt === '无' || txt.includes('无')) return c;
+                                }
+                                // 2) 找不到“无”再选 USB/DC
                                 for (const c of cands){
                                   if(!validOption(c)) continue;
                                   const txtRaw = (c.innerText || c.textContent || '').trim();
@@ -2644,7 +2608,7 @@ class SheinPublisher:
                                 selected_ok = False
 
                         if (power_option is None) and (_attempt == 0):
-                            self.log("[WARN] 电源下拉未命中USB/DC选项，准备重试一次")
+                            self.log("[WARN] 电源下拉未命中目标选项（无/USB-DC），准备重试一次")
 
                         selected_label = ""
                         if selected_ok:
@@ -2681,6 +2645,9 @@ class SheinPublisher:
                             normalized_up = str(selected_label or "").strip().upper().replace(" ", "").replace("/", "")
                             has_multi_selected = ("\n" in str(selected_label or "")) or ("+1" in str(selected_label or "")) or ("+" in str(selected_label or ""))
                             selected_ok = bool(normalized) and (
+                                (normalized in ("无", "none", "without", "withoutpowersupply"))
+                                or ("none" in normalized)
+                                or ("without" in normalized)
                                 (("USB" in normalized_up) and ("DC" in normalized_up))
                                 or ("其他dc" in normalized)
                                 or ("dc链接" in normalized)
@@ -2766,7 +2733,7 @@ class SheinPublisher:
                         time.sleep(0.12)
 
                     if selected_ok:
-                        self.log("[OK] 电源属性已按规则写入USB并选首项: {}".format(str(selected_label or "").strip()[:60]))
+                        self.log("[OK] 电源属性已按规则选择目标值(优先无，其次USB/DC): {}".format(str(selected_label or "").strip()[:60]))
                         try:
                             driver.execute_script(
                                 "const e=document.body||document.documentElement;"
@@ -2780,7 +2747,7 @@ class SheinPublisher:
                             pass
                         time.sleep(0.12)
                     else:
-                        self.log("[WARN] 电源属性未能完成“写USB后选首项”（data_id={} selected='{}')".format(
+                        self.log("[WARN] 电源属性未能完成“优先无/兜底USB-DC”（data_id={} selected='{}')".format(
                             data_id, str(selected_label or "").strip()[:40]
                         ))
                 except Exception:
