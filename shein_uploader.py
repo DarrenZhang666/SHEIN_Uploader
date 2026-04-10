@@ -2652,6 +2652,329 @@ class SheinPublisher:
                 except Exception:
                     continue
 
+            # 产品用途 Product Usage 专项处理（不依赖 * 必填）：
+            # 规则：优先点击下面框，打开下拉并选择“ 不含光源/灯泡 ”
+            try:
+                root = attr_card if attr_card is not None else driver
+                usage_items = root.find_elements(
+                    By.XPATH,
+                    ".//div[contains(@class,'so-form-item') and contains(@class,'spmp_style__productAttrItem') "
+                    "and .//span[contains(@class,'spmp_style__productAttrLabel') and "
+                    "("
+                    "contains(normalize-space(.),'产品用途') or contains(normalize-space(.),'Product Usage')"
+                    ")]]"
+                )
+            except Exception:
+                usage_items = []
+
+            for usage_item in usage_items:
+                try:
+                    if not usage_item.is_displayed():
+                        continue
+
+                    target_box = None
+                    try:
+                        boxes = usage_item.find_elements(By.XPATH, ".//div[contains(@class,'spmp_style__appendBox')]")
+                        visible_boxes = [b for b in boxes if b.is_displayed()]
+                        if visible_boxes:
+                            target_box = visible_boxes[-1]
+                    except Exception:
+                        target_box = None
+                    if target_box is None:
+                        target_box = usage_item
+
+                    # 已经是目标值则跳过；若当前是“无”会继续后续流程并覆盖
+                    current_usage_value = ""
+                    try:
+                        current_usage_value = driver.execute_script(
+                            """
+                            const box = arguments[0];
+                            if(!box) return '';
+                            function visible(el){
+                              if(!el) return false;
+                              const st = window.getComputedStyle(el);
+                              if(st.display==='none' || st.visibility==='hidden') return false;
+                              const r = el.getBoundingClientRect();
+                              return r.width>0 && r.height>0;
+                            }
+                            const nodes = Array.from(box.querySelectorAll(
+                              '.so-select-item, .renderItemEllipsis, .so-tag, .so-select-result, .so-select-input, input[type="text"], input:not([type])'
+                            ));
+                            for(const n of nodes){
+                              if(!visible(n)) continue;
+                              const txt = (n.value || n.innerText || n.textContent || '').trim();
+                              if(!txt) continue;
+                              if(txt.includes('请选择') || txt.includes('Select')) continue;
+                              return txt;
+                            }
+                            return '';
+                            """,
+                            target_box
+                        )
+                    except Exception:
+                        current_usage_value = ""
+                    if ("不含光源/灯泡" in str(current_usage_value or "")) or ("不含光源" in str(current_usage_value or "")):
+                        self.log("[OK] 产品用途属性已是目标值，跳过该框: {}".format(str(current_usage_value).strip()[:60]))
+                        continue
+
+                    # 清空当前已选（例如“无”），避免残留值导致选项无法切换
+                    try:
+                        for cx in [
+                            ".//a[@data-role='close' and contains(@class,'so-select-close')]",
+                            ".//*[contains(@class,'so-select-close-warpper')]//a[contains(@class,'so-select-close')]",
+                            ".//*[contains(@class,'so-select-indicator') and contains(@class,'so-select-close')]",
+                        ]:
+                            try:
+                                for ce in target_box.find_elements(By.XPATH, cx):
+                                    if not ce.is_displayed():
+                                        continue
+                                    try:
+                                        driver.execute_script(
+                                            "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                                            ce
+                                        )
+                                    except Exception:
+                                        pass
+                                    time.sleep(0.05)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+
+                    trigger = None
+                    for sx in [
+                        ".//div[contains(@class,'so-select-inner')]",
+                        ".//div[contains(@class,'so-select-result')]",
+                        ".//a[contains(@class,'so-select-caret') or contains(@class,'so-select-multi')]",
+                        ".//span[contains(@class,'so-select-input')]",
+                    ]:
+                        try:
+                            cands = target_box.find_elements(By.XPATH, sx)
+                        except Exception:
+                            cands = []
+                        for cand in cands:
+                            try:
+                                if cand.is_displayed():
+                                    trigger = cand
+                                    break
+                            except Exception:
+                                continue
+                        if trigger is not None:
+                            break
+                    if trigger is None:
+                        self.log("[WARN] 产品用途属性未找到可点击下拉框")
+                        continue
+
+                    data_id = ""
+                    try:
+                        data_id = str(driver.execute_script(
+                            """
+                            const trg = arguments[0];
+                            if(!trg) return '';
+                            const inner = trg.closest('.so-select-inner') || trg;
+                            return (inner && inner.getAttribute && inner.getAttribute('data-id')) || '';
+                            """,
+                            trigger
+                        ) or "").strip()
+                    except Exception:
+                        data_id = ""
+
+                    try:
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});arguments[0].click();", trigger
+                        )
+                    except Exception:
+                        try:
+                            trigger.click()
+                        except Exception:
+                            pass
+                    time.sleep(0.2)
+
+                    # 输入关键词过滤，避免仍停留在“无”
+                    try:
+                        driver.execute_script(
+                            """
+                            const box = arguments[0];
+                            function visible(el){
+                              if(!el) return false;
+                              const st = window.getComputedStyle(el);
+                              if(st.display==='none' || st.visibility==='hidden') return false;
+                              const r = el.getBoundingClientRect();
+                              return r.width>0 && r.height>0;
+                            }
+                            const active = document.activeElement;
+                            const cands = [];
+                            if(active) cands.push(active);
+                            if(box){
+                              cands.push(...Array.from(box.querySelectorAll("span.so-select-input[contenteditable='true'], input:not([type='hidden'])")));
+                            }
+                            for(const el of cands){
+                              if(!visible(el)) continue;
+                              try{ el.focus(); }catch(e){}
+                              if(el.isContentEditable){
+                                el.textContent = '不含光源';
+                              }else{
+                                el.value = '不含光源';
+                              }
+                              ['input','change','keyup'].forEach(evt=>{
+                                try{ el.dispatchEvent(new Event(evt,{bubbles:true})); }catch(e){}
+                              });
+                              break;
+                            }
+                            """,
+                            target_box
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
+
+                    usage_option = None
+                    try:
+                        usage_option = driver.execute_script(
+                            """
+                            function visible(el){
+                              if(!el) return false;
+                              const st = window.getComputedStyle(el);
+                              if(st.display==='none' || st.visibility==='hidden') return false;
+                              const r = el.getBoundingClientRect();
+                              return r.width>0 && r.height>0;
+                            }
+                            function validOption(el){
+                              if(!el || !visible(el)) return false;
+                              const cls = (el.className || '').toString();
+                              if(/disabled|is-disabled/.test(cls)) return false;
+                              const txt = (el.innerText || el.textContent || '').trim();
+                              if(!txt) return false;
+                              if(txt.includes('请选择') || txt.includes('Select')) return false;
+                              return true;
+                            }
+                            const drops = Array.from(document.querySelectorAll('div.so-select-drop-down-content')).filter(visible);
+                            const activeDrop = drops.length ? drops[drops.length - 1] : null;
+                            if(!activeDrop) return null;
+                            const cands = Array.from(activeDrop.querySelectorAll(
+                              '.so-select-option, .so-option, li[role="option"], [class*="option"]'
+                            ));
+                            for (const c of cands){
+                              if(!validOption(c)) continue;
+                              const txt = (c.innerText || c.textContent || '').trim().replace(/\\s+/g,'');
+                              if(txt.includes('不含光源/灯泡')) return c;
+                            }
+                            for (const c of cands){
+                              if(!validOption(c)) continue;
+                              const txt = (c.innerText || c.textContent || '').trim().replace(/\\s+/g,'');
+                              if(txt.includes('不含光源') || txt.includes('灯泡')) return c;
+                            }
+                            return null;
+                            """
+                        )
+                    except Exception:
+                        usage_option = None
+
+                    selected_ok = False
+                    if usage_option is not None:
+                        try:
+                            driver.execute_script("arguments[0].click();", usage_option)
+                            selected_ok = True
+                        except Exception:
+                            selected_ok = False
+
+                    # 优先使用当前 data-id 对应下拉层做精确命中，避免点到其它字段的浮层选项
+                    if not selected_ok and data_id:
+                        try:
+                            xp_exact = (
+                                "//div[contains(@class,'so-list') and @data-id='{0}']"
+                                "//*[contains(@class,'so-select-option') or contains(@class,'so-option') or @role='option']"
+                                "[contains(normalize-space(.),'不含光源/灯泡')]"
+                            ).format(data_id)
+                            exact_opts = driver.find_elements(By.XPATH, xp_exact)
+                        except Exception:
+                            exact_opts = []
+                        target_opt = None
+                        for opt in exact_opts:
+                            try:
+                                if opt.is_displayed():
+                                    target_opt = opt
+                                    break
+                            except Exception:
+                                continue
+                        if target_opt is None:
+                            try:
+                                xp_fuzzy = (
+                                    "//div[contains(@class,'so-list') and @data-id='{0}']"
+                                    "//*[contains(@class,'so-select-option') or contains(@class,'so-option') or @role='option']"
+                                    "[contains(normalize-space(.),'不含光源')]"
+                                ).format(data_id)
+                                fuzzy_opts = driver.find_elements(By.XPATH, xp_fuzzy)
+                            except Exception:
+                                fuzzy_opts = []
+                            for opt in fuzzy_opts:
+                                try:
+                                    if opt.is_displayed():
+                                        target_opt = opt
+                                        break
+                                except Exception:
+                                    continue
+                        if target_opt is not None:
+                            try:
+                                driver.execute_script("arguments[0].click();", target_opt)
+                                selected_ok = True
+                            except Exception:
+                                selected_ok = False
+
+                    # 键盘兜底：过滤后使用回车确认高亮项
+                    if not selected_ok:
+                        try:
+                            trigger.send_keys(Keys.ENTER)
+                            selected_ok = True
+                        except Exception:
+                            selected_ok = False
+
+                    selected_label = ""
+                    if selected_ok:
+                        try:
+                            selected_label = driver.execute_script(
+                                """
+                                const box = arguments[0];
+                                if(!box) return '';
+                                function visible(el){
+                                  if(!el) return false;
+                                  const st = window.getComputedStyle(el);
+                                  if(st.display==='none' || st.visibility==='hidden') return false;
+                                  const r = el.getBoundingClientRect();
+                                  return r.width>0 && r.height>0;
+                                }
+                                const nodes = Array.from(box.querySelectorAll(
+                                  '.so-select-item, .renderItemEllipsis, .so-tag, .so-select-result, .so-select-input, input[type="text"], input:not([type])'
+                                ));
+                                for(const n of nodes){
+                                  if(!visible(n)) continue;
+                                  const txt = (n.value || n.innerText || n.textContent || '').trim();
+                                  if(!txt) continue;
+                                  if(txt.includes('请选择') || txt.includes('Select')) continue;
+                                  return txt;
+                                }
+                                return '';
+                                """,
+                                target_box
+                            )
+                        except Exception:
+                            selected_label = ""
+                        selected_ok = ("不含光源/灯泡" in str(selected_label or "")) or ("不含光源" in str(selected_label or ""))
+
+                    if selected_ok:
+                        self.log("[OK] 产品用途属性已选择: {}".format(str(selected_label or "").strip()[:60]))
+                        try:
+                            driver.execute_script("document.body.click();")
+                        except Exception:
+                            pass
+                        time.sleep(0.1)
+                    else:
+                        self.log("[WARN] 产品用途属性未选中目标项: 不含光源/灯泡 (data_id={} selected='{}')".format(
+                            data_id, str(selected_label or "").strip()[:40]
+                        ))
+                except Exception:
+                    continue
+
             auto_filled_count = 0
             for item in required_items:
                 try:
@@ -2670,6 +2993,9 @@ class SheinPublisher:
                         continue
                     # 电源由上面的“电源专项处理”统一处理，避免重复操作导致覆盖
                     if ("电源" in label) or ("Power Supply" in label) or ("Power Source" in label) or ("Power" in label):
+                        continue
+                    # 产品用途由上面的“产品用途专项处理”统一处理，避免重复操作导致覆盖
+                    if ("产品用途" in label) or ("Product Usage" in label):
                         continue
 
                     # 长度 Length 专项规则：
