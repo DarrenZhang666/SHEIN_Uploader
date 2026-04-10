@@ -2347,7 +2347,7 @@ class SheinPublisher:
                     if target_box is None:
                         target_box = power_item
 
-                    # 若当前电源已是“无/None”，直接跳过该框，不重复操作
+                    # 若当前电源已是目标值（“无”或“USB/其他DC链接”），直接跳过该框
                     current_power_value = ""
                     try:
                         current_power_value = driver.execute_script(
@@ -2364,24 +2364,74 @@ class SheinPublisher:
                             const nodes = Array.from(box.querySelectorAll(
                               '.so-select-item, .renderItemEllipsis, .so-tag, .so-select-result, .so-select-input, input[type="text"], input:not([type])'
                             ));
+                            const vals = [];
                             for(const n of nodes){
                               if(!visible(n)) continue;
                               const txt = (n.value || n.innerText || n.textContent || '').trim();
                               if(!txt) continue;
                               if(txt.includes('请选择') || txt.includes('Select')) continue;
-                              return txt;
+                              if(vals.indexOf(txt) < 0) vals.push(txt);
                             }
-                            return '';
+                            return vals.join('\\n');
                             """,
                             target_box
                         )
                     except Exception:
                         current_power_value = ""
-                    power_norm = str(current_power_value or "").strip().lower().replace(" ", "")
-                    if power_norm and (
-                        ("无" in str(current_power_value or "")) or ("none" in power_norm) or ("without" in power_norm)
-                    ):
-                        self.log("[OK] 电源属性已是“无”，跳过该框: {}".format(str(current_power_value).strip()[:60]))
+                    power_raw = str(current_power_value or "").strip()
+                    power_norm = power_raw.lower().replace(" ", "").replace("/", "").replace("（", "").replace("）", "").replace("(", "").replace(")", "")
+                    power_norm_up = power_raw.upper().replace(" ", "").replace("/", "")
+                    has_none_now = bool(
+                        (power_norm in ("无", "none", "without", "withoutpowersupply"))
+                        or ("none" in power_norm)
+                        or ("without" in power_norm)
+                        or ("无" in power_raw)
+                    )
+                    has_usbdc_now = bool(
+                        (("USB" in power_norm_up) and ("DC" in power_norm_up))
+                        or ("其他dc" in power_norm)
+                        or ("dc链接" in power_norm)
+                        or ("dc连接" in power_norm)
+                    )
+                    # 若当前同时存在“无 + USB/DC”，优先保留 USB/DC，删除“无”
+                    if has_none_now and has_usbdc_now:
+                        try:
+                            removed_none_now = bool(driver.execute_script(
+                                """
+                                const box = arguments[0];
+                                function visible(el){
+                                  if(!el) return false;
+                                  const st = window.getComputedStyle(el);
+                                  if(st.display==='none' || st.visibility==='hidden') return false;
+                                  const r = el.getBoundingClientRect();
+                                  return r.width>0 && r.height>0;
+                                }
+                                if(!box) return false;
+                                const tags = Array.from(box.querySelectorAll('.so-select-item'));
+                                let removed = false;
+                                for(const t of tags){
+                                  if(!visible(t)) continue;
+                                  const txt = (t.innerText || t.textContent || '').trim().toLowerCase();
+                                  if(!(txt.includes('无') || txt.includes('none') || txt.includes('without'))) continue;
+                                  const close = t.querySelector('.so-select-close, .so-select-indicator.so-select-close');
+                                  if(close){
+                                    try{ close.click(); removed = true; }catch(e){}
+                                  }
+                                }
+                                return removed;
+                                """,
+                                target_box
+                            ))
+                            if removed_none_now:
+                                time.sleep(0.12)
+                                self.log("[OK] 电源属性检测到“无+USB/DC”并存，已删除“无”保留USB/DC")
+                                continue
+                        except Exception:
+                            pass
+                    # 电源专项固定走“写USB -> 选首项”；
+                    # 仅当已是“纯USB/DC（且不含无）”时才跳过，避免被“无”卡住。
+                    if power_norm and has_usbdc_now and (not has_none_now):
+                        self.log("[OK] 电源属性已是USB/DC目标值，跳过该框: {}".format(power_raw[:60]))
                         continue
 
                     trigger = None
@@ -2408,6 +2458,36 @@ class SheinPublisher:
                         self.log("[WARN] 电源属性未找到可点击下拉框")
                         continue
 
+                    # 强制单值模式：先清空当前电源项已选标签，避免“无/电池式/USB”并存
+                    try:
+                        for _clr_round in range(4):
+                            removed_any = False
+                            for _scope in [target_box, power_item]:
+                                if _scope is None:
+                                    continue
+                                for cx in [
+                                    ".//a[@data-role='close' and contains(@class,'so-select-close')]",
+                                    ".//*[contains(@class,'so-select-close-warpper')]//a[contains(@class,'so-select-close')]",
+                                    ".//*[contains(@class,'so-select-indicator') and contains(@class,'so-select-close')]",
+                                ]:
+                                    try:
+                                        for ce in _scope.find_elements(By.XPATH, cx):
+                                            if not ce.is_displayed():
+                                                continue
+                                            try:
+                                                driver.execute_script("arguments[0].click();", ce)
+                                                removed_any = True
+                                                time.sleep(0.05)
+                                            except Exception:
+                                                continue
+                                    except Exception:
+                                        continue
+                            if not removed_any:
+                                break
+                            time.sleep(0.08)
+                    except Exception:
+                        pass
+
                     data_id = ""
                     try:
                         data_id = str(driver.execute_script(
@@ -2426,6 +2506,30 @@ class SheinPublisher:
                     selected_ok = False
                     selected_label = ""
                     for _attempt in range(2):
+                        # 每轮都先清一次，避免异步回填导致旧值复现
+                        try:
+                            for _scope in [target_box, power_item]:
+                                if _scope is None:
+                                    continue
+                                for cx in [
+                                    ".//a[@data-role='close' and contains(@class,'so-select-close')]",
+                                    ".//*[contains(@class,'so-select-close-warpper')]//a[contains(@class,'so-select-close')]",
+                                    ".//*[contains(@class,'so-select-indicator') and contains(@class,'so-select-close')]",
+                                ]:
+                                    try:
+                                        for ce in _scope.find_elements(By.XPATH, cx):
+                                            if not ce.is_displayed():
+                                                continue
+                                            try:
+                                                driver.execute_script("arguments[0].click();", ce)
+                                                time.sleep(0.03)
+                                            except Exception:
+                                                continue
+                                    except Exception:
+                                        continue
+                        except Exception:
+                            pass
+
                         try:
                             driver.execute_script(
                                 "arguments[0].scrollIntoView({block:'center'});arguments[0].click();", trigger
@@ -2436,6 +2540,51 @@ class SheinPublisher:
                             except Exception:
                                 pass
                         time.sleep(0.25)
+
+                        # 先写入 USB 作为过滤词
+                        try:
+                            driver.execute_script(
+                                """
+                                const box = arguments[0];
+                                function visible(el){
+                                  if(!el) return false;
+                                  const st = window.getComputedStyle(el);
+                                  if(st.display==='none' || st.visibility==='hidden') return false;
+                                  const r = el.getBoundingClientRect();
+                                  return r.width>0 && r.height>0;
+                                }
+                                function writeUsb(el){
+                                  if(!el || !visible(el)) return false;
+                                  try{ el.focus(); }catch(e){}
+                                  if(el.isContentEditable){
+                                    el.textContent = 'USB';
+                                  }else{
+                                    el.value = 'USB';
+                                  }
+                                  ['input','change','keyup'].forEach(evt=>{
+                                    try{ el.dispatchEvent(new Event(evt,{bubbles:true})); }catch(e){}
+                                  });
+                                  return true;
+                                }
+                                const active = document.activeElement;
+                                if(writeUsb(active)) return true;
+                                const cands = Array.from((box || document).querySelectorAll(
+                                  "input:not([type='hidden']), span.so-select-input[contenteditable='true']"
+                                ));
+                                for(const el of cands){
+                                  if(writeUsb(el)) return true;
+                                }
+                                return false;
+                                """,
+                                target_box
+                            )
+                        except Exception:
+                            try:
+                                trigger.send_keys(Keys.CONTROL, "a")
+                                trigger.send_keys("USB")
+                            except Exception:
+                                pass
+                        time.sleep(0.2)
 
                         power_option = None
                         try:
@@ -2470,10 +2619,15 @@ class SheinPublisher:
                                 const cands = Array.from(best.querySelectorAll(
                                   '.so-select-option, .so-option, li[role="option"], [class*="option"]'
                                 ));
+                                // 强制命中 USB/DC 相关选项，避免误选“电池类”
                                 for (const c of cands){
                                   if(!validOption(c)) continue;
-                                  const txt = (c.innerText || c.textContent || '').trim().replace(/\\s+/g,'');
-                                  if(txt === '无' || txt.includes('无')) return c;
+                                  const txtRaw = (c.innerText || c.textContent || '').trim();
+                                  const txt = txtRaw.replace(/\\s+/g,'');
+                                  const up = txt.toUpperCase();
+                                  if((up.includes('USB') && up.includes('DC')) || txt.includes('其他DC') || txt.includes('DC链接') || txt.includes('DC连接')){
+                                    return c;
+                                  }
                                 }
                                 return null;
                                 """,
@@ -2489,12 +2643,8 @@ class SheinPublisher:
                             except Exception:
                                 selected_ok = False
 
-                        if not selected_ok:
-                            try:
-                                trigger.send_keys(Keys.ENTER)
-                                selected_ok = True
-                            except Exception:
-                                selected_ok = False
+                        if (power_option is None) and (_attempt == 0):
+                            self.log("[WARN] 电源下拉未命中USB/DC选项，准备重试一次")
 
                         selected_label = ""
                         if selected_ok:
@@ -2513,30 +2663,110 @@ class SheinPublisher:
                                     const nodes = Array.from(box.querySelectorAll(
                                       '.so-select-item, .renderItemEllipsis, .so-tag, .so-select-result, .so-select-input, input[type="text"], input:not([type])'
                                     ));
+                                    const vals = [];
                                     for(const n of nodes){
                                       if(!visible(n)) continue;
                                       const txt = (n.value || n.innerText || n.textContent || '').trim();
                                       if(!txt) continue;
                                       if(txt.includes('请选择') || txt.includes('Select')) continue;
-                                      return txt;
+                                      if(vals.indexOf(txt) < 0) vals.push(txt);
                                     }
-                                    return '';
+                                    return vals.join('\\n');
                                     """,
                                     target_box
                                 )
                             except Exception:
                                 selected_label = ""
-                            normalized = str(selected_label or "").strip().lower().replace(" ", "").replace("/", "")
+                            normalized = str(selected_label or "").strip().lower().replace(" ", "").replace("/", "").replace("（", "").replace("）", "").replace("(", "").replace(")", "")
+                            normalized_up = str(selected_label or "").strip().upper().replace(" ", "").replace("/", "")
+                            has_multi_selected = ("\n" in str(selected_label or "")) or ("+1" in str(selected_label or "")) or ("+" in str(selected_label or ""))
                             selected_ok = bool(normalized) and (
-                                ("无" in str(selected_label or "")) or ("none" in normalized) or ("without" in normalized)
+                                (("USB" in normalized_up) and ("DC" in normalized_up))
+                                or ("其他dc" in normalized)
+                                or ("dc链接" in normalized)
+                                or ("dc连接" in normalized)
                             )
+                            if has_multi_selected:
+                                selected_ok = False
+
+                            # 若当前变成“无 + USB/DC”并存，强制删除“无”标签，仅保留 USB/DC
+                            if selected_ok:
+                                has_none_sel = bool(
+                                    ("无" in str(selected_label or "")) or ("none" in normalized) or ("without" in normalized)
+                                )
+                                has_usbdc_sel = bool(
+                                    (("USB" in normalized_up) and ("DC" in normalized_up))
+                                    or ("其他dc" in normalized)
+                                    or ("dc链接" in normalized)
+                                    or ("dc连接" in normalized)
+                                )
+                                if has_none_sel and has_usbdc_sel:
+                                    try:
+                                        removed_none = bool(driver.execute_script(
+                                            """
+                                            const box = arguments[0];
+                                            function visible(el){
+                                              if(!el) return false;
+                                              const st = window.getComputedStyle(el);
+                                              if(st.display==='none' || st.visibility==='hidden') return false;
+                                              const r = el.getBoundingClientRect();
+                                              return r.width>0 && r.height>0;
+                                            }
+                                            if(!box) return false;
+                                            const tags = Array.from(box.querySelectorAll('.so-select-item'));
+                                            let removed = false;
+                                            for(const t of tags){
+                                              if(!visible(t)) continue;
+                                              const txt = (t.innerText || t.textContent || '').trim();
+                                              if(!txt) continue;
+                                              if(txt.includes('无') || txt.toLowerCase().includes('none') || txt.toLowerCase().includes('without')){
+                                                const close = t.querySelector('.so-select-close, .so-select-indicator.so-select-close');
+                                                if(close){
+                                                  try{ close.click(); removed = true; }catch(e){}
+                                                }
+                                              }
+                                            }
+                                            return removed;
+                                            """,
+                                            target_box
+                                        ))
+                                        if removed_none:
+                                            time.sleep(0.12)
+                                            selected_label = driver.execute_script(
+                                                """
+                                                const box = arguments[0];
+                                                if(!box) return '';
+                                                function visible(el){
+                                                  if(!el) return false;
+                                                  const st = window.getComputedStyle(el);
+                                                  if(st.display==='none' || st.visibility==='hidden') return false;
+                                                  const r = el.getBoundingClientRect();
+                                                  return r.width>0 && r.height>0;
+                                                }
+                                                const nodes = Array.from(box.querySelectorAll(
+                                                  '.so-select-item, .renderItemEllipsis, .so-tag, .so-select-result, .so-select-input, input[type="text"], input:not([type])'
+                                                ));
+                                                const parts = [];
+                                                for(const n of nodes){
+                                                  if(!visible(n)) continue;
+                                                  const txt = (n.value || n.innerText || n.textContent || '').trim();
+                                                  if(!txt) continue;
+                                                  if(txt.includes('请选择') || txt.includes('Select')) continue;
+                                                  parts.push(txt);
+                                                }
+                                                return parts.join('\\n');
+                                                """,
+                                                target_box
+                                            )
+                                    except Exception:
+                                        pass
 
                         if selected_ok:
                             break
                         time.sleep(0.12)
 
                     if selected_ok:
-                        self.log("[OK] 电源属性已填写“无”并确认选中: {}".format(str(selected_label or "").strip()[:60]))
+                        self.log("[OK] 电源属性已按规则写入USB并选首项: {}".format(str(selected_label or "").strip()[:60]))
                         try:
                             driver.execute_script(
                                 "const e=document.body||document.documentElement;"
@@ -2550,7 +2780,7 @@ class SheinPublisher:
                             pass
                         time.sleep(0.12)
                     else:
-                        self.log("[WARN] 电源属性未能完成“下拉选无”（data_id={} selected='{}')".format(
+                        self.log("[WARN] 电源属性未能完成“写USB后选首项”（data_id={} selected='{}')".format(
                             data_id, str(selected_label or "").strip()[:40]
                         ))
                 except Exception:
