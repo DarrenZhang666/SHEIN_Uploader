@@ -7040,8 +7040,22 @@ class SheinPublisher:
                 if not _tmp_img:
                     raise Exception("识图图片下载失败")
 
-                # 容错策略：识图后若未出现可选类目（含“暂无分类推荐”或未识别到推荐类目），
-                # 关闭实例重开后重试，最多3次
+                # 容错策略：识图后若未出现可选类目，关闭实例重开后重试，最多3次
+                def _is_no_category_case(step_err_text, no_cat_hint=False):
+                    txt = str(step_err_text or "")
+                    recog = str(getattr(self, "_last_recognition_state", "") or "").lower()
+                    # 识图阶段“无类目”的统一判定：
+                    # 1) 明确提示暂无推荐
+                    # 2) 识别超时（timeout）后仍无推荐类目可选
+                    # 3) select_first_category 未命中任何推荐项
+                    if no_cat_hint:
+                        return True
+                    if ("识图发品暂无分类推荐" in txt) or ("未识别到推荐类目" in txt):
+                        return True
+                    if recog in ("no_category", "timeout"):
+                        return True
+                    return False
+
                 for attempt in range(1, 4):
                     step_err = None
                     try:
@@ -7078,14 +7092,18 @@ class SheinPublisher:
                         self._wait_ready_state(timeout=2)
                         continue
 
-                    # 新增容错：识图后未出现可选类目（无推荐提示/未识别到推荐类目）都执行重开重试
-                    no_category_detected = (
-                        no_cat_hint
-                        or ("未识别到推荐类目" in str(step_err or ""))
-                    )
+                    # 识图后未出现可选类目（含 timeout）都执行“关实例重开再试”
+                    no_category_detected = _is_no_category_case(step_err, no_cat_hint=no_cat_hint)
                     if no_category_detected and attempt < 3:
-                        self.log("[Step2] 识图后未出现可选类目，关闭当前实例并新开实例重试...")
-                        if not _reopen_instance_and_back_publish("识图发品暂无分类推荐"):
+                        self.log("[Step2] 识图后未出现可选类目，关闭当前实例并新开实例重试... state={}".format(
+                            str(getattr(self, "_last_recognition_state", "") or "")
+                        ))
+                        if not _reopen_instance_and_back_publish(
+                            "识图无类目重试: {} / state={}".format(
+                                str(step_err or "")[:40],
+                                str(getattr(self, "_last_recognition_state", "") or "")
+                            )
+                        ):
                             raise Exception("识图重试时重开实例失败: 未能进入商品发布页")
                         self._wait_ready_state(timeout=3)
                         self._dismiss_announcements()
