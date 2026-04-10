@@ -6123,6 +6123,7 @@ class SheinPublisher:
                     one_ok = False
                     # 该行“本轮应达到的最小图片数”，用于防止误判后重复上传同一张
                     expected_after_this = row_base_cnt + img_idx + 1
+                    submitted_once = False
                     for _up_try in range(3):
                         try:
                             self._dismiss_switch_confirm_modal()
@@ -6138,16 +6139,22 @@ class SheinPublisher:
                                 self.log("[DEBUG] SKU行 {} 图{} 第{}次前检测到已落库({}>={})，跳过重复提交".format(
                                     row_idx + 1, img_idx + 1, _up_try + 1, before_cnt, expected_after_this))
                                 break
-                            driver.execute_script(
-                                "arguments[0].style.display='block';"
-                                "arguments[0].style.visibility='visible';"
-                                "arguments[0].style.opacity='1';", fi_cur)
-                            fi_cur.send_keys(img_path)
-                            global_detail_img_idx += 1
-                            self.log("[DEBUG] SKU行 {} 全局图{}已提交(本SKU第{}张, 第{}次)".format(
-                                row_idx + 1, global_detail_img_idx, img_idx + 1, _up_try + 1))
-                            self._dismiss_switch_confirm_modal()
-                            self._handle_crop_dialog()
+                            # 关键防重：同一张图在同一SKU重试时只提交一次，后续仅复核落库，避免重复上传同图
+                            if not submitted_once:
+                                driver.execute_script(
+                                    "arguments[0].style.display='block';"
+                                    "arguments[0].style.visibility='visible';"
+                                    "arguments[0].style.opacity='1';", fi_cur)
+                                fi_cur.send_keys(img_path)
+                                submitted_once = True
+                                global_detail_img_idx += 1
+                                self.log("[DEBUG] SKU行 {} 全局图{}已提交(本SKU第{}张, 第{}次)".format(
+                                    row_idx + 1, global_detail_img_idx, img_idx + 1, _up_try + 1))
+                                self._dismiss_switch_confirm_modal()
+                                self._handle_crop_dialog()
+                            else:
+                                self.log("[DEBUG] SKU行 {} 图{} 第{}次仅复核落库，不重复提交同一文件".format(
+                                    row_idx + 1, img_idx + 1, _up_try + 1))
                             # 校验本张是否真正落库到当前行
                             landed = False
                             for _ in range(24):
@@ -6181,8 +6188,12 @@ class SheinPublisher:
                             upload_ok_count += 1
                             break
                         except Exception as e:
+                            err_text = str(e)
+                            # 若判定疑似传错行，下一轮允许重新提交该图尝试纠偏
+                            if "图片疑似上传到第" in err_text:
+                                submitted_once = False
                             self.log("[WARN] SKU行 {} 图{} 第{}次上传失败: {}".format(
-                                row_idx + 1, img_idx + 1, _up_try + 1, str(e)[:80]))
+                                row_idx + 1, img_idx + 1, _up_try + 1, err_text[:80]))
                             if _up_try < 2:
                                 time.sleep(0.4)
                     if not one_ok:
