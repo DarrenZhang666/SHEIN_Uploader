@@ -43,7 +43,7 @@ SENSITIVE_WORDS = [
     "weight loss", "slimming", "whitening", "anti-aging", "anti-wrinkle",
     "acne removal", "spot fading", "medical grade", "no side effects", "seguro", "FILA", "Safe","Sustainable",
     "Eco",'eco-conscious','environmentally friendly','green','sustainable fashion','recycled materials','organic cotton',
-    'vegan leather','biodegradable packaging',"Environmentally",
+    'vegan leather','biodegradable packaging',"Environmentally","cotton"
     # 在此处继续添加敏感词，每行一个，字符串格式
 ]
 
