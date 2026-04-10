@@ -73,8 +73,11 @@ class SheinApp(tk.Tk):
         self._verified_accounts: set[str] = set()
         self._account_auth_periods = {}  # account -> (start_raw, end_raw)
         self._auth_check_interval_ms = 60 * 60 * 1000  # 每小时复检一次账号授权
+        self._auth_retry_delay_ms = 2 * 60 * 1000      # 复检失败后的短周期重试（2分钟）
         self._auth_check_after_id = None
         self._auth_watch_account = ""
+        self._auth_transient_fail_count = 0            # 临时故障连续次数（网络/502等）
+        self._auth_last_success_at = None              # 最近一次授权校验成功时间
         self._license_locked = False
         self._license_locked_reason = ""
         self._app_closing = False
@@ -2644,7 +2647,7 @@ class SheinApp(tk.Tk):
             return False
 
         self.status_lbl.config(text='正在验证账号授权...')
-        ok, msg, start_raw, end_raw = verify_shein_account_detail(account)
+        ok, msg, start_raw, end_raw = self._verify_account_detail_resilient(account, retries=2)
         if ok:
             period_ok, period_msg = self._check_local_period(start_raw, end_raw)
             self._update_license_text(start_raw, end_raw)
@@ -2659,6 +2662,41 @@ class SheinApp(tk.Tk):
         messagebox.showerror('账号验证失败', msg)
         return False
 
+    def _is_transient_auth_error(self, msg):
+        """是否属于临时授权校验故障（网络/超时/5xx），不应立即锁定软件。"""
+        txt = str(msg or "").strip().lower()
+        if not txt:
+            return False
+        transient_keys = (
+            "http 5", "http 502", "http 503", "http 504",
+            "服务器错误 (http 5", "连接 auth_api 失败",
+            "无法连接验证服务器", "验证服务器响应超时",
+            "网络异常", "temporarily", "timeout", "timed out",
+            "bad gateway", "gateway timeout", "service unavailable",
+        )
+        return any(k in txt for k in transient_keys)
+
+    def _verify_account_detail_resilient(self, account, retries=2):
+        """
+        带重试的授权校验：仅对临时故障重试，避免把短时502误判为权限失效。
+        返回 (ok, msg, start_raw, end_raw)。
+        """
+        last = (False, "授权校验未执行", "", "")
+        max_attempts = max(1, int(retries) + 1)
+        for i in range(max_attempts):
+            last = verify_shein_account_detail(account)
+            ok, msg, _, _ = last
+            if ok:
+                return last
+            if (i < max_attempts - 1) and self._is_transient_auth_error(msg):
+                try:
+                    threading.Event().wait(0.8)
+                except Exception:
+                    pass
+                continue
+            return last
+        return last
+
     def _mark_verified_account(self, account, start_raw, end_raw):
         """记录验证成功账号，并开启每小时复检。"""
         account = str(account or "").strip()
@@ -2667,6 +2705,8 @@ class SheinApp(tk.Tk):
         self._verified_accounts.add(account)
         self._account_auth_periods[account] = (start_raw, end_raw)
         self._auth_watch_account = account
+        self._auth_transient_fail_count = 0
+        self._auth_last_success_at = datetime.now()
         self._schedule_auth_check()
 
     def _schedule_auth_check(self, delay_ms=None):
@@ -2694,7 +2734,7 @@ class SheinApp(tk.Tk):
         self.status_lbl.config(text='正在复检账号授权...')
 
         def _worker():
-            ok, msg, start_raw, end_raw = verify_shein_account_detail(account)
+            ok, msg, start_raw, end_raw = self._verify_account_detail_resilient(account, retries=2)
             if ok:
                 period_ok, period_msg = self._check_local_period(start_raw, end_raw)
                 if not period_ok:
@@ -2715,6 +2755,16 @@ class SheinApp(tk.Tk):
             self._mark_verified_account(account, start_raw, end_raw)
             self._update_license_text(start_raw, end_raw)
             self.status_lbl.config(text='账号授权复检通过')
+            return
+        if self._is_transient_auth_error(msg):
+            self._auth_transient_fail_count = int(self._auth_transient_fail_count or 0) + 1
+            self.status_lbl.config(
+                text='授权复检临时失败(网络/服务器波动)，{}分钟后自动重试（第{}次）'.format(
+                    max(1, int(self._auth_retry_delay_ms / 60000)),
+                    self._auth_transient_fail_count
+                )
+            )
+            self._schedule_auth_check(delay_ms=self._auth_retry_delay_ms)
             return
         lock_reason = "账号 [{}] 已不在权限范围内。\n{}\n请联系管理员续费/开通后再使用。".format(account, str(msg or "授权校验未通过"))
         self._lock_app_for_auth(lock_reason)
