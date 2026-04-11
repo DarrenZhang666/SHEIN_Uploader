@@ -3,7 +3,6 @@
 
 from shein_main import *
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
-import tkinter.font as tkfont
 import subprocess
 import json
 import os
@@ -31,6 +30,10 @@ except Exception:
     _normalize_color_token = None
 
 class SheinApp(tk.Tk):
+    _VERSION_NOTICE_STATE_FILE = os.path.join(
+        os.path.expanduser("~"), ".shein_profiles", "version_notice_state.json"
+    )
+
     @staticmethod
     def _get_local_version_paths():
         """获取本地版本文件候选路径（按优先级排序）。"""
@@ -90,18 +93,45 @@ class SheinApp(tk.Tk):
                 return "\n".join(f"{idx}. {line}" for idx, line in enumerate(lines, 1))
         return ""
 
+    @classmethod
+    def _read_version_notice_state(cls):
+        """读取版本说明弹窗状态。"""
+        try:
+            if not os.path.isfile(cls._VERSION_NOTICE_STATE_FILE):
+                return {}
+            with open(cls._VERSION_NOTICE_STATE_FILE, "r", encoding="utf-8") as f:
+                obj = json.load(f) or {}
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+
+    @classmethod
+    def _write_version_notice_state(cls, state_obj):
+        """写入版本说明弹窗状态。"""
+        try:
+            os.makedirs(os.path.dirname(cls._VERSION_NOTICE_STATE_FILE), exist_ok=True)
+            with open(cls._VERSION_NOTICE_STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state_obj or {}, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     def _show_first_open_release_notes(self):
         """首次打开新版本时，弹窗展示版本优化说明。"""
         try:
-            data, version_path = self._read_local_version_meta()
-            if not version_path or not isinstance(data, dict):
+            data, _ = self._read_local_version_meta()
+            if not isinstance(data, dict):
                 return
 
             current_ver = str(data.get("version") or "").strip().lstrip("Vv")
             if not current_ver:
                 return
 
-            shown_ver = str(data.get("last_shown_version") or "").strip().lstrip("Vv")
+            state_obj = self._read_version_notice_state()
+            shown_ver = str(
+                state_obj.get("last_shown_version")
+                or data.get("last_shown_version")
+                or ""
+            ).strip().lstrip("Vv")
             if shown_ver == current_ver:
                 return
 
@@ -119,9 +149,8 @@ class SheinApp(tk.Tk):
                 msg = "已升级到 V{}\n\n本次优化内容：\n{}".format(current_ver, notes_text)
                 messagebox.showinfo("版本升级说明", msg)
 
-            data["last_shown_version"] = current_ver
-            with open(version_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            state_obj["last_shown_version"] = current_ver
+            self._write_version_notice_state(state_obj)
         except Exception as e:
             self._pub_log("[UPDATER] 展示版本升级说明失败: {}".format(str(e)[:120]))
 
@@ -670,6 +699,25 @@ class SheinApp(tk.Tk):
                     run_pub = SheinPublisher(log_cb=_progress_log)
                     self._bargain_runtime_publisher = run_pub
 
+                def _on_page_rows(page_no, _added, all_rows_snapshot, total_pages_now):
+                    if self._stop_bargain_fetch or self._app_closing:
+                        return
+                    rows_snapshot = list(all_rows_snapshot or [])
+
+                    def _apply_page_rows():
+                        # 抓取中：按页实时展示，避免用户长时间看不到数据
+                        self._bargain_rows = rows_snapshot
+                        self._render_bargain_rows()
+                        total_show = max(1, int(total_pages_now or 1))
+                        percent = 25 + (float(max(1, int(page_no or 1))) / float(total_show)) * 65.0
+                        self._set_bargain_progress(
+                            "抓取第{}页数据（累计{}条）".format(int(page_no or 1), len(rows_snapshot)),
+                            state="running",
+                            percent=percent,
+                        )
+
+                    self.after(0, _apply_page_rows)
+
                 ok, msg, pub, rows = fetch_shein_pending_bargain_rows(
                     publisher=run_pub,
                     account=bargain_account,
@@ -678,14 +726,28 @@ class SheinApp(tk.Tk):
                     headless=headless_mode,
                     should_stop=lambda: bool(self._stop_bargain_fetch or self._app_closing),
                     force_new_browser=force_new_browser,
+                    on_page_rows=_on_page_rows,
                 )
                 self._bargain_runtime_publisher = pub
                 temp_pub = pub
-                self._bargain_rows = rows or []
-                self.after(0, self._render_bargain_rows)
+                fetched_rows = list(rows or [])
+                if self._enable_bargain_amazon_metrics and ok:
+                    fetched_rows = self._mark_bargain_rows_amazon_fetching(fetched_rows)
+                ui_render_ready = threading.Event()
+
+                def _apply_initial_rows(rows_snapshot):
+                    try:
+                        self._bargain_rows = rows_snapshot
+                        self._render_bargain_rows()
+                    finally:
+                        ui_render_ready.set()
+
+                self.after(0, lambda rs=fetched_rows: _apply_initial_rows(rs))
+                # 等待主线程先把抓取结果渲染出来，再进行亚马逊价格补充
+                ui_render_ready.wait(timeout=1.2)
                 amazon_done = True
                 if self._enable_bargain_amazon_metrics and ok:
-                    amazon_done = self._enrich_bargain_rows_with_amazon_progressive()
+                    amazon_done = self._enrich_bargain_rows_with_amazon_progressive(initial_state_ready=True)
                 if ok:
                     if self._stop_bargain_fetch or (not amazon_done):
                         self.after(0, lambda: self._set_bargain_progress("已停止", state="fail"))
@@ -716,10 +778,10 @@ class SheinApp(tk.Tk):
                     self._bargain_runtime_publisher = None
                     self._bargain_runtime_is_temp = False
                 elif keep_runtime:
-                    # 抓取完成后保留议价专属浏览器，用于“操作”列按钮回传网页点击。
+                    # 抓取完成后保留议价专属浏览器，供上方批量按钮执行网页动作。
                     self._bargain_runtime_publisher = temp_pub
                     self._bargain_runtime_is_temp = True
-                    self._pub_log("议价流程：已保留后台浏览器实例，等待执行“操作”按钮")
+                    self._pub_log("议价流程：已保留后台浏览器实例，等待执行上方操作按钮")
                 else:
                     self._bargain_runtime_publisher = None
                     self._bargain_runtime_is_temp = False
@@ -900,9 +962,9 @@ class SheinApp(tk.Tk):
             "platform_price",
         )
         if self._enable_bargain_amazon_metrics:
-            cols = base_cols + ("amazon_price", "profit_rate", "operation")
+            cols = base_cols + ("amazon_price", "profit_rate")
         else:
-            cols = base_cols + ("operation",)
+            cols = base_cols
         self._bargain_table_columns = cols
         self._bargain_table = ttk.Treeview(
             table_wrap,
@@ -915,7 +977,6 @@ class SheinApp(tk.Tk):
         self._bargain_table.heading("supplier_no", text="供方货号", anchor="w")
         self._bargain_table.heading("sku_info", text="SKU信息", anchor="w")
         self._bargain_table.heading("platform_price", text="平台建议价", anchor="w", command=lambda: self._on_bargain_sort_click("platform_price"))
-        self._bargain_table.heading("operation", text="操作", anchor="w")
         if "amazon_url" in cols:
             self._bargain_table.heading("amazon_url", text="亚马逊链接", anchor="w")
         if "amazon_price" in cols:
@@ -927,7 +988,6 @@ class SheinApp(tk.Tk):
         self._bargain_table.column("supplier_no", width=140, minwidth=120, anchor="w")
         self._bargain_table.column("sku_info", width=150, minwidth=130, anchor="w")
         self._bargain_table.column("platform_price", width=100, minwidth=90, anchor="w")
-        self._bargain_table.column("operation", width=430, minwidth=380, anchor="w")
         if "amazon_url" in cols:
             self._bargain_table.column("amazon_url", width=220, minwidth=170, anchor="w")
         if "amazon_price" in cols:
@@ -986,21 +1046,12 @@ class SheinApp(tk.Tk):
 
         cols = tuple(getattr(self, "_bargain_table_columns", ()) or ())
 
-        def _op_display(r):
-            actions = list(r.get("actions", []) or [])
-            if not actions:
-                actions = ["同意平台建议价", "重新报价", "拒绝，放弃上新"]
-            chunks, gap = self._build_bargain_operation_segments(actions)
-            # Treeview 不支持单元格内原生 Button，这里用“按钮样式文案+平铺”展示，并按文字宽度命中。
-            return gap.join(chunks)
-
         value_getter = {
             "pick": lambda r: "☑" if bool(r.get("_selected", False)) else "☐",
             "supplier_no": lambda r: r.get("supplier_no", ""),
             "reason": lambda r: r.get("reason", ""),
             "sku_info": lambda r: r.get("sku_info", ""),
             "platform_price": lambda r: r.get("platform_price", ""),
-            "operation": _op_display,
             "amazon_url": lambda r: r.get("amazon_url", ""),
             "amazon_price": lambda r: r.get("amazon_price", ""),
             "profit_rate": lambda r: r.get("profit_rate", ""),
@@ -1267,111 +1318,8 @@ class SheinApp(tk.Tk):
                 if url.startswith("http://") or url.startswith("https://"):
                     webbrowser.open(url)
                 return
-            if col_name == "operation":
-                bbox = table.bbox(row_id, col)
-                if not bbox:
-                    return
-                rel_x = float(x - bbox[0])
-                row_idx = int(getattr(self, "_bargain_rowid_to_index", {}).get(row_id, -1))
-                actions = self._get_bargain_row_actions(row_idx)
-                if not actions:
-                    return
-                chunks, gap = self._build_bargain_operation_segments(actions)
-                try:
-                    style_font = ttk.Style(self).lookup("Bargain.Treeview", "font") or ("Segoe UI", 10)
-                    fnt = tkfont.Font(font=style_font)
-                except Exception:
-                    try:
-                        fnt = tkfont.nametofont("TkDefaultFont")
-                    except Exception:
-                        fnt = None
-                if fnt is None:
-                    seg_idx = min(2, max(0, int(rel_x // max(1.0, float(bbox[2])) * 3)))
-                else:
-                    # Treeview 单元格内部通常有少量左边距，预留 8px 可提升点击命中精度
-                    cur_x = max(0.0, rel_x - 8.0)
-                    seg_idx = len(chunks) - 1
-                    for i, ch in enumerate(chunks):
-                        w = float(fnt.measure(ch))
-                        if cur_x <= w:
-                            seg_idx = i
-                            break
-                        cur_x -= w
-                        if i < len(chunks) - 1:
-                            gw = float(fnt.measure(gap))
-                            if cur_x <= gw:
-                                # 点击在间隔区域时，按就近按钮归属
-                                seg_idx = i if cur_x < (gw / 2.0) else (i + 1)
-                                break
-                            cur_x -= gw
-                action_label = actions[min(seg_idx, len(actions) - 1)]
-                self._trigger_bargain_row_action(row_idx, action_label)
         except Exception:
             pass
-
-    @staticmethod
-    def _build_bargain_operation_segments(actions):
-        a1 = actions[0] if len(actions) > 0 else "同意平台建议价"
-        a2 = actions[1] if len(actions) > 1 else "重新报价"
-        a3 = actions[2] if len(actions) > 2 else "拒绝，放弃上新"
-        chunks = ["[ {} ]".format(a1), "[ {} ]".format(a2), "[ {} ]".format(a3)]
-        gap = "   "
-        return chunks, gap
-
-    def _get_bargain_row_actions(self, row_idx):
-        rows = list(getattr(self, "_bargain_rows", []) or [])
-        if row_idx < 0 or row_idx >= len(rows):
-            return []
-        actions = list(rows[row_idx].get("actions", []) or [])
-        if not actions:
-            actions = ["同意平台建议价", "重新报价", "拒绝，放弃上新"]
-        # 只保留前3个，保证点击分段稳定
-        return actions[:3]
-
-    def _trigger_bargain_row_action(self, row_idx, action_label):
-        if not action_label:
-            return
-        rows = list(getattr(self, "_bargain_rows", []) or [])
-        if row_idx < 0 or row_idx >= len(rows):
-            return
-        with self._bargain_action_lock:
-            if self._bargain_action_running:
-                self.status_lbl.config(text="议价功能：已有操作正在执行，请稍候")
-                return
-            self._bargain_action_running = True
-        row = dict(rows[row_idx] or {})
-        pub = getattr(self, "_bargain_runtime_publisher", None)
-        if pub is None:
-            self._bargain_action_running = False
-            messagebox.showwarning("议价", "未找到可用浏览器实例，请先抓取“待确认”数据。")
-            return
-
-        self.status_lbl.config(text='议价功能：正在执行「{}」...'.format(action_label))
-        self._pub_log("议价操作：准备执行 [{}]，议价单号={}，供方货号={}".format(
-            action_label,
-            row.get("bargain_no", ""),
-            row.get("supplier_no", ""),
-        ))
-
-        def _run_action():
-            try:
-                ok, msg = self._execute_bargain_action(row, action_label)
-                if ok:
-                    self.after(0, lambda r=row: self._remove_bargain_row_after_action(r))
-                    self.after(0, lambda: self.status_lbl.config(text="议价功能：{}".format(msg)))
-                    self.after(0, lambda: messagebox.showinfo("议价", msg))
-                else:
-                    self.after(0, lambda: self.status_lbl.config(text="议价功能：{}".format(msg)))
-                    self.after(0, lambda: messagebox.showwarning("议价", msg))
-            except Exception as e:
-                err = str(e)[:120]
-                self.after(0, lambda: self.status_lbl.config(text="议价功能：操作失败 - " + err))
-                self.after(0, lambda: messagebox.showerror("议价", "执行操作失败：{}".format(err)))
-            finally:
-                with self._bargain_action_lock:
-                    self._bargain_action_running = False
-
-        threading.Thread(target=_run_action, daemon=True).start()
 
     def _execute_bargain_action(self, row, action_label):
         pub = getattr(self, "_bargain_runtime_publisher", None)
@@ -1490,7 +1438,22 @@ class SheinApp(tk.Tk):
         except Exception:
             return None
 
-    def _enrich_bargain_rows_with_amazon_progressive(self):
+    def _mark_bargain_rows_amazon_fetching(self, rows):
+        """将可补充亚马逊价格的行标记为“获取中”，其余行标记为 N/A。"""
+        data = list(rows or [])
+        for r in data:
+            asin = str(r.get("supplier_no", "") or "").strip().upper()
+            if re.match(r"^B[A-Z0-9]{9}$", asin):
+                r["amazon_url"] = "获取中"
+                r["amazon_price"] = "获取中"
+                r["profit_rate"] = ""
+            else:
+                r["amazon_url"] = "N/A"
+                r["amazon_price"] = "N/A"
+                r["profit_rate"] = "N/A"
+        return data
+
+    def _enrich_bargain_rows_with_amazon_progressive(self, initial_state_ready=False):
         data = list(getattr(self, "_bargain_rows", []) or [])
         if not data:
             return True
@@ -1511,14 +1474,20 @@ class SheinApp(tk.Tk):
             return True
 
         valid_row_indices = [i for rows in asin_to_row_indices.values() for i in rows]
-        for idx in valid_row_indices:
-            data[idx]["amazon_url"] = "获取中"
-            data[idx]["amazon_price"] = "获取中"
-            data[idx]["profit_rate"] = ""
-        self._bargain_rows = data
-        self.after(0, self._render_bargain_rows)
+        if not initial_state_ready:
+            for idx in valid_row_indices:
+                data[idx]["amazon_url"] = "获取中"
+                data[idx]["amazon_price"] = "获取中"
+                data[idx]["profit_rate"] = ""
+            self._bargain_rows = data
+            self.after(0, self._render_bargain_rows)
 
-        unique_asins = list(asin_to_row_indices.keys())
+        # 严格按当前数据行顺序（从上到下）构建 ASIN 处理队列
+        asin_order_pairs = sorted(
+            asin_to_row_indices.items(),
+            key=lambda kv: min(kv[1]) if kv[1] else 10**9
+        )
+        unique_asins = [asin for asin, _idx_list in asin_order_pairs]
         self._pub_log("议价流程：开始补充亚马逊价格（{}行，{}个ASIN）".format(len(valid_row_indices), len(unique_asins)))
         self.after(0, lambda: self._set_bargain_progress("补充亚马逊价格", state="running", percent=92))
         region = self.amazon_region.get() if hasattr(self, "amazon_region") else "美国"
@@ -1575,13 +1544,14 @@ class SheinApp(tk.Tk):
         total_tasks = len(unique_asins)
         executor = ThreadPoolExecutor(max_workers=max_workers)
         try:
-            futures = {executor.submit(_fetch_one, asin): asin for asin in unique_asins}
-            for fut in as_completed(futures):
+            future_by_asin = {asin: executor.submit(_fetch_one, asin) for asin in unique_asins}
+            # 按表格顺序（从上到下）回填结果，避免出现“从下往上更新”的观感
+            for asin in unique_asins:
                 if self._stop_bargain_fetch:
-                    for pending in futures:
+                    for pending in future_by_asin.values():
                         pending.cancel()
                     break
-                asin = futures[fut]
+                fut = future_by_asin.get(asin)
                 finished += 1
                 try:
                     _asin, amazon_price_val, amazon_url = fut.result()

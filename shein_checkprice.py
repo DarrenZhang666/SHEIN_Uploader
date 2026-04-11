@@ -960,6 +960,7 @@ def fetch_shein_pending_bargain_rows(
     headless=False,
     should_stop=None,
     force_new_browser=False,
+    on_page_rows=None,
 ):
     """打开议价入口并抓取弹窗中“待确认”行。"""
     log = log_cb or _noop_log
@@ -1044,6 +1045,13 @@ def fetch_shein_pending_bargain_rows(
             })
             added += 1
         log("议价流程：第 {} 页新增 {} 条，累计 {} 条（仅XYZ-）".format(page_no, added, len(all_rows)))
+        if callable(on_page_rows):
+            try:
+                total_pages_now = int(st.get("total_pages", total_pages_hint) or total_pages_hint or 1)
+                snapshot = [dict(x) for x in all_rows]
+                on_page_rows(page_no, added, snapshot, total_pages_now)
+            except Exception:
+                pass
 
         # 若已经是最后一页则结束
         st_after = _get_todo_pagination_state(driver)
