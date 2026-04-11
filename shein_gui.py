@@ -699,6 +699,30 @@ class SheinApp(tk.Tk):
                     run_pub = SheinPublisher(log_cb=_progress_log)
                     self._bargain_runtime_publisher = run_pub
 
+                def _is_login_like_page(_pub):
+                    try:
+                        if _pub is None or getattr(_pub, "driver", None) is None:
+                            return False
+                        cur = str(_pub.driver.current_url or "").lower()
+                        if "login" in cur:
+                            return True
+                        txt = str(_pub.driver.execute_script("return (document.body && document.body.innerText) || ''") or "")
+                        return ("登录" in txt and "卖家中心" not in txt)
+                    except Exception:
+                        return False
+
+                def _do_fetch_once(_publisher, _fetch_account, _clone_from, _force_new):
+                    return fetch_shein_pending_bargain_rows(
+                        publisher=_publisher,
+                        account=_fetch_account,
+                        clone_from_account=_clone_from,
+                        log_cb=_progress_log,
+                        headless=headless_mode,
+                        should_stop=lambda: bool(self._stop_bargain_fetch or self._app_closing),
+                        force_new_browser=_force_new,
+                        on_page_rows=_on_page_rows,
+                    )
+
                 def _on_page_rows(page_no, _added, all_rows_snapshot, total_pages_now):
                     if self._stop_bargain_fetch or self._app_closing:
                         return
@@ -718,16 +742,66 @@ class SheinApp(tk.Tk):
 
                     self.after(0, _apply_page_rows)
 
-                ok, msg, pub, rows = fetch_shein_pending_bargain_rows(
-                    publisher=run_pub,
-                    account=bargain_account,
-                    clone_from_account=account,
-                    log_cb=_progress_log,
-                    headless=headless_mode,
-                    should_stop=lambda: bool(self._stop_bargain_fetch or self._app_closing),
-                    force_new_browser=force_new_browser,
-                    on_page_rows=_on_page_rows,
+                ok, msg, pub, rows = _do_fetch_once(
+                    run_pub, bargain_account, account, force_new_browser
                 )
+                # 兜底1：若疑似停在登录页，自动注入已保存会话并重试一次
+                if (not ok) and (
+                    ("未登录" in str(msg)) or _is_login_like_page(pub)
+                ):
+                    self._pub_log("[BARGAIN][恢复-1] 首次抓取失败，疑似登录态失效：{}".format(str(msg)[:120]))
+                    self._pub_log("[BARGAIN][恢复-1] 开始注入已保存会话并重试议价抓取")
+                    try:
+                        login_cookies, login_storage, login_session_storage = self._get_saved_login_session()
+                        self._pub_log("[BARGAIN][恢复-1] 会话快照: cookies={} localStorage={} sessionStorage={}".format(
+                            len(login_cookies or []), len(login_storage or {}), len(login_session_storage or {})
+                        ))
+                        if pub is not None and getattr(pub, "driver", None) is not None and (
+                            login_cookies or login_storage or login_session_storage
+                        ):
+                            try:
+                                pub.driver.get("https://sso.geiwohuo.com/#/login")
+                                time.sleep(0.5)
+                            except Exception:
+                                pass
+                            self._inject_login_session_to_driver(
+                                pub.driver, login_cookies, login_storage, login_session_storage
+                            )
+                            try:
+                                pub.driver.get("https://sso.geiwohuo.com/#/spmp/commdities/list")
+                                time.sleep(0.6)
+                            except Exception:
+                                pass
+                    except Exception as _e:
+                        self._pub_log("[BARGAIN][恢复-1] 注入会话异常: {}".format(str(_e)[:90]))
+                    ok, msg, pub, rows = _do_fetch_once(
+                        pub, bargain_account, account, False
+                    )
+                    if ok:
+                        self._pub_log("[BARGAIN][恢复-1] 重试成功，已恢复议价抓取")
+                    else:
+                        self._pub_log("[BARGAIN][恢复-1] 重试仍失败: {}".format(str(msg)[:120]))
+
+                # 兜底2：仍失败且疑似登录态问题，则改用主账号 profile 重试一次
+                if (not ok) and (
+                    ("未登录" in str(msg))
+                    or ("登录" in str(msg) and "请先" in str(msg))
+                    or _is_login_like_page(pub)
+                ):
+                    self._pub_log("[BARGAIN][恢复-2] 议价专用profile仍异常，切换主账号profile重试")
+                    try:
+                        if pub is not None and getattr(pub, "driver", None) is not None:
+                            pub.driver.quit()
+                    except Exception:
+                        pass
+                    run_pub = SheinPublisher(log_cb=_progress_log)
+                    ok, msg, pub, rows = _do_fetch_once(
+                        run_pub, account, "", True
+                    )
+                    if ok:
+                        self._pub_log("[BARGAIN][恢复-2] 主账号profile重试成功")
+                    else:
+                        self._pub_log("[BARGAIN][恢复-2] 主账号profile重试失败: {}".format(str(msg)[:120]))
                 self._bargain_runtime_publisher = pub
                 temp_pub = pub
                 fetched_rows = list(rows or [])
