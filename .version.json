@@ -2,8 +2,9 @@
   "version": "1.25",
   "channel": "stable",
   "version_url": "https://sheintool.oss-cn-beijing.aliyuncs.com/.version.json",
-  "first_open_notes": [ "第一次打开软件时显示的提示信息", 
-                        "第一次打开软件时显示的提示信息",
-                        "第一次打开软件时显示的提示信息"
+  "first_open_notes": [
+    "第一次打开软件时显示的提示信息",
+    "第一次打开软件时显示的提示信息",
+    "第一次打开软件时显示的提示信息"
   ]
 }
