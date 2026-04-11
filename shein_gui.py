@@ -5,6 +5,10 @@ from shein_main import *
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 import tkinter.font as tkfont
 import subprocess
+import json
+import os
+import sys
+import threading
 from shein_developer_mode import DevModeToggle, is_dev_mode
 from shein_mysql import verify_shein_account_detail
 from shein_checkprice import (
@@ -14,6 +18,12 @@ from shein_checkprice import (
 )
 from datetime import datetime
 try:
+    from shein_updater import OSSAutoUpdater, ensure_local_version_file, DEFAULT_REMOTE_VERSION_URL
+except Exception:
+    OSSAutoUpdater = None
+    ensure_local_version_file = None
+    DEFAULT_REMOTE_VERSION_URL = ""
+try:
     from shein_asin import _canonicalize_shein_color, _split_color_candidates, _normalize_color_token
 except Exception:
     _canonicalize_shein_color = None
@@ -21,10 +31,35 @@ except Exception:
     _normalize_color_token = None
 
 class SheinApp(tk.Tk):
+    @staticmethod
+    def _read_app_version(default_version="未知版本"):
+        """从 .version.json 读取版本号，读取失败时回退默认值。"""
+        try:
+            file_dir = os.path.dirname(os.path.abspath(__file__))
+            exe_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else ""
+            candidate_paths = [
+                os.path.join(file_dir, ".version.json"),
+                os.path.join(os.getcwd(), ".version.json"),
+            ]
+            if exe_dir:
+                candidate_paths.insert(0, os.path.join(exe_dir, ".version.json"))
+            for version_path in candidate_paths:
+                if not os.path.exists(version_path):
+                    continue
+                with open(version_path, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+                v = str(data.get("version") or "").strip()
+                if v:
+                    return v.lstrip("Vv")
+        except Exception:
+            pass
+        return str(default_version)
+
     def __init__(self):
         super().__init__()
         self._ui_thread_id = threading.get_ident()
-        self.title("SHEIN 商品采集 & 发布工具V1.25")
+        app_ver = self._read_app_version()
+        self.title("SHEIN 商品采集 & 发布工具V{}".format(app_ver))
         self.geometry("1280x800"); self.minsize(1000,680)
         self.configure(bg=BG_DARK)
         self.asin_list=[]; self.asin_vars={}; self.asin_dots={}; self.asin_status={}
@@ -81,6 +116,8 @@ class SheinApp(tk.Tk):
         self._license_locked = False
         self._license_locked_reason = ""
         self._app_closing = False
+        self._updater = None
+        self._update_check_started = False
         self._bargain_rows = []
         self._bargain_progress_percent = 0.0
         self._bargain_fetch_thread = None
@@ -109,6 +146,8 @@ class SheinApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
         # 兜底：任何路径导致根窗口销毁时，都确保进程退出
         self.bind("<Destroy>", self._on_root_destroy, add="+")
+        # 启动后异步检查更新（不阻塞UI）
+        self.after(1800, self._startup_check_update_async)
 
     def _init_log_file(self):
         """初始化日志目录（所有模式均可落盘）。"""
@@ -242,6 +281,93 @@ class SheinApp(tk.Tk):
         except Exception as e:
             self._pub_log("预热失败: {}".format(str(e)[:50]))
             self._driver_ready = False
+
+    def _resolve_update_version_url(self):
+        """更新地址优先级：环境变量 > 本地.version.json > 代码默认值。"""
+        try:
+            env_url = str(os.getenv("SHEIN_UPDATE_VERSION_URL") or "").strip()
+            if env_url:
+                return env_url
+        except Exception:
+            pass
+        try:
+            base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+            vp = os.path.join(base_dir, ".version.json")
+            if os.path.exists(vp):
+                with open(vp, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+                local_url = str(data.get("version_url") or "").strip()
+                if local_url:
+                    return local_url
+        except Exception:
+            pass
+        return str(DEFAULT_REMOTE_VERSION_URL or "").strip()
+
+    def _startup_check_update_async(self):
+        """启动后后台检查更新，有新版本再弹确认。"""
+        if self._update_check_started:
+            return
+        self._update_check_started = True
+        if OSSAutoUpdater is None:
+            self._pub_log("[UPDATER] 更新模块未加载，跳过自动检查")
+            return
+        version_url = self._resolve_update_version_url()
+        if not version_url:
+            self._pub_log("[UPDATER] 未配置 version_url，跳过自动更新检查")
+            return
+
+        try:
+            base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+            if ensure_local_version_file is not None:
+                ensure_local_version_file(base_dir=base_dir, version_value="1.25.0")
+            self._updater = OSSAutoUpdater(
+                remote_version_url=version_url,
+                app_name="SHEIN_Uploader",
+                log_cb=lambda m: self._pub_log(str(m))
+            )
+        except Exception as e:
+            self._pub_log("[UPDATER] 初始化失败: {}".format(str(e)[:120]))
+            return
+
+        def _worker():
+            try:
+                info = self._updater.check_update()
+            except Exception as e:
+                self.after(0, lambda: self._pub_log("[UPDATER] 检查更新异常: {}".format(str(e)[:120])))
+                return
+            if info.error:
+                self.after(0, lambda: self._pub_log("[UPDATER] 检查更新失败: {}".format(info.error[:120])))
+                return
+            if not info.has_update:
+                self.after(0, lambda: self._pub_log("[UPDATER] 当前已是最新版本"))
+                return
+
+            def _ask_user():
+                msg = "检测到新版本 {}\n当前版本 {}\n\n{}\n\n是否立即下载并更新？".format(
+                    info.remote_version,
+                    info.current_version,
+                    (info.release_notes or "暂无更新说明")
+                )
+                ok = messagebox.askyesno("发现新版本", msg)
+                if not ok:
+                    self._pub_log("[UPDATER] 用户取消更新")
+                    return
+
+                def _do_update():
+                    try:
+                        self._pub_log("[UPDATER] 开始下载并应用更新...")
+                        self._updater._download_and_apply(self._updater.latest_remote)
+                    except SystemExit:
+                        pass
+                    except Exception as e:
+                        self.after(0, lambda: messagebox.showerror("更新失败", str(e)[:400]))
+                        self.after(0, lambda: self._pub_log("[UPDATER] 更新失败: {}".format(str(e)[:120])))
+
+                threading.Thread(target=_do_update, daemon=True).start()
+
+            self.after(0, _ask_user)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _build_ui(self):
         self._build_topbar()
