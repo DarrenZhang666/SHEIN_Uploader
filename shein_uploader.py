@@ -2385,7 +2385,8 @@ class SheinPublisher:
                         (power_norm in ("无", "none", "without", "withoutpowersupply"))
                         or ("none" in power_norm)
                         or ("without" in power_norm)
-                        or ("无" in power_raw)
+                        or ("无电源" in power_raw)
+                        or (str(power_raw).strip().startswith("无") and (not str(power_raw).strip().startswith("无线")))
                     )
                     has_usbdc_now = bool(
                         (("USB" in power_norm_up) and ("DC" in power_norm_up))
@@ -2393,10 +2394,10 @@ class SheinPublisher:
                         or ("dc链接" in power_norm)
                         or ("dc连接" in power_norm)
                     )
-                    # 若当前同时存在“无 + USB/DC”，优先保留 USB/DC，删除“无”
+                    # 若当前同时存在“无 + USB/DC”，按需求优先保留“无”，删除 USB/DC
                     if has_none_now and has_usbdc_now:
                         try:
-                            removed_none_now = bool(driver.execute_script(
+                            removed_usbdc_now = bool(driver.execute_script(
                                 """
                                 const box = arguments[0];
                                 function visible(el){
@@ -2411,8 +2412,9 @@ class SheinPublisher:
                                 let removed = false;
                                 for(const t of tags){
                                   if(!visible(t)) continue;
-                                  const txt = (t.innerText || t.textContent || '').trim().toLowerCase();
-                                  if(!(txt.includes('无') || txt.includes('none') || txt.includes('without'))) continue;
+                                  const txt = (t.innerText || t.textContent || '').trim();
+                                  const up = txt.replace(/\s+/g,'').toUpperCase();
+                                  if(!((up.includes('USB') && up.includes('DC')) || txt.includes('其他DC') || txt.includes('DC链接') || txt.includes('DC连接'))) continue;
                                   const close = t.querySelector('.so-select-close, .so-select-indicator.so-select-close');
                                   if(close){
                                     try{ close.click(); removed = true; }catch(e){}
@@ -2422,17 +2424,14 @@ class SheinPublisher:
                                 """,
                                 target_box
                             ))
-                            if removed_none_now:
+                            if removed_usbdc_now:
                                 time.sleep(0.12)
-                                self.log("[OK] 电源属性检测到“无+USB/DC”并存，已删除“无”保留USB/DC")
+                                self.log("[OK] 电源属性检测到“无+USB/DC”并存，已删除USB/DC保留“无”")
                                 continue
                         except Exception:
                             pass
                     # 电源专项规则：优先“无”；若无该选项再选“USB/DC”
-                    # 若当前已是“无”（且不是并存态）则直接跳过。
-                    if power_norm and has_none_now and (not has_usbdc_now):
-                        self.log("[OK] 电源属性已是目标值“无”，跳过该框: {}".format(power_raw[:60]))
-                        continue
+                    # 注意：不再因“当前值是无”直接跳过，避免下拉实际无“无”选项时误判。
 
                     trigger = None
                     for sx in [
@@ -2564,24 +2563,39 @@ class SheinPublisher:
                                   return true;
                                 }
                                 const targetDataId = arguments[0] || '';
+                                const triggerEl = arguments[1] || null;
                                 const drops = Array.from(document.querySelectorAll('div.so-select-drop-down-content, div.so-list')).filter(visible);
                                 let best = null;
                                 if(targetDataId){
                                   best = drops.find(d => (d.getAttribute('data-id') || '') === targetDataId) || null;
                                 }
-                                if(!best && drops.length){
-                                  best = drops[drops.length - 1];
+                                if(!best && triggerEl){
+                                  const tr = triggerEl.getBoundingClientRect();
+                                  let bestScore = 1e12;
+                                  for(const d of drops){
+                                    const dr = d.getBoundingClientRect();
+                                    const overlapX = Math.max(0, Math.min(tr.right, dr.right) - Math.max(tr.left, dr.left));
+                                    const dx = overlapX > 0 ? 0 : Math.min(Math.abs(dr.left - tr.right), Math.abs(dr.right - tr.left));
+                                    const dy = Math.abs(dr.top - tr.bottom);
+                                    const score = (dy * 3) + dx;
+                                    if(score < bestScore){
+                                      bestScore = score;
+                                      best = d;
+                                    }
+                                  }
                                 }
                                 if(!best) return null;
                                 const cands = Array.from(best.querySelectorAll(
                                   '.so-select-option, .so-option, li[role="option"], [class*="option"]'
                                 ));
-                                // 1) 优先“无”
+                                // 1) 优先“无”（避免把“无线”误判成“无”）
                                 for (const c of cands){
                                   if(!validOption(c)) continue;
                                   const txtRaw = (c.innerText || c.textContent || '').trim();
                                   const txt = txtRaw.replace(/\\s+/g,'').replace(/[\\/（）()]/g,'');
-                                  if(txt === '无' || txt.includes('无')) return c;
+                                  if(txt === '无' || txt === 'None' || txt === 'none' || txt === 'without' || txt === 'Without') return c;
+                                  if(txt.includes('无电源')) return c;
+                                  if(txt.startsWith('无') && (!txt.startsWith('无线'))) return c;
                                 }
                                 // 2) 找不到“无”再选 USB/DC
                                 for (const c of cands){
@@ -2595,7 +2609,8 @@ class SheinPublisher:
                                 }
                                 return null;
                                 """,
-                                data_id
+                                data_id,
+                                trigger
                             )
                         except Exception:
                             power_option = None
@@ -2644,32 +2659,28 @@ class SheinPublisher:
                             normalized = str(selected_label or "").strip().lower().replace(" ", "").replace("/", "").replace("（", "").replace("）", "").replace("(", "").replace(")", "")
                             normalized_up = str(selected_label or "").strip().upper().replace(" ", "").replace("/", "")
                             has_multi_selected = ("\n" in str(selected_label or "")) or ("+1" in str(selected_label or "")) or ("+" in str(selected_label or ""))
-                            selected_ok = bool(normalized) and (
-                                (normalized in ("无", "none", "without", "withoutpowersupply"))
-                                or ("none" in normalized)
+                            has_none_sel = bool(
+                                ("none" in normalized)
                                 or ("without" in normalized)
+                                or ("无" in str(selected_label or ""))
+                            )
+                            has_usbdc_sel = bool(
                                 (("USB" in normalized_up) and ("DC" in normalized_up))
                                 or ("其他dc" in normalized)
                                 or ("dc链接" in normalized)
                                 or ("dc连接" in normalized)
                             )
+                            selected_ok = bool(normalized) and (
+                                has_none_sel or has_usbdc_sel
+                            )
                             if has_multi_selected:
                                 selected_ok = False
 
-                            # 若当前变成“无 + USB/DC”并存，强制删除“无”标签，仅保留 USB/DC
+                            # 若当前变成“无 + USB/DC”并存，保留“无”，删除 USB/DC
                             if selected_ok:
-                                has_none_sel = bool(
-                                    ("无" in str(selected_label or "")) or ("none" in normalized) or ("without" in normalized)
-                                )
-                                has_usbdc_sel = bool(
-                                    (("USB" in normalized_up) and ("DC" in normalized_up))
-                                    or ("其他dc" in normalized)
-                                    or ("dc链接" in normalized)
-                                    or ("dc连接" in normalized)
-                                )
                                 if has_none_sel and has_usbdc_sel:
                                     try:
-                                        removed_none = bool(driver.execute_script(
+                                        removed_usbdc = bool(driver.execute_script(
                                             """
                                             const box = arguments[0];
                                             function visible(el){
@@ -2686,7 +2697,8 @@ class SheinPublisher:
                                               if(!visible(t)) continue;
                                               const txt = (t.innerText || t.textContent || '').trim();
                                               if(!txt) continue;
-                                              if(txt.includes('无') || txt.toLowerCase().includes('none') || txt.toLowerCase().includes('without')){
+                                              const up = txt.replace(/\s+/g,'').toUpperCase();
+                                              if((up.includes('USB') && up.includes('DC')) || txt.includes('其他DC') || txt.includes('DC链接') || txt.includes('DC连接')){
                                                 const close = t.querySelector('.so-select-close, .so-select-indicator.so-select-close');
                                                 if(close){
                                                   try{ close.click(); removed = true; }catch(e){}
@@ -2697,7 +2709,7 @@ class SheinPublisher:
                                             """,
                                             target_box
                                         ))
-                                        if removed_none:
+                                        if removed_usbdc:
                                             time.sleep(0.12)
                                             selected_label = driver.execute_script(
                                                 """
