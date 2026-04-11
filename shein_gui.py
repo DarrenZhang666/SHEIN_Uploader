@@ -32,28 +32,98 @@ except Exception:
 
 class SheinApp(tk.Tk):
     @staticmethod
-    def _read_app_version(default_version="未知版本"):
-        """从 .version.json 读取版本号，读取失败时回退默认值。"""
-        try:
-            file_dir = os.path.dirname(os.path.abspath(__file__))
-            exe_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else ""
-            candidate_paths = [
-                os.path.join(file_dir, ".version.json"),
-                os.path.join(os.getcwd(), ".version.json"),
-            ]
-            if exe_dir:
-                candidate_paths.insert(0, os.path.join(exe_dir, ".version.json"))
-            for version_path in candidate_paths:
+    def _get_local_version_paths():
+        """获取本地版本文件候选路径（按优先级排序）。"""
+        file_dir = os.path.dirname(os.path.abspath(__file__))
+        exe_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else ""
+        paths = [
+            os.path.join(file_dir, ".version.json"),
+            os.path.join(os.getcwd(), ".version.json"),
+        ]
+        if exe_dir:
+            paths.insert(0, os.path.join(exe_dir, ".version.json"))
+        return paths
+
+    @classmethod
+    def _read_local_version_meta(cls):
+        """读取本地 .version.json 的完整内容。"""
+        for version_path in cls._get_local_version_paths():
+            try:
                 if not os.path.exists(version_path):
                     continue
                 with open(version_path, "r", encoding="utf-8") as f:
                     data = json.load(f) or {}
-                v = str(data.get("version") or "").strip()
-                if v:
-                    return v.lstrip("Vv")
+                if isinstance(data, dict):
+                    return data, version_path
+            except Exception:
+                continue
+        return {}, ""
+
+    @staticmethod
+    def _read_app_version(default_version="未知版本"):
+        """从 .version.json 读取版本号，读取失败时回退默认值。"""
+        try:
+            data, _ = SheinApp._read_local_version_meta()
+            v = str(data.get("version") or "").strip()
+            if v:
+                return v.lstrip("Vv")
         except Exception:
             pass
         return str(default_version)
+
+    @staticmethod
+    def _normalize_release_notes_text(notes_raw):
+        """将版本说明统一格式化为可展示文本。"""
+        if isinstance(notes_raw, list):
+            lines = [str(x).strip() for x in notes_raw if str(x).strip()]
+            return "\n".join(f"{idx}. {line}" for idx, line in enumerate(lines, 1))
+        if isinstance(notes_raw, str):
+            return notes_raw.strip()
+        if isinstance(notes_raw, dict):
+            lines = []
+            for k in ("items", "list", "notes", "changes"):
+                v = notes_raw.get(k)
+                if isinstance(v, list):
+                    lines = [str(x).strip() for x in v if str(x).strip()]
+                    break
+            if lines:
+                return "\n".join(f"{idx}. {line}" for idx, line in enumerate(lines, 1))
+        return ""
+
+    def _show_first_open_release_notes(self):
+        """首次打开新版本时，弹窗展示版本优化说明。"""
+        try:
+            data, version_path = self._read_local_version_meta()
+            if not version_path or not isinstance(data, dict):
+                return
+
+            current_ver = str(data.get("version") or "").strip().lstrip("Vv")
+            if not current_ver:
+                return
+
+            shown_ver = str(data.get("last_shown_version") or "").strip().lstrip("Vv")
+            if shown_ver == current_ver:
+                return
+
+            notes_raw = (
+                data.get("first_open_notes")
+                or data.get("release_notes")
+                or data.get("changelog")
+                or data.get("update_notes")
+                or data.get("notes")
+                or ""
+            )
+            notes_text = self._normalize_release_notes_text(notes_raw)
+
+            if notes_text:
+                msg = "已升级到 V{}\n\n本次优化内容：\n{}".format(current_ver, notes_text)
+                messagebox.showinfo("版本升级说明", msg)
+
+            data["last_shown_version"] = current_ver
+            with open(version_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._pub_log("[UPDATER] 展示版本升级说明失败: {}".format(str(e)[:120]))
 
     def __init__(self):
         super().__init__()
@@ -147,6 +217,7 @@ class SheinApp(tk.Tk):
         # 兜底：任何路径导致根窗口销毁时，都确保进程退出
         self.bind("<Destroy>", self._on_root_destroy, add="+")
         # 启动后异步检查更新（不阻塞UI）
+        self.after(1200, self._show_first_open_release_notes)
         self.after(1800, self._startup_check_update_async)
 
     def _init_log_file(self):
@@ -319,7 +390,7 @@ class SheinApp(tk.Tk):
         try:
             base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
             if ensure_local_version_file is not None:
-                ensure_local_version_file(base_dir=base_dir, version_value="1.25.0")
+                ensure_local_version_file(base_dir=base_dir, version_value="0.0.0")
             self._updater = OSSAutoUpdater(
                 remote_version_url=version_url,
                 app_name="SHEIN_Uploader",
