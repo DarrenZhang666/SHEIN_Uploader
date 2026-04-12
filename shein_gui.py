@@ -30,6 +30,7 @@ except Exception:
     _normalize_color_token = None
 
 class SheinApp(tk.Tk):
+    _FALLBACK_REMOTE_VERSION_URL = "https://sheintool.oss-cn-beijing.aliyuncs.com/.version.json"
     _VERSION_NOTICE_STATE_FILE = os.path.join(
         os.path.expanduser("~"), ".shein_profiles", "version_notice_state.json"
     )
@@ -79,7 +80,7 @@ class SheinApp(tk.Tk):
         """将版本说明统一格式化为可展示文本。"""
         if isinstance(notes_raw, list):
             lines = [str(x).strip() for x in notes_raw if str(x).strip()]
-            return "\n".join(f"{idx}. {line}" for idx, line in enumerate(lines, 1))
+            return "\n".join(lines)
         if isinstance(notes_raw, str):
             return notes_raw.strip()
         if isinstance(notes_raw, dict):
@@ -90,7 +91,7 @@ class SheinApp(tk.Tk):
                     lines = [str(x).strip() for x in v if str(x).strip()]
                     break
             if lines:
-                return "\n".join(f"{idx}. {line}" for idx, line in enumerate(lines, 1))
+                return "\n".join(lines)
         return ""
 
     @classmethod
@@ -217,6 +218,9 @@ class SheinApp(tk.Tk):
         self._app_closing = False
         self._updater = None
         self._update_check_started = False
+        self._update_retry_count = 0
+        self._update_retry_max = 2
+        self._update_retry_after_id = None
         self._bargain_rows = []
         self._bargain_progress_percent = 0.0
         self._bargain_fetch_thread = None
@@ -391,35 +395,67 @@ class SheinApp(tk.Tk):
         except Exception:
             pass
         try:
-            base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
-            vp = os.path.join(base_dir, ".version.json")
-            if os.path.exists(vp):
+            for vp in self._get_local_version_paths():
+                if not os.path.exists(vp):
+                    continue
                 with open(vp, "r", encoding="utf-8") as f:
                     data = json.load(f) or {}
-                local_url = str(data.get("version_url") or "").strip()
+                local_url = str(
+                    data.get("version_url")
+                    or data.get("remote_version_url")
+                    or ""
+                ).strip()
                 if local_url:
                     return local_url
         except Exception:
             pass
-        return str(DEFAULT_REMOTE_VERSION_URL or "").strip()
+        return str(DEFAULT_REMOTE_VERSION_URL or self._FALLBACK_REMOTE_VERSION_URL).strip()
 
-    def _startup_check_update_async(self):
-        """启动后后台检查更新，有新版本再弹确认。"""
-        if self._update_check_started:
+    def _schedule_update_retry(self, reason="", delay_ms=90_000):
+        """升级检查失败后，延迟重试（最多若干次）。"""
+        if self._app_closing:
             return
-        self._update_check_started = True
+        if self._update_retry_count >= self._update_retry_max:
+            self._pub_log("[UPDATER] 重试次数已达上限，停止自动重试")
+            return
+        if self._update_retry_after_id is not None:
+            return
+        self._update_retry_count += 1
+        attempt = self._update_retry_count
+        self._pub_log(
+            "[UPDATER] 将在 {} 秒后重试检查更新（第 {}/{} 次），原因：{}".format(
+                int(delay_ms / 1000),
+                attempt,
+                self._update_retry_max,
+                str(reason or "未知")[:120],
+            )
+        )
+        self._update_retry_after_id = self.after(delay_ms, self._run_scheduled_update_retry)
+
+    def _run_scheduled_update_retry(self):
+        self._update_retry_after_id = None
+        self._startup_check_update_async(is_retry=True)
+
+    def _startup_check_update_async(self, is_retry=False):
+        """启动后后台检查更新，有新版本再弹确认。"""
+        if self._update_check_started and (not is_retry):
+            return
+        if not is_retry:
+            self._update_check_started = True
         if OSSAutoUpdater is None:
             self._pub_log("[UPDATER] 更新模块未加载，跳过自动检查")
             return
         version_url = self._resolve_update_version_url()
         if not version_url:
             self._pub_log("[UPDATER] 未配置 version_url，跳过自动更新检查")
+            if not is_retry:
+                self._schedule_update_retry(reason="version_url 为空", delay_ms=120_000)
             return
 
         try:
             base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
             if ensure_local_version_file is not None:
-                ensure_local_version_file(base_dir=base_dir, version_value="0.0.0")
+                ensure_local_version_file(base_dir=base_dir, version_value=self._read_app_version(default_version="1.0.0"))
             self._updater = OSSAutoUpdater(
                 remote_version_url=version_url,
                 app_name="SHEIN_Uploader",
@@ -434,12 +470,15 @@ class SheinApp(tk.Tk):
                 info = self._updater.check_update()
             except Exception as e:
                 self.after(0, lambda: self._pub_log("[UPDATER] 检查更新异常: {}".format(str(e)[:120])))
+                self.after(0, lambda: self._schedule_update_retry(reason=str(e)[:120]))
                 return
             if info.error:
                 self.after(0, lambda: self._pub_log("[UPDATER] 检查更新失败: {}".format(info.error[:120])))
+                self.after(0, lambda: self._schedule_update_retry(reason=info.error[:120]))
                 return
             if not info.has_update:
                 self.after(0, lambda: self._pub_log("[UPDATER] 当前已是最新版本"))
+                self._update_retry_count = 0
                 return
 
             def _ask_user():
@@ -451,6 +490,7 @@ class SheinApp(tk.Tk):
                 ok = messagebox.askyesno("发现新版本", msg)
                 if not ok:
                     self._pub_log("[UPDATER] 用户取消更新")
+                    self._update_retry_count = 0
                     return
 
                 def _do_update():
@@ -464,6 +504,7 @@ class SheinApp(tk.Tk):
                         self.after(0, lambda: self._pub_log("[UPDATER] 更新失败: {}".format(str(e)[:120])))
 
                 threading.Thread(target=_do_update, daemon=True).start()
+                self._update_retry_count = 0
 
             self.after(0, _ask_user)
 
@@ -5856,6 +5897,12 @@ return false;
             if self._auth_check_after_id is not None:
                 self.after_cancel(self._auth_check_after_id)
                 self._auth_check_after_id = None
+        except Exception:
+            pass
+        try:
+            if self._update_retry_after_id is not None:
+                self.after_cancel(self._update_retry_after_id)
+                self._update_retry_after_id = None
         except Exception:
             pass
         try:
