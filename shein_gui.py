@@ -254,7 +254,7 @@ class SheinApp(tk.Tk):
         self.after(1800, self._startup_check_update_async)
 
     def _init_log_file(self):
-        """初始化日志目录（所有模式均可落盘）。"""
+        """初始化日志目录（仅开发者模式落盘）。"""
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         os.makedirs(desktop, exist_ok=True)
         self._log_dir = os.path.join(desktop, "SHEIN_Logs")
@@ -5099,8 +5099,9 @@ return false;
         """发布日志回调：开发者模式=完整日志，非开发者模式=仅简化上品进度。"""
         m = str(msg)[:100] if msg else ""
         self._route_asin_progress_from_log(m)
-        # 本地日志落盘：所有模式都保留完整日志（便于非开发者模式排障）
-        self._write_log(msg)
+        # 本地日志落盘：仅开发者模式启用
+        if is_dev_mode():
+            self._write_log(msg)
         if not is_dev_mode():
             if not self._is_simple_publish_msg(m):
                 return
