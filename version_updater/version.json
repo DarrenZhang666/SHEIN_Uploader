@@ -1,0 +1,10 @@
+{
+  "version": "1.26",
+  "channel": "stable",
+  "release_date": "2026-04-11",
+  "download_url": "https://sheintool.oss-cn-beijing.aliyuncs.com/SHEIN_Uploader_1.26.zip",
+  "sha256": "",
+  "force": false,
+  "release_notes": " 1. 优化议价数据无法导入问题",
+  "file_size": 12582912
+}

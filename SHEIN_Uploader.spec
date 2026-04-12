@@ -116,6 +116,12 @@ EXTRA_HIDDENIMPORTS = sorted(set(
 ))
 
 EXTRA_DATAS = collect_data_files("webdriver_manager", include_py_files=False)
+VERSION_FILE = PROJECT_DIR / ".version.json"
+if VERSION_FILE.is_file():
+    EXTRA_DATAS.append((str(VERSION_FILE), "."))
+    print("[SPEC] bundled version file: {}".format(VERSION_FILE))
+else:
+    print("[SPEC] version file not found, skip: {}".format(VERSION_FILE))
 
 
 a = Analysis(
