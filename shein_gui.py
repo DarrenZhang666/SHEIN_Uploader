@@ -221,6 +221,9 @@ class SheinApp(tk.Tk):
         self._update_retry_count = 0
         self._update_retry_max = 2
         self._update_retry_after_id = None
+        self._update_progress_win = None
+        self._update_progressbar = None
+        self._update_progress_text_var = tk.StringVar(value="等待开始...")
         self._bargain_rows = []
         self._bargain_progress_percent = 0.0
         self._bargain_fetch_thread = None
@@ -438,6 +441,89 @@ class SheinApp(tk.Tk):
         self._update_retry_after_id = None
         self._startup_check_update_async(is_retry=True)
 
+    def _open_update_progress_dialog(self, remote_version=""):
+        if self._update_progress_win is not None and self._update_progress_win.winfo_exists():
+            return
+        win = tk.Toplevel(self)
+        win.title("正在升级")
+        win.geometry("460x165")
+        win.resizable(False, False)
+        win.configure(bg=BG_PANEL)
+        win.transient(self)
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+        msg = "正在升级到 V{}，请勿关闭程序...".format(remote_version) if remote_version else "正在升级，请勿关闭程序..."
+        tk.Label(
+            win,
+            text=msg,
+            font=("Segoe UI", 11, "bold"),
+            fg=FG,
+            bg=BG_PANEL,
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(16, 8))
+        tk.Label(
+            win,
+            textvariable=self._update_progress_text_var,
+            font=("Segoe UI", 10),
+            fg=FG_MUTED,
+            bg=BG_PANEL,
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(0, 8))
+        bar = ttk.Progressbar(win, mode="determinate", maximum=100)
+        bar.pack(fill="x", padx=18, pady=(0, 6))
+        bar["value"] = 0
+        tip = "提示：下载完成后会自动启动安装流程。"
+        tk.Label(
+            win,
+            text=tip,
+            font=("Segoe UI", 9),
+            fg="#9ca3af",
+            bg=BG_PANEL,
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(0, 12))
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+        self._update_progress_win = win
+        self._update_progressbar = bar
+        self._update_progress_text_var.set("等待下载...")
+
+    def _set_update_progress(self, percent=None, stage_text=""):
+        win = self._update_progress_win
+        bar = self._update_progressbar
+        if win is None or bar is None:
+            return
+        try:
+            if not win.winfo_exists():
+                return
+        except Exception:
+            return
+        if percent is not None:
+            try:
+                bar["value"] = max(0.0, min(100.0, float(percent)))
+            except Exception:
+                pass
+        txt = str(stage_text or "").strip()
+        if txt:
+            self._update_progress_text_var.set(txt)
+
+    def _close_update_progress_dialog(self):
+        win = self._update_progress_win
+        self._update_progress_win = None
+        self._update_progressbar = None
+        self._update_progress_text_var.set("等待开始...")
+        if win is None:
+            return
+        try:
+            if win.winfo_exists():
+                try:
+                    win.grab_release()
+                except Exception:
+                    pass
+                win.destroy()
+        except Exception:
+            pass
+
     def _startup_check_update_async(self, is_retry=False):
         """启动后后台检查更新，有新版本再弹确认。"""
         if self._update_check_started and (not is_retry):
@@ -461,7 +547,10 @@ class SheinApp(tk.Tk):
             self._updater = OSSAutoUpdater(
                 remote_version_url=version_url,
                 app_name="SHEIN_Uploader",
-                log_cb=lambda m: self._pub_log(str(m))
+                log_cb=lambda m: self._pub_log(str(m)),
+                progress_cb=lambda percent=None, stage="": self.after(
+                    0, lambda p=percent, s=stage: self._set_update_progress(p, s)
+                ),
             )
         except Exception as e:
             self._pub_log("[UPDATER] 初始化失败: {}".format(str(e)[:120]))
@@ -497,11 +586,14 @@ class SheinApp(tk.Tk):
 
                 def _do_update():
                     try:
+                        self.after(0, lambda: self._open_update_progress_dialog(info.remote_version))
+                        self.after(0, lambda: self._set_update_progress(3, "准备开始更新..."))
                         self._pub_log("[UPDATER] 开始下载并应用更新...")
                         self._updater._download_and_apply(self._updater.latest_remote)
                     except SystemExit:
                         pass
                     except Exception as e:
+                        self.after(0, self._close_update_progress_dialog)
                         self.after(0, lambda: messagebox.showerror("更新失败", str(e)[:400]))
                         self.after(0, lambda: self._pub_log("[UPDATER] 更新失败: {}".format(str(e)[:120])))
 

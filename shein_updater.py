@@ -94,14 +94,24 @@ class OSSAutoUpdater:
     }
     """
 
-    def __init__(self, remote_version_url="", app_name="SHEIN_Uploader", log_cb=None):
+    def __init__(self, remote_version_url="", app_name="SHEIN_Uploader", log_cb=None, progress_cb=None):
         self.remote_version_url = (remote_version_url or DEFAULT_REMOTE_VERSION_URL).strip()
         self.app_name = app_name
         self.log = log_cb or print
+        self.progress_cb = progress_cb
 
         self.base_dir = self._get_base_dir()
         self.local_version_path = os.path.join(self.base_dir, LOCAL_VERSION_FILE)
         self.latest_remote = {}
+
+    def _emit_progress(self, percent=None, stage=""):
+        cb = self.progress_cb
+        if cb is None:
+            return
+        try:
+            cb(percent=percent, stage=str(stage or ""))
+        except Exception:
+            pass
 
     def _get_base_dir(self):
         if getattr(sys, "frozen", False):
@@ -218,10 +228,13 @@ class OSSAutoUpdater:
         bat_path = os.path.join(tmp_dir, "apply_update.bat")
 
         self.log("[UPDATER] 开始下载更新包...")
+        self._emit_progress(percent=5, stage="开始下载更新包")
         self._download_file(download_url, package_path)
         self.log(f"[UPDATER] 下载完成: {package_path}")
+        self._emit_progress(percent=72, stage="下载完成")
 
         if expected_sha256:
+            self._emit_progress(percent=78, stage="正在校验文件完整性")
             got = _sha256_of_file(package_path)
             if got != expected_sha256:
                 raise ValueError(f"SHA256 校验失败，期望 {expected_sha256}，实际 {got}")
@@ -234,6 +247,7 @@ class OSSAutoUpdater:
         if os.path.exists(extract_dir):
             shutil.rmtree(extract_dir, ignore_errors=True)
         os.makedirs(extract_dir, exist_ok=True)
+        self._emit_progress(percent=84, stage="正在解压更新包")
         with zipfile.ZipFile(package_path, "r") as zf:
             zf.extractall(extract_dir)
 
@@ -250,6 +264,7 @@ class OSSAutoUpdater:
         self.log(f"[UPDATER] 更新目录: {current_dir} -> {target_dir}")
         if cleanup_dirs:
             self.log("[UPDATER] 升级后将清理旧目录: {}".format(" | ".join(cleanup_dirs)))
+        self._emit_progress(percent=92, stage="正在准备安装脚本")
         self._write_update_bat(
             bat_path=bat_path,
             extracted_dir=extract_dir,
@@ -261,6 +276,7 @@ class OSSAutoUpdater:
         )
 
         self.log("[UPDATER] 启动更新脚本并退出当前程序...")
+        self._emit_progress(percent=98, stage="已启动安装器，正在切换到升级流程")
         subprocess.Popen(f'cmd /c "{bat_path}"', shell=True)
 
         if threading.current_thread() is threading.main_thread():
@@ -270,10 +286,30 @@ class OSSAutoUpdater:
     def _download_file(self, url, save_path):
         with requests.get(url, timeout=HTTP_TIMEOUT, stream=True) as resp:
             resp.raise_for_status()
+            total = 0
+            try:
+                total = int(resp.headers.get("Content-Length") or 0)
+            except Exception:
+                total = 0
+            done = 0
+            last_emit_ts = 0.0
             with open(save_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=1024 * 256):
                     if chunk:
                         f.write(chunk)
+                        done += len(chunk)
+                        if total > 0:
+                            now_ts = time.time()
+                            if (now_ts - last_emit_ts) >= 0.18 or done >= total:
+                                ratio = max(0.0, min(1.0, float(done) / float(total)))
+                                pct = 5.0 + ratio * 65.0
+                                mb_done = done / (1024 * 1024)
+                                mb_total = total / (1024 * 1024)
+                                self._emit_progress(
+                                    percent=round(pct, 1),
+                                    stage="下载中 {:.1f}/{:.1f} MB".format(mb_done, mb_total),
+                                )
+                                last_emit_ts = now_ts
 
     def _derive_target_dir_for_version(self, current_dir, new_version):
         """若目录名含版本号则替换；无版本号时按 app_name_版本 生成新目录。"""
