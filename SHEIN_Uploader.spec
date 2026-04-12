@@ -159,6 +159,7 @@ else:
 EXTRA_HIDDENIMPORTS = sorted(set(
     collect_submodules("selenium")
     + collect_submodules("webdriver_manager")
+    + collect_submodules("tkinter")
     + _collect_obfuscated_hiddenimports()
     + [
         'shein_login',
@@ -171,6 +172,12 @@ EXTRA_HIDDENIMPORTS = sorted(set(
         'webdriver_manager',
         'webdriver_manager.chrome',
         'webdriver_manager.microsoft',
+        'tkinter',
+        'tkinter.ttk',
+        'tkinter.messagebox',
+        'tkinter.filedialog',
+        'tkinter.font',
+        '_tkinter',
     ]
 ))
 
