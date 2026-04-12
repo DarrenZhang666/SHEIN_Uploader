@@ -278,6 +278,8 @@ class SheinApp(tk.Tk):
 
     def _write_log(self, msg):
         """写入日志文件。"""
+        if not is_dev_mode():
+            return
         try:
             self._ensure_log_file()
             with open(self.log_file, 'a', encoding='utf-8') as f:
