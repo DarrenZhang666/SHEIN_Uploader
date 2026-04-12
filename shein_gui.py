@@ -3212,12 +3212,12 @@ class SheinApp(tk.Tk):
                 pub.start_browser(account=account)
                 self._shein_publisher = pub
                 self._shein_publisher_account = account
-                self.status_lbl.config(text='浏览器已就绪，打开商品发布页...')
+                self.after(0, lambda: self.status_lbl.config(text='浏览器已就绪，打开商品发布页...'))
                 pub.driver.get(SHEIN_PUBLISH_URL)
-                self.status_lbl.config(text='已打开商品发布页，请确认登录状态')
+                self.after(0, lambda: self.status_lbl.config(text='已打开商品发布页，正在检测登录状态...'))
                 threading.Thread(target=self._watch_login, args=(pub,), daemon=True).start()
             except Exception as e:
-                self.status_lbl.config(text='启动失败: ' + str(e)[:50])
+                self.after(0, lambda err=str(e): self.status_lbl.config(text='启动失败: ' + err[:50]))
                 self.after(0, lambda err=str(e): messagebox.showerror('启动失败', err[:200]))
             finally:
                 self._launching_browser = False
@@ -3281,6 +3281,23 @@ class SheinApp(tk.Tk):
             has_user_cookie = any(any(h in name for h in hints) for name in cookie_names)
             if has_user_cookie and "#/home" in url:
                 return True, "home_with_user_cookie"
+        except Exception:
+            pass
+
+        # 文案兜底：部分页面跳转后 URL 结构不稳定，但正文已是卖家中心
+        try:
+            body_text = str(driver.execute_script(
+                "return document && document.body ? (document.body.innerText || '') : '';"
+            ) or "")
+            if body_text:
+                hit = (
+                    ("卖家中心" in body_text)
+                    or ("半托管店铺" in body_text)
+                    or ("发布商品" in body_text)
+                    or ("识图发品" in body_text)
+                )
+                if hit and ("login" not in url):
+                    return True, "body_text_seller_center"
         except Exception:
             pass
 
@@ -3379,6 +3396,8 @@ return false;
             _t.sleep(1.0)
 
         if not logged_in:
+            self.after(0, lambda: self.status_lbl.config(
+                text="未检测到登录成功，请完成登录后重试"))
             return
         self._pub_log("[OK] 登录判定成功依据: {}".format(login_reason or "unknown"))
         self.after(0, lambda: self.status_lbl.config(text="检测到登录成功，正在完成初始化..."))
