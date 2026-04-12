@@ -1,8 +1,8 @@
 {
-  "version": "1.25",
+  "version": "1.27",
   "channel": "stable",
   "version_url": "https://sheintool.oss-cn-beijing.aliyuncs.com/version.json",
   "first_open_notes": [
-    "1. 优化议价数据无法导入问题"
+    " 1. 优化代码"
   ]
 }
