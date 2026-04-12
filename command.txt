@@ -1,0 +1,62 @@
+Mysql:
+查询表中所有数据：
+USE shein;
+SELECT * FROM sheinuploader_software;
+
+单行写入：
+USE shein;
+INSERT INTO sheinuploader_software (shein_id, start_time, end_time)
+VALUES 
+    ('GS8779689',  '2026-03-01', '2026-12-31' );
+
+
+多行写入：
+USE shein;
+INSERT INTO sheinuploader_software (shein_id, start_time, end_time)
+VALUES 
+    ('GS8779689',  '2026-03-01 00:00:00', '2026-12-31 23:59:59' )，
+   ('GS8779689',  '2026-03-01 00:00:00', '2026-12-31 23:59:59' )，
+   ('GS8779689',  '2026-03-01 00:00:00', '2026-12-31 23:59:59' );
+
+
+CREATE USER 'api_checker'@'127.0.0.1' 
+IDENTIFIED BY 'Adq430483#_strong'; -- 必须用强密码
+
+SELECT user, host FROM mysql.user; ----------查看所有账户
+
+
+
+修改数据：
+USE shein;
+UPDATE sheinuploader_software
+SET 
+    start_time = '2026-03-30 00:00:00',  -- 改成你要的开始时间
+    end_time   = '2026-04-10 00:00:00'   -- 改成你要的结束时间
+WHERE shein_id = 'GS8779689';
+
+
+运行sever api（cmd）：
+·cd C:\Users\Administrator\Desktop\Shein_Tool\SHEIN_Uploader
+·D:\Anaconda\envs\shein_py311\python -m uvicorn Sever.auth_api:app --host 0.0.0.0 --port 8000
+
+运行网页：（Anaconda Prompt）：
+conda activate shein_py311
+cd C:\Users\Administrator\Desktop\Shein_Tool\SHEIN_Uploader
+python User_manager/manager.py
+
+打包
+pyarmor gen -O "d:\Work\Project\Python\Shein上品软件\dist_obf" "d:\Work\Project\Python\Shein上品软件\shein_main.py" "d:\Work\Project\Python\Shein上品软件\shein_gui.py" "d:\Work\Project\Python\Shein上品软件\shein_uploader.py" "d:\Work\Project\Python\Shein上品软件\shein_asin.py" "d:\Work\Project\Python\Shein上品软件\shein_checkprice.py" "d:\Work\Project\Python\Shein上品软件\shein_login.py" "d:\Work\Project\Python\Shein上品软件\shein_updater.py" "d:\Work\Project\Python\Shein上品软件\shein_mysql.py" "d:\Work\Project\Python\Shein上品软件\shein_sensitive_clean.py" "d:\Work\Project\Python\Shein上品软件\shein_developer_mode.py"
+或者
+pyarmor gen --obf-code 2 --obf-mod 1 -O "d:\Work\Project\Python\Shein上品软件\dist_obf" "d:\Work\Project\Python\Shein上品软件\shein_main.py" "d:\Work\Project\Python\Shein上品软件\shein_gui.py" "d:\Work\Project\Python\Shein上品软件\shein_uploader.py" "d:\Work\Project\Python\Shein上品软件\shein_asin.py" "d:\Work\Project\Python\Shein上品软件\shein_checkprice.py" "d:\Work\Project\Python\Shein上品软件\shein_login.py" "d:\Work\Project\Python\Shein上品软件\shein_updater.py" "d:\Work\Project\Python\Shein上品软件\shein_mysql.py" "d:\Work\Project\Python\Shein上品软件\shein_sensitive_clean.py" "d:\Work\Project\Python\Shein上品软件\shein_developer_mode.py"
+
+
+pyinstaller --clean SHEIN_Uploader.spec
+
+
+其他
+conda env list
+conda activate shein_py311
+cd C:\Users\Administrator\Desktop\Shein_Tool\SHEIN_Uploader
+
+
+
