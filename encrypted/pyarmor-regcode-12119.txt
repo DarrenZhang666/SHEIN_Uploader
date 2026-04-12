@@ -1,0 +1,53 @@
+Dear 张宏伟，
+
+Thank you for purchasing Pyarmor Basic License, here it is activation code for license no. "pyarmor-vax-12119"
+
+x9aRmY5gCynpXP5JUJ26O81e6_JqsvfuNhTSAi8bk9SigTrvn4AqCoPFDcSpQIN-PmIhqmLtch4_qMd43RFY7I5WvkEnNOYrYXfnh_51U5hDYRLoaNPlFTZp3t8d4JX5S23zw5Vq6vXUzrNImNe7jdus2qOwcV0g8Dy4S4JoVRgcOfDpGWecN9FQtfykypv9
+
+Internet connection and Pyarmor 9.0+ are required to activate this code, install Pyarmor and check Pyarmor version by this command
+
+    pip install -U pyarmor
+    pyarmor -v
+
+Here are initial registration steps:
+
+1. Download the attachment of this email, save it as "pyarmor-regcode-12119.txt"
+
+2. Run the following command to activate this license, please replace "XXX" with your product name which need to be obfuscated by Pyarmor or "non-profits" (only for obfuscating non-commercial projects)
+
+     pyarmor reg -p XXX pyarmor-regcode-12119.txt
+
+3. The registration file "pyarmor-regfile-12119.zip" will be created in the current path if this license is activated sucessfully
+
+IMPORTANT NOTES:
+
+* Please backup "pyarmor-regcode-12119.txt", but do not use it to register Pyarmor
+* Please backup regfile "pyarmor-regfile-12119.zip", and use this file for next any registration
+* Do not use this file in docker container and CI/CD pipeline
+* Pyarmor Team doesn't provide LOST FOUND SERVICE
+
+This registration file can be used to register Pyarmor in at most 100 devices
+
+    pyarmor reg pyarmor-regfile-12119.zip
+
+Check the new registration information
+
+    pyarmor -v
+
+On each device it's enough to register Pyarmor once, do not register Pyarmor before each obfuscation
+
+If use Pyarmor Basic License in docker container and CI/CD pipeline, refer to
+
+    https://pyarmor.readthedocs.io/en/latest/how-to/ci.html
+
+
+Pyarmor is well document, here is online documentation
+
+    https://pyarmor.readthedocs.io/en/latest/
+
+If there is any question, check this page for the solutions
+
+    https://pyarmor.readthedocs.io/en/latest/questions.html
+
+Best Regards
+Pyarmor Team

@@ -15,14 +15,46 @@ OBF_DIR = PROJECT_DIR / "dist_obf"
 
 
 def _resolve_entry_script():
-    """优先使用加密后的入口脚本，缺失时回退源码入口。"""
+    """强制使用加密后的入口脚本，缺失即终止打包。"""
     obf_entry = OBF_DIR / "shein_main.py"
     if obf_entry.is_file():
         print("[SPEC] using obfuscated entry: {}".format(obf_entry))
         return obf_entry
-    src_entry = PROJECT_DIR / "shein_main.py"
-    print("[SPEC] using source entry: {}".format(src_entry))
-    return src_entry
+    raise FileNotFoundError(
+        "[SPEC] 缺少加密入口: {}。请先执行 PyArmor 生成 dist_obf。".format(obf_entry)
+    )
+
+
+def _assert_obfuscated_artifacts_ready():
+    """校验加密产物完整性，避免误打包源码。"""
+    required_modules = [
+        "shein_main.py",
+        "shein_gui.py",
+        "shein_uploader.py",
+        "shein_checkprice.py",
+        "shein_login.py",
+        "shein_asin.py",
+        "shein_mysql.py",
+        "shein_sensitive_clean.py",
+        "shein_developer_mode.py",
+        "shein_updater.py",
+    ]
+    missing = []
+    if not OBF_DIR.exists():
+        missing.append(str(OBF_DIR))
+    else:
+        for name in required_modules:
+            p = OBF_DIR / name
+            if not p.is_file():
+                missing.append(str(p))
+        runtime_dirs = [p for p in OBF_DIR.glob("pyarmor_runtime_*") if p.is_dir()]
+        if not runtime_dirs:
+            missing.append(str(OBF_DIR / "pyarmor_runtime_*"))
+    if missing:
+        raise FileNotFoundError(
+            "[SPEC] 加密产物不完整，终止打包:\n  - " + "\n  - ".join(missing)
+        )
+    print("[SPEC] obfuscated artifacts check passed")
 
 
 def _collect_pyarmor_runtime_datas():
@@ -188,6 +220,7 @@ EXTRA_HIDDENIMPORTS = sorted(set(
 ))
 
 EXTRA_DATAS = collect_data_files("webdriver_manager", include_py_files=False)
+_assert_obfuscated_artifacts_ready()
 PYARMOR_RUNTIME_DATAS = _collect_pyarmor_runtime_datas()
 VERSION_FILE = PROJECT_DIR / ".version.json"
 if VERSION_FILE.is_file():
@@ -199,7 +232,7 @@ else:
 
 a = Analysis(
     [str(_resolve_entry_script())],
-    pathex=[str(PROJECT_DIR), str(OBF_DIR)],
+    pathex=[str(OBF_DIR), str(PROJECT_DIR)],
     binaries=RUNTIME_BINARIES,
     datas=DRIVER_DATAS + EXTRA_DATAS + PYARMOR_RUNTIME_DATAS,
     hiddenimports=EXTRA_HIDDENIMPORTS,

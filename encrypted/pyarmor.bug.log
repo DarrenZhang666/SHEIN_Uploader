@@ -1,0 +1,12 @@
+[BUG]: no found input "`"
+
+## Command Line
+D:\APP\Anaconda3\envs\shein_py311\Scripts\pyarmor gen -O d:\Work\Project\Python\Shein…œ∆∑»Ìº˛\dist_obf `
+
+## Environments
+Python 3.11.15
+Pyarmor 9.2.4 (basic), 012119, SHEIN_UPLADER
+Platform windows.x86_64
+Native windows.amd64
+Home C:\Users\darre\.pyarmor
+
