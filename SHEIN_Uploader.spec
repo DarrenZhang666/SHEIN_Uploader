@@ -11,6 +11,64 @@ elif "SPEC" in globals():
     PROJECT_DIR = Path(SPEC).resolve().parent
 else:
     PROJECT_DIR = Path.cwd().resolve()
+OBF_DIR = PROJECT_DIR / "dist_obf"
+
+
+def _resolve_entry_script():
+    """优先使用加密后的入口脚本，缺失时回退源码入口。"""
+    obf_entry = OBF_DIR / "shein_main.py"
+    if obf_entry.is_file():
+        print("[SPEC] using obfuscated entry: {}".format(obf_entry))
+        return obf_entry
+    src_entry = PROJECT_DIR / "shein_main.py"
+    print("[SPEC] using source entry: {}".format(src_entry))
+    return src_entry
+
+
+def _collect_pyarmor_runtime_datas():
+    """自动收集 dist_obf 下的 pyarmor runtime 包目录。"""
+    datas = []
+    if not OBF_DIR.exists():
+        print("[SPEC] dist_obf not found, skip pyarmor runtime datas")
+        return datas
+    runtime_dirs = [p for p in OBF_DIR.glob("pyarmor_runtime_*") if p.is_dir()]
+    if not runtime_dirs:
+        print("[SPEC] no pyarmor runtime package found in dist_obf")
+        return datas
+    for runtime_dir in runtime_dirs:
+        for f in runtime_dir.rglob("*"):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(OBF_DIR).as_posix()
+            dst = str(Path(rel).parent).replace("\\", "/")
+            datas.append((str(f), dst if dst != "." else "."))
+    print("[SPEC] bundled pyarmor runtime dirs:")
+    for d in runtime_dirs:
+        print("  - {}".format(d))
+    return datas
+
+
+def _collect_obfuscated_hiddenimports():
+    """自动收集 dist_obf 顶层模块名，避免每次新增加密文件都手工维护。"""
+    mods = []
+    if not OBF_DIR.exists():
+        print("[SPEC] dist_obf not found, skip obfuscated hiddenimports")
+        return mods
+    for f in OBF_DIR.glob("*.py"):
+        if not f.is_file():
+            continue
+        name = f.stem
+        if name.startswith("_") or name == "__init__":
+            continue
+        mods.append(name)
+    mods = sorted(set(mods))
+    if mods:
+        print("[SPEC] bundled obfuscated modules:")
+        for m in mods:
+            print("  - {}".format(m))
+    else:
+        print("[SPEC] no obfuscated python modules found in dist_obf")
+    return mods
 
 
 def _collect_browser_driver_datas():
@@ -101,6 +159,7 @@ else:
 EXTRA_HIDDENIMPORTS = sorted(set(
     collect_submodules("selenium")
     + collect_submodules("webdriver_manager")
+    + _collect_obfuscated_hiddenimports()
     + [
         'shein_login',
         'shein_gui',
@@ -116,6 +175,7 @@ EXTRA_HIDDENIMPORTS = sorted(set(
 ))
 
 EXTRA_DATAS = collect_data_files("webdriver_manager", include_py_files=False)
+PYARMOR_RUNTIME_DATAS = _collect_pyarmor_runtime_datas()
 VERSION_FILE = PROJECT_DIR / ".version.json"
 if VERSION_FILE.is_file():
     EXTRA_DATAS.append((str(VERSION_FILE), "."))
@@ -125,10 +185,10 @@ else:
 
 
 a = Analysis(
-    [str(PROJECT_DIR / 'shein_main.py')],
-    pathex=[str(PROJECT_DIR)],
+    [str(_resolve_entry_script())],
+    pathex=[str(PROJECT_DIR), str(OBF_DIR)],
     binaries=RUNTIME_BINARIES,
-    datas=DRIVER_DATAS + EXTRA_DATAS,
+    datas=DRIVER_DATAS + EXTRA_DATAS + PYARMOR_RUNTIME_DATAS,
     hiddenimports=EXTRA_HIDDENIMPORTS,
     hookspath=[],
     hooksconfig={},
