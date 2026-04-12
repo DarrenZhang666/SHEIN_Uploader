@@ -160,6 +160,8 @@ EXTRA_HIDDENIMPORTS = sorted(set(
     collect_submodules("selenium")
     + collect_submodules("webdriver_manager")
     + collect_submodules("tkinter")
+    + collect_submodules("bs4")
+    + collect_submodules("PIL")
     + _collect_obfuscated_hiddenimports()
     + [
         'shein_login',
@@ -178,6 +180,10 @@ EXTRA_HIDDENIMPORTS = sorted(set(
         'tkinter.filedialog',
         'tkinter.font',
         '_tkinter',
+        'bs4',
+        'PIL',
+        'PIL.Image',
+        'PIL.ImageTk',
     ]
 ))
 
