@@ -411,9 +411,9 @@ class OSSAutoUpdater:
         backup_dir = f"{current_dir}_old"
         extracted_dir = extracted_dir.replace("/", "\\")
         current_dir = current_dir.replace("/", "\\")
-        target_dir = target_dir.replace("/", "\\")
+        target_dir = target_dir.replace("/", "\\").rstrip("\\")
         backup_dir = backup_dir.replace("/", "\\")
-        exe_name = exe_name.replace("/", "\\")
+        exe_name = os.path.basename(exe_name.replace("/", "\\"))
         temp_package_path = temp_package_path.replace("/", "\\")
         cleanup_dirs = list(cleanup_dirs or [])
         cleanup_cmds = []
@@ -468,7 +468,20 @@ if %errorlevel% neq 0 (
 )
 
 echo [6/7] 启动新版本...
-start "" "{target_dir}\\{exe_name}"
+set "TARGET_DIR={target_dir}"
+set "TARGET_EXE=%TARGET_DIR%\\{exe_name}"
+if not exist "%TARGET_EXE%" (
+  for /r "%TARGET_DIR%" %%F in ("{exe_name}") do (
+    set "TARGET_EXE=%%~fF"
+    goto found_exe
+  )
+)
+:found_exe
+if exist "%TARGET_EXE%" (
+  start "" "%TARGET_EXE%"
+) else (
+  echo [UPDATER] 启动失败，未找到新版本可执行文件: %TARGET_EXE%
+)
 
 echo [7/7] 清理临时文件...
 timeout /t 3 /nobreak > nul
