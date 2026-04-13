@@ -344,10 +344,26 @@ class OSSAutoUpdater:
                 shutil.rmtree(tar_dir, ignore_errors=True)
         except Exception:
             pass
-        os.makedirs(tar_dir, exist_ok=True)
-        copied_ok = False
+        moved_ok = False
         try:
-            if shutil.which("robocopy"):
+            src_drive = os.path.splitdrive(os.path.normpath(src_dir))[0].lower()
+            tar_drive = os.path.splitdrive(tar_dir)[0].lower()
+            if src_drive and (src_drive == tar_drive):
+                # 同盘优先 move，通常秒级完成，避免 robocopy 弹窗和长耗时
+                shutil.move(src_dir, tar_dir)
+                moved_ok = os.path.isdir(tar_dir)
+        except Exception:
+            moved_ok = False
+
+        if not moved_ok:
+            copied_ok = False
+            try:
+                shutil.copytree(src_dir, tar_dir, dirs_exist_ok=True)
+                copied_ok = True
+            except Exception:
+                copied_ok = False
+            if (not copied_ok) and shutil.which("robocopy"):
+                create_no_window = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 cp = subprocess.run(
                     [
                         "robocopy",
@@ -356,9 +372,9 @@ class OSSAutoUpdater:
                         "/E",
                         "/COPY:DAT",
                         "/DCOPY:DAT",
-                        "/R:1",
-                        "/W:1",
-                        "/MT:16",
+                        "/R:0",
+                        "/W:0",
+                        "/MT:32",
                         "/NFL",
                         "/NDL",
                         "/NJH",
@@ -368,12 +384,10 @@ class OSSAutoUpdater:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     shell=False,
+                    creationflags=create_no_window,
                 )
-                copied_ok = (cp.returncode < 8)
-        except Exception:
-            copied_ok = False
-        if not copied_ok:
-            shutil.copytree(src_dir, tar_dir, dirs_exist_ok=True)
+                if cp.returncode >= 8:
+                    raise RuntimeError("预部署 robocopy 失败，返回码 {}".format(cp.returncode))
         exe_path = os.path.join(tar_dir, exe_name)
         if not os.path.isfile(exe_path):
             raise FileNotFoundError("预部署失败：未找到 {}".format(exe_path))
@@ -538,17 +552,7 @@ echo [5/7] 复制新版本文件...
 if "{1 if pre_deployed else 0}"=="1" (
   echo [UPDATER] 已预部署，跳过复制
 ) else (
-  where robocopy > nul 2>nul
-  if %errorlevel%==0 (
-    rem robocopy 返回码 0~7 视为成功；8+ 视为失败
-    robocopy "%SRC_DIR%" "{target_dir}" /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /MT:16 /NFL /NDL /NJH /NJS /NP > nul
-    if %errorlevel% geq 8 (
-      echo [UPDATER] robocopy 失败，回退 xcopy...
-      xcopy "%SRC_DIR%\\*" "{target_dir}\\" /E /I /H /Y > nul
-    )
-  ) else (
-    xcopy "%SRC_DIR%\\*" "{target_dir}\\" /E /I /H /Y > nul
-  )
+  xcopy "%SRC_DIR%\\*" "{target_dir}\\" /E /I /H /Y > nul
   if %errorlevel% neq 0 (
     echo [UPDATER] 复制失败，源目录: %SRC_DIR%
   )
@@ -596,6 +600,11 @@ if /I not "{current_dir}"=="{target_dir}" (
 )
 :current_deleted
 {cleanup_block}
+echo [8/8] 刷新桌面图标...
+if exist "%SystemRoot%\System32\ie4uinit.exe" "%SystemRoot%\System32\ie4uinit.exe" -ClearIconCache > nul 2>nul
+if exist "%SystemRoot%\System32\ie4uinit.exe" "%SystemRoot%\System32\ie4uinit.exe" -show > nul 2>nul
+if exist "%SystemRoot%\Sysnative\ie4uinit.exe" "%SystemRoot%\Sysnative\ie4uinit.exe" -show > nul 2>nul
+rundll32.exe user32.dll,UpdatePerUserSystemParameters 1, True > nul 2>nul
 del "%~f0"
 exit
 """
