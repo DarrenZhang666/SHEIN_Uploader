@@ -266,7 +266,13 @@ class OSSAutoUpdater:
         self.log(f"[UPDATER] 更新目录: {current_dir} -> {target_dir}")
         if cleanup_dirs:
             self.log("[UPDATER] 升级后将清理旧目录: {}".format(" | ".join(cleanup_dirs)))
-        self._emit_progress(percent=92, stage="正在准备安装脚本")
+        pre_deployed = False
+        if os.path.normcase(os.path.normpath(target_dir)) != os.path.normcase(os.path.normpath(current_dir)):
+            self._emit_progress(percent=90, stage="正在预部署新版本文件")
+            self._predeploy_target_dir(extract_dir, target_dir, exe_name)
+            pre_deployed = True
+            self._emit_progress(percent=96, stage="预部署完成，准备切换到新版本")
+        self._emit_progress(percent=98, stage="正在准备切换脚本")
         self._write_update_bat(
             bat_path=bat_path,
             extracted_dir=extract_dir,
@@ -275,10 +281,11 @@ class OSSAutoUpdater:
             exe_name=exe_name,
             temp_package_path=package_path,
             cleanup_dirs=cleanup_dirs,
+            pre_deployed=pre_deployed,
         )
 
         self.log("[UPDATER] 启动更新脚本并退出当前程序...")
-        self._emit_progress(percent=98, stage="已启动安装器，正在切换到升级流程")
+        self._emit_progress(percent=100, stage="更新包准备完成，正在启动新版本...")
         subprocess.Popen(f'cmd /c "{bat_path}"', shell=True)
 
         if threading.current_thread() is threading.main_thread():
@@ -314,6 +321,62 @@ class OSSAutoUpdater:
                                     stage="下载中 {:.1f}/{:.1f} MB".format(mb_done, mb_total),
                                 )
                                 last_emit_ts = now_ts
+
+    def _resolve_extract_source_dir(self, extracted_dir, exe_name):
+        base = os.path.normpath(extracted_dir)
+        exe_base = os.path.join(base, exe_name)
+        if os.path.isfile(exe_base):
+            return base
+        try:
+            for name in os.listdir(base):
+                full = os.path.join(base, name)
+                if os.path.isdir(full) and os.path.isfile(os.path.join(full, exe_name)):
+                    return os.path.normpath(full)
+        except Exception:
+            pass
+        return base
+
+    def _predeploy_target_dir(self, extracted_dir, target_dir, exe_name):
+        src_dir = self._resolve_extract_source_dir(extracted_dir, exe_name)
+        tar_dir = os.path.normpath(target_dir)
+        try:
+            if os.path.exists(tar_dir):
+                shutil.rmtree(tar_dir, ignore_errors=True)
+        except Exception:
+            pass
+        os.makedirs(tar_dir, exist_ok=True)
+        copied_ok = False
+        try:
+            if shutil.which("robocopy"):
+                cp = subprocess.run(
+                    [
+                        "robocopy",
+                        src_dir,
+                        tar_dir,
+                        "/E",
+                        "/COPY:DAT",
+                        "/DCOPY:DAT",
+                        "/R:1",
+                        "/W:1",
+                        "/MT:16",
+                        "/NFL",
+                        "/NDL",
+                        "/NJH",
+                        "/NJS",
+                        "/NP",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    shell=False,
+                )
+                copied_ok = (cp.returncode < 8)
+        except Exception:
+            copied_ok = False
+        if not copied_ok:
+            shutil.copytree(src_dir, tar_dir, dirs_exist_ok=True)
+        exe_path = os.path.join(tar_dir, exe_name)
+        if not os.path.isfile(exe_path):
+            raise FileNotFoundError("预部署失败：未找到 {}".format(exe_path))
 
     def _derive_target_dir_for_version(self, current_dir, new_version):
         """若目录名含版本号则替换；无版本号时按 app_name_版本 生成新目录。"""
@@ -411,12 +474,14 @@ class OSSAutoUpdater:
             pass
         return candidates
 
-    def _write_update_bat(self, bat_path, extracted_dir, current_dir, target_dir, exe_name, temp_package_path, cleanup_dirs=None):
+    def _write_update_bat(self, bat_path, extracted_dir, current_dir, target_dir, exe_name, temp_package_path, cleanup_dirs=None, pre_deployed=False):
         backup_dir = f"{current_dir}_old"
+        cleanup_bat_path = os.path.join(os.path.dirname(bat_path), "cleanup_after_update.bat")
         extracted_dir = extracted_dir.replace("/", "\\")
         current_dir = current_dir.replace("/", "\\")
         target_dir = target_dir.replace("/", "\\").rstrip("\\")
         backup_dir = backup_dir.replace("/", "\\")
+        cleanup_bat_path = cleanup_bat_path.replace("/", "\\")
         exe_name = os.path.basename(exe_name.replace("/", "\\"))
         temp_package_path = temp_package_path.replace("/", "\\")
         cleanup_dirs = list(cleanup_dirs or [])
@@ -439,14 +504,18 @@ title SHEIN 自动更新中...
 cd /d "%TEMP%"
 
 echo [1/7] 等待旧进程退出...
-timeout /t 2 /nobreak > nul
+timeout /t 1 /nobreak > nul
 
 echo [2/7] 清理历史备份...
 if exist "{backup_dir}" rmdir /s /q "{backup_dir}"
 
 echo [3/7] 迁移旧版本目录...
 if /I not "{current_dir}"=="{target_dir}" (
-  if exist "{target_dir}" rmdir /s /q "{target_dir}"
+  if "{1 if pre_deployed else 0}"=="1" (
+    rem 已预部署，保留目标目录
+  ) else (
+    if exist "{target_dir}" rmdir /s /q "{target_dir}"
+  )
 )
 if exist "{current_dir}" ren "{current_dir}" "{os.path.basename(backup_dir)}"
 
@@ -466,19 +535,23 @@ if not exist "{extracted_dir}\\{exe_name}" (
 :found_src
 
 echo [5/7] 复制新版本文件...
-where robocopy > nul 2>nul
-if %errorlevel%==0 (
-  rem robocopy 返回码 0~7 视为成功；8+ 视为失败
-  robocopy "%SRC_DIR%" "{target_dir}" /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /MT:16 /NFL /NDL /NJH /NJS /NP > nul
-  if %errorlevel% geq 8 (
-    echo [UPDATER] robocopy 失败，回退 xcopy...
+if "{1 if pre_deployed else 0}"=="1" (
+  echo [UPDATER] 已预部署，跳过复制
+) else (
+  where robocopy > nul 2>nul
+  if %errorlevel%==0 (
+    rem robocopy 返回码 0~7 视为成功；8+ 视为失败
+    robocopy "%SRC_DIR%" "{target_dir}" /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /MT:16 /NFL /NDL /NJH /NJS /NP > nul
+    if %errorlevel% geq 8 (
+      echo [UPDATER] robocopy 失败，回退 xcopy...
+      xcopy "%SRC_DIR%\\*" "{target_dir}\\" /E /I /H /Y > nul
+    )
+  ) else (
     xcopy "%SRC_DIR%\\*" "{target_dir}\\" /E /I /H /Y > nul
   )
-) else (
-  xcopy "%SRC_DIR%\\*" "{target_dir}\\" /E /I /H /Y > nul
-)
-if %errorlevel% neq 0 (
-  echo [UPDATER] 复制失败，源目录: %SRC_DIR%
+  if %errorlevel% neq 0 (
+    echo [UPDATER] 复制失败，源目录: %SRC_DIR%
+  )
 )
 
 echo [6/7] 启动新版本...
@@ -498,7 +571,14 @@ if exist "%TARGET_EXE%" (
 )
 
 echo [7/7] 清理临时文件...
-timeout /t 3 /nobreak > nul
+if exist "{cleanup_bat_path}" start "" /min "{cleanup_bat_path}"
+del "%~f0"
+exit
+"""
+        cleanup_content = f"""@echo off
+chcp 65001 > nul
+cd /d "%TEMP%"
+timeout /t 2 /nobreak > nul
 if exist "{extracted_dir}" rmdir /s /q "{extracted_dir}"
 if exist "{temp_package_path}" del /f /q "{temp_package_path}"
 for /l %%I in (1,1,6) do (
@@ -521,6 +601,8 @@ exit
 """
         with open(bat_path, "w", encoding="gbk") as f:
             f.write(content)
+        with open(cleanup_bat_path, "w", encoding="gbk") as f:
+            f.write(cleanup_content)
 
 
 def ensure_local_version_file(base_dir=None, version_value="0.0.0"):
@@ -530,3 +612,73 @@ def ensure_local_version_file(base_dir=None, version_value="0.0.0"):
     if not os.path.exists(path):
         _safe_json_save(path, {"version": str(version_value), "channel": "stable"})
     return path
+
+
+def cleanup_legacy_install_dirs(base_dir=None, app_name="SHEIN_Uploader", keep_version="", log_cb=None):
+    """
+    清理同级旧版本安装目录（保留当前目录与更高/相同版本目录）。
+    仅建议在新版本启动后执行，作为 bat 清理失败时的兜底。
+    """
+    log = log_cb or (lambda *_args, **_kwargs: None)
+    try:
+        current_dir = os.path.normpath(base_dir or os.path.dirname(sys.executable))
+    except Exception:
+        current_dir = os.path.normpath(os.path.dirname(os.path.abspath(__file__)))
+    parent_dir = os.path.dirname(current_dir)
+    current_name = os.path.basename(current_dir)
+    app = str(app_name or "").strip()
+    if not app or not os.path.isdir(parent_dir):
+        return {"deleted": [], "failed": []}
+
+    keep_ver = str(keep_version or "").strip().lstrip("vV")
+    keep_norm = _normalize_version(keep_ver) if keep_ver else ()
+    app_low = app.lower()
+    deleted = []
+    failed = []
+
+    def _extract_ver(name):
+        ms = list(re.finditer(r"\d+(?:\.\d+){1,3}", str(name or "")))
+        if not ms:
+            return ""
+        return ms[-1].group(0)
+
+    for name in os.listdir(parent_dir):
+        full = os.path.normpath(os.path.join(parent_dir, name))
+        if full == current_dir or not os.path.isdir(full):
+            continue
+        low = str(name or "").strip().lower()
+        if not low.startswith(app_low):
+            continue
+        suffix = low[len(app_low):]
+        if suffix and (suffix[0] not in ("_", "-", " ", "(", "v")):
+            continue
+
+        # 若能识别版本号，仅清理“低于当前版本”的目录；无法识别则按旧目录处理。
+        ver = _extract_ver(name)
+        if ver and keep_norm:
+            try:
+                if _normalize_version(ver) >= keep_norm:
+                    continue
+            except Exception:
+                pass
+        # 名称与当前目录一致（大小写差异）不处理
+        if str(name).strip().lower() == str(current_name).strip().lower():
+            continue
+
+        removed = False
+        for _ in range(3):
+            try:
+                shutil.rmtree(full, ignore_errors=False)
+                removed = (not os.path.exists(full))
+                if removed:
+                    break
+            except Exception:
+                time.sleep(0.4)
+        if removed:
+            deleted.append(full)
+            log("[UPDATER] 启动后清理旧目录成功: {}".format(full))
+        else:
+            failed.append(full)
+            log("[UPDATER] 启动后清理旧目录失败: {}".format(full))
+
+    return {"deleted": deleted, "failed": failed}

@@ -17,10 +17,16 @@ from shein_checkprice import (
 )
 from datetime import datetime
 try:
-    from shein_updater import OSSAutoUpdater, ensure_local_version_file, DEFAULT_REMOTE_VERSION_URL
+    from shein_updater import (
+        OSSAutoUpdater,
+        ensure_local_version_file,
+        cleanup_legacy_install_dirs,
+        DEFAULT_REMOTE_VERSION_URL,
+    )
 except Exception:
     OSSAutoUpdater = None
     ensure_local_version_file = None
+    cleanup_legacy_install_dirs = None
     DEFAULT_REMOTE_VERSION_URL = ""
 try:
     from shein_asin import _canonicalize_shein_color, _split_color_candidates, _normalize_color_token
@@ -255,6 +261,7 @@ class SheinApp(tk.Tk):
         # 启动后异步检查更新（不阻塞UI）
         self.after(1200, self._show_first_open_release_notes)
         self.after(1800, self._startup_check_update_async)
+        self.after(3000, self._startup_cleanup_legacy_dirs_async)
 
     def _init_log_file(self):
         """初始化日志目录（仅开发者模式落盘）。"""
@@ -623,6 +630,35 @@ class SheinApp(tk.Tk):
                 self._update_retry_count = 0
 
             self.after(0, _ask_user)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _startup_cleanup_legacy_dirs_async(self):
+        """新版本启动后兜底清理同级旧版本目录。"""
+        if cleanup_legacy_install_dirs is None:
+            return
+        if not getattr(sys, "frozen", False):
+            # 开发环境不执行清理，避免误删本地工作目录
+            return
+
+        def _worker():
+            try:
+                base_dir = os.path.dirname(sys.executable)
+                current_ver = self._read_app_version(default_version="")
+                result = cleanup_legacy_install_dirs(
+                    base_dir=base_dir,
+                    app_name="SHEIN_Uploader",
+                    keep_version=current_ver,
+                    log_cb=lambda m: self._pub_log(str(m)),
+                ) or {}
+                deleted = result.get("deleted") or []
+                failed = result.get("failed") or []
+                if deleted:
+                    self._pub_log("[UPDATER] 启动后已清理 {} 个旧版本目录".format(len(deleted)))
+                if failed:
+                    self._pub_log("[UPDATER] 启动后仍有 {} 个旧目录清理失败".format(len(failed)))
+            except Exception as e:
+                self._pub_log("[UPDATER] 启动后清理旧目录异常: {}".format(str(e)[:120]))
 
         threading.Thread(target=_worker, daemon=True).start()
 
