@@ -443,6 +443,11 @@ class SheinApp(tk.Tk):
 
     def _open_update_progress_dialog(self, remote_version=""):
         if self._update_progress_win is not None and self._update_progress_win.winfo_exists():
+            try:
+                self._update_progress_win.lift()
+                self._update_progress_win.focus_force()
+            except Exception:
+                pass
             return
         win = tk.Toplevel(self)
         win.title("正在升级")
@@ -450,6 +455,11 @@ class SheinApp(tk.Tk):
         win.resizable(False, False)
         win.configure(bg=BG_PANEL)
         win.transient(self)
+        try:
+            win.attributes("-topmost", True)
+            win.after(1200, lambda w=win: w.attributes("-topmost", False) if w.winfo_exists() else None)
+        except Exception:
+            pass
         try:
             win.grab_set()
         except Exception:
@@ -459,7 +469,7 @@ class SheinApp(tk.Tk):
             win,
             text=msg,
             font=("Segoe UI", 11, "bold"),
-            fg=FG,
+            fg=TEXT_MAIN,
             bg=BG_PANEL,
             anchor="w",
         ).pack(fill="x", padx=18, pady=(16, 8))
@@ -467,7 +477,7 @@ class SheinApp(tk.Tk):
             win,
             textvariable=self._update_progress_text_var,
             font=("Segoe UI", 10),
-            fg=FG_MUTED,
+            fg=TEXT_SUB,
             bg=BG_PANEL,
             anchor="w",
         ).pack(fill="x", padx=18, pady=(0, 8))
@@ -487,6 +497,12 @@ class SheinApp(tk.Tk):
         self._update_progress_win = win
         self._update_progressbar = bar
         self._update_progress_text_var.set("等待下载...")
+        try:
+            win.lift()
+            win.focus_force()
+            win.update_idletasks()
+        except Exception:
+            pass
 
     def _set_update_progress(self, percent=None, stage_text=""):
         win = self._update_progress_win
@@ -583,11 +599,17 @@ class SheinApp(tk.Tk):
                     self._pub_log("[UPDATER] 用户取消更新")
                     self._update_retry_count = 0
                     return
+                # 先在主线程立即展示升级进度弹窗，避免线程异步调度导致用户看不到
+                try:
+                    self._open_update_progress_dialog(info.remote_version)
+                    self._set_update_progress(3, "准备开始更新...")
+                    self.update_idletasks()
+                except Exception as e:
+                    # 进度窗异常不应阻塞实际升级
+                    self._pub_log("[UPDATER] 进度弹窗创建失败，继续后台升级: {}".format(str(e)[:120]))
 
                 def _do_update():
                     try:
-                        self.after(0, lambda: self._open_update_progress_dialog(info.remote_version))
-                        self.after(0, lambda: self._set_update_progress(3, "准备开始更新..."))
                         self._pub_log("[UPDATER] 开始下载并应用更新...")
                         self._updater._download_and_apply(self._updater.latest_remote)
                     except SystemExit:
