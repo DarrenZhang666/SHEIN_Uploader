@@ -491,11 +491,13 @@ class OSSAutoUpdater:
     def _write_update_bat(self, bat_path, extracted_dir, current_dir, target_dir, exe_name, temp_package_path, cleanup_dirs=None, pre_deployed=False):
         backup_dir = f"{current_dir}_old"
         cleanup_bat_path = os.path.join(os.path.dirname(bat_path), "cleanup_after_update.bat")
+        cleanup_vbs_path = os.path.join(os.path.dirname(bat_path), "cleanup_after_update.vbs")
         extracted_dir = extracted_dir.replace("/", "\\")
         current_dir = current_dir.replace("/", "\\")
         target_dir = target_dir.replace("/", "\\").rstrip("\\")
         backup_dir = backup_dir.replace("/", "\\")
         cleanup_bat_path = cleanup_bat_path.replace("/", "\\")
+        cleanup_vbs_path = cleanup_vbs_path.replace("/", "\\")
         exe_name = os.path.basename(exe_name.replace("/", "\\"))
         temp_package_path = temp_package_path.replace("/", "\\")
         cleanup_dirs = list(cleanup_dirs or [])
@@ -575,7 +577,7 @@ if exist "%TARGET_EXE%" (
 )
 
 echo [7/7] 清理临时文件...
-if exist "{cleanup_bat_path}" start "" /min "{cleanup_bat_path}"
+if exist "{cleanup_bat_path}" if exist "{cleanup_vbs_path}" wscript //B //NoLogo "{cleanup_vbs_path}" > nul 2>nul
 del "%~f0"
 exit
 """
@@ -600,7 +602,6 @@ if /I not "{current_dir}"=="{target_dir}" (
 )
 :current_deleted
 {cleanup_block}
-echo [8/8] 刷新桌面图标...
 if exist "%SystemRoot%\System32\ie4uinit.exe" "%SystemRoot%\System32\ie4uinit.exe" -ClearIconCache > nul 2>nul
 if exist "%SystemRoot%\System32\ie4uinit.exe" "%SystemRoot%\System32\ie4uinit.exe" -show > nul 2>nul
 if exist "%SystemRoot%\Sysnative\ie4uinit.exe" "%SystemRoot%\Sysnative\ie4uinit.exe" -show > nul 2>nul
@@ -608,10 +609,17 @@ rundll32.exe user32.dll,UpdatePerUserSystemParameters 1, True > nul 2>nul
 del "%~f0"
 exit
 """
+        cleanup_vbs_content = (
+            'Set WshShell = CreateObject("WScript.Shell")\r\n'
+            'WshShell.Run "cmd /c ""{}""", 0, False\r\n'
+            "WScript.Quit 0\r\n"
+        ).format(cleanup_bat_path.replace('"', '""'))
         with open(bat_path, "w", encoding="gbk") as f:
             f.write(content)
         with open(cleanup_bat_path, "w", encoding="gbk") as f:
             f.write(cleanup_content)
+        with open(cleanup_vbs_path, "w", encoding="gbk") as f:
+            f.write(cleanup_vbs_content)
 
 
 def ensure_local_version_file(base_dir=None, version_value="0.0.0"):
