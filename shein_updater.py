@@ -26,6 +26,8 @@ DEFAULT_REMOTE_VERSION_URL = ""
 
 # 下载超时（秒）
 HTTP_TIMEOUT = 12
+# 更新包下载分块（适当增大可减少磁盘写入与 Python 循环开销）
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 def _normalize_version(v):
@@ -284,18 +286,20 @@ class OSSAutoUpdater:
         os._exit(0)
 
     def _download_file(self, url, save_path):
-        with requests.get(url, timeout=HTTP_TIMEOUT, stream=True) as resp:
-            resp.raise_for_status()
-            total = 0
-            try:
-                total = int(resp.headers.get("Content-Length") or 0)
-            except Exception:
+        with requests.Session() as sess:
+            with sess.get(url, timeout=(8, HTTP_TIMEOUT), stream=True) as resp:
+                resp.raise_for_status()
                 total = 0
-            done = 0
-            last_emit_ts = 0.0
-            with open(save_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1024 * 256):
-                    if chunk:
+                try:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                except Exception:
+                    total = 0
+                done = 0
+                last_emit_ts = 0.0
+                with open(save_path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                        if not chunk:
+                            continue
                         f.write(chunk)
                         done += len(chunk)
                         if total > 0:
@@ -462,7 +466,17 @@ if not exist "{extracted_dir}\\{exe_name}" (
 :found_src
 
 echo [5/7] 复制新版本文件...
-xcopy "%SRC_DIR%\\*" "{target_dir}\\" /E /I /H /Y > nul
+where robocopy > nul 2>nul
+if %errorlevel%==0 (
+  rem robocopy 返回码 0~7 视为成功；8+ 视为失败
+  robocopy "%SRC_DIR%" "{target_dir}" /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /MT:16 /NFL /NDL /NJH /NJS /NP > nul
+  if %errorlevel% geq 8 (
+    echo [UPDATER] robocopy 失败，回退 xcopy...
+    xcopy "%SRC_DIR%\\*" "{target_dir}\\" /E /I /H /Y > nul
+  )
+) else (
+  xcopy "%SRC_DIR%\\*" "{target_dir}\\" /E /I /H /Y > nul
+)
 if %errorlevel% neq 0 (
   echo [UPDATER] 复制失败，源目录: %SRC_DIR%
 )
