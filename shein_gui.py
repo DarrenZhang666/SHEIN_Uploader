@@ -5369,6 +5369,8 @@ return false;
         try:
             if self._shein_publisher is not None:
                 pubs.append(self._shein_publisher)
+            if self._bargain_runtime_publisher is not None:
+                pubs.append(self._bargain_runtime_publisher)
             with self._worker_publishers_lock:
                 for _p in self._worker_publishers.values():
                     if _p is not None:
@@ -5394,14 +5396,21 @@ return false;
             except Exception:
                 pass
         self._shein_publisher = None
+        self._bargain_runtime_publisher = None
+        self._bargain_runtime_is_temp = False
         if reason:
             self._pub_log("[STOP] 已关闭全部浏览器/driver: {}".format(reason))
   
     def _kill_edge_processes_on_exit(self):
-        """Windows 兜底：强制清理所有 Edge 与 EdgeDriver 进程。"""
+        """Windows 兜底：强制清理浏览器及其 driver 进程。"""
         if os.name != "nt":
             return
-        targets = ["msedgedriver.exe", "msedge.exe"]
+        targets = [
+            "msedgedriver.exe",
+            "msedge.exe",
+            "chromedriver.exe",
+            "chrome.exe",
+        ]
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         for proc_name in targets:
             try:
@@ -6029,6 +6038,11 @@ return false;
         try:
             if self._shein_publisher is not None:
                 setattr(self._shein_publisher, "_stop_publish", True)
+        except Exception:
+            pass
+        try:
+            if self._bargain_runtime_publisher is not None:
+                setattr(self._bargain_runtime_publisher, "_stop_publish", True)
         except Exception:
             pass
         try:
