@@ -1506,6 +1506,18 @@ const normAction = (s) => {
   if (x.includes('重新报价')) return '重新报价';
   return x;
 };
+const clickEl = (el) => {
+  if (!el) return false;
+  try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+  try { el.click(); return true; } catch (_) {}
+  try {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return true;
+  } catch (_) {}
+  return false;
+};
 let root = null;
 const drawers = Array.from(document.querySelectorAll('.soui-modal-panel,.soui-modal-wrapper,.soui-modal,.merchant-ui-drawer,[class*="drawer"]')).filter(visible);
 for (const d of drawers) {
@@ -1544,22 +1556,31 @@ const cands = btns.map(b => ({el: b, txt: clean(b.innerText || ''), key: normAct
 // 先严格精确匹配
 for (const c of cands) {
   if (c.key === target) {
-    c.el.click();
-    return {ok:true, clicked: c.txt};
+    if (clickEl(c.el)) return {ok:true, clicked: c.txt};
+    return {ok:false, reason:'click_failed', clicked: c.txt};
   }
 }
 // 再做有限兜底（只按动作族兜底，不做泛化 includes，避免串到“重新报价”）
 if (target === '拒绝放弃上新') {
   const c = cands.find(x => x.key.includes('拒绝'));
-  if (c) { c.el.click(); return {ok:true, clicked: c.txt}; }
+  if (c) {
+    if (clickEl(c.el)) return {ok:true, clicked: c.txt};
+    return {ok:false, reason:'click_failed', clicked: c.txt};
+  }
 }
 if (target === '同意平台建议价') {
   const c = cands.find(x => x.key.includes('同意'));
-  if (c) { c.el.click(); return {ok:true, clicked: c.txt}; }
+  if (c) {
+    if (clickEl(c.el)) return {ok:true, clicked: c.txt};
+    return {ok:false, reason:'click_failed', clicked: c.txt};
+  }
 }
 if (target === '重新报价') {
   const c = cands.find(x => x.key.includes('重新报价'));
-  if (c) { c.el.click(); return {ok:true, clicked: c.txt}; }
+  if (c) {
+    if (clickEl(c.el)) return {ok:true, clicked: c.txt};
+    return {ok:false, reason:'click_failed', clicked: c.txt};
+  }
 }
 return {
   ok:false,
@@ -1621,30 +1642,65 @@ def trigger_shein_pending_bargain_action(
     if not _wait_todo_drawer_visible(driver, timeout=2.5, should_stop=should_stop):
         return False, "未检测到待办任务弹窗，请先抓取并保持页面在议价弹窗"
 
-    target_page = int(row.get("page_no", 1) or 1)
-    if target_page > 1:
-        if not _goto_todo_page(driver, target_page, log, timeout=8, should_stop=should_stop):
-            log("议价操作：未找到目标页码按钮，尝试当前页执行")
+    def _try_click_with_retry(_retries=3, _sleep=0.18):
+        last = {}
+        for _ in range(max(1, int(_retries))):
+            if _should_stop(should_stop):
+                break
+            last = _click_bargain_action_in_current_page(driver, row, action_label)
+            if bool(last.get("ok")):
+                return last
+            time.sleep(max(0.05, float(_sleep)))
+        return last
 
-    ret = _click_bargain_action_in_current_page(driver, row, action_label)
+    target_page = int(row.get("page_no", 1) or 1)
+    st_now = _get_todo_pagination_state(driver)
+    cur_page = int(st_now.get("page", 1) or 1)
+
+    # 先在当前页快速重试（很多时候当前页就是目标页，能显著提速）
+    ret = _try_click_with_retry(_retries=2, _sleep=0.12)
+    if (not bool(ret.get("ok"))) and (target_page > 0) and (target_page != cur_page):
+        if not _goto_todo_page(driver, target_page, log, timeout=4, should_stop=should_stop):
+            log("议价操作：未找到目标页码按钮，尝试跨页扫描")
+        ret = _try_click_with_retry(_retries=3, _sleep=0.15)
+
     if not bool(ret.get("ok")):
-        # 跨页强兜底：从第一页顺序扫描到最后一页（不依赖 total_pages 的准确性）
+        # 跨页强兜底：从当前页向后扫描，再回到第一页补扫到起始页前
+        start_page = int(_get_todo_pagination_state(driver).get("page", 1) or 1)
         visited = set()
-        if _goto_todo_page(driver, 1, log, timeout=8, should_stop=should_stop):
+        while True:
+            if _should_stop(should_stop):
+                break
+            st_now = _get_todo_pagination_state(driver)
+            cur_page = int(st_now.get("page", 1) or 1)
+            if cur_page in visited:
+                break
+            visited.add(cur_page)
+            ret = _try_click_with_retry(_retries=2, _sleep=0.1)
+            if bool(ret.get("ok")):
+                break
+            if not st_now.get("has_next"):
+                break
+            if not _click_next_todo_page(driver, log, timeout=4, should_stop=should_stop):
+                break
+
+        if (not bool(ret.get("ok"))) and _goto_todo_page(driver, 1, log, timeout=4, should_stop=should_stop):
             while True:
                 if _should_stop(should_stop):
                     break
                 st_now = _get_todo_pagination_state(driver)
                 cur_page = int(st_now.get("page", 1) or 1)
+                if cur_page >= start_page:
+                    break
                 if cur_page in visited:
                     break
                 visited.add(cur_page)
-                ret = _click_bargain_action_in_current_page(driver, row, action_label)
+                ret = _try_click_with_retry(_retries=2, _sleep=0.1)
                 if bool(ret.get("ok")):
                     break
                 if not st_now.get("has_next"):
                     break
-                if not _click_next_todo_page(driver, log, timeout=8, should_stop=should_stop):
+                if not _click_next_todo_page(driver, log, timeout=4, should_stop=should_stop):
                     break
     if not bool(ret.get("ok")):
         reason = _trim_text(ret.get("reason", "")) or "未命中行或按钮"

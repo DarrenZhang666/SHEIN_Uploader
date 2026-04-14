@@ -1608,9 +1608,24 @@ class SheinApp(tk.Tk):
         pub = getattr(self, "_bargain_runtime_publisher", None)
         if pub is None:
             return False, "未找到可用浏览器实例，请先抓取“待确认”数据。"
+        row_obj = dict(row or {})
+        # 先在 debug 日志输出即将执行的动作，便于追踪当前处理进度
+        trace_id = str(
+            row_obj.get("supplier_no")
+            or row_obj.get("supplier_no_raw")
+            or row_obj.get("bargain_no")
+            or "UNKNOWN"
+        ).strip()
+        action_text = "{} 正在‘{}’".format(trace_id, str(action_label or "").strip())
+        self._pub_log(action_text)
+        # 同步显示到议价进度条文案（保留当前进度百分比，仅更新文字）
+        try:
+            self.after(0, lambda t=action_text: self._set_bargain_progress(t, state="running"))
+        except Exception:
+            pass
         return trigger_shein_pending_bargain_action(
             publisher=pub,
-            row=row,
+            row=row_obj,
             action_label=action_label,
             log_cb=self._pub_log,
             should_stop=lambda: bool(self._app_closing),
@@ -1650,9 +1665,9 @@ class SheinApp(tk.Tk):
                     else:
                         fail_count += 1
                         self._pub_log("议价批量：第 {} 条失败 - {}".format(i, msg))
-                    # 按需求：执行完成一个后，等待1秒再执行下一个
+                    # 控制节奏但避免明显拖慢批量速度
                     if i < total:
-                        time.sleep(1.0)
+                        time.sleep(0.2)
             finally:
                 with self._bargain_action_lock:
                     self._bargain_batch_running = False
