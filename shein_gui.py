@@ -244,6 +244,7 @@ class SheinApp(tk.Tk):
         self._bargain_action_lock = threading.Lock()
         self._bargain_row_uid_seq = 1
         self._bargain_rowid_to_index = {}
+        self._bargain_pick_anchor_iid = ""
         self._bargain_sort_column = ""
         self._bargain_sort_desc = True
         self._bargain_filter_platform_var = tk.StringVar(value="")
@@ -1586,12 +1587,28 @@ class SheinApp(tk.Tk):
                 col_idx = -1
             cols = list(getattr(self, "_bargain_table_columns", ()) or ())
             col_name = cols[col_idx] if 0 <= col_idx < len(cols) else ""
+            shift_pressed = bool(getattr(_event, "state", 0) & 0x0001)
             ctrl_pressed = bool(getattr(_event, "state", 0) & 0x0004)
             if col_name == "pick":
                 row_idx = int(getattr(self, "_bargain_rowid_to_index", {}).get(row_id, -1))
                 rows = list(getattr(self, "_bargain_rows", []) or [])
                 if 0 <= row_idx < len(rows):
-                    rows[row_idx]["_selected"] = not bool(rows[row_idx].get("_selected", False))
+                    anchor_id = str(getattr(self, "_bargain_pick_anchor_iid", "") or "")
+                    visible_ids = list(table.get_children(""))
+                    if shift_pressed and anchor_id and anchor_id in visible_ids and row_id in visible_ids:
+                        start = visible_ids.index(anchor_id)
+                        end = visible_ids.index(row_id)
+                        if start > end:
+                            start, end = end, start
+                        anchor_idx = int(getattr(self, "_bargain_rowid_to_index", {}).get(anchor_id, -1))
+                        target_checked = bool(rows[anchor_idx].get("_selected", False)) if 0 <= anchor_idx < len(rows) else True
+                        for iid in visible_ids[start:end + 1]:
+                            src_idx = int(getattr(self, "_bargain_rowid_to_index", {}).get(iid, -1))
+                            if 0 <= src_idx < len(rows):
+                                rows[src_idx]["_selected"] = target_checked
+                    else:
+                        rows[row_idx]["_selected"] = not bool(rows[row_idx].get("_selected", False))
+                    self._bargain_pick_anchor_iid = str(row_id)
                     self._bargain_rows = rows
                     self._render_bargain_rows()
                 return
