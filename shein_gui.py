@@ -234,6 +234,8 @@ class SheinApp(tk.Tk):
         self._bargain_progress_percent = 0.0
         self._bargain_fetch_thread = None
         self._bargain_fetch_running = False
+        self._bargain_amazon_thread = None
+        self._bargain_amazon_running = False
         self._stop_bargain_fetch = False
         self._bargain_runtime_publisher = None
         self._bargain_runtime_is_temp = False
@@ -1012,18 +1014,22 @@ class SheinApp(tk.Tk):
                 self.after(0, lambda rs=fetched_rows: _apply_initial_rows(rs))
                 # 等待主线程先把抓取结果渲染出来，再进行亚马逊价格补充
                 ui_render_ready.wait(timeout=1.2)
-                amazon_done = True
-                if self._enable_bargain_amazon_metrics and ok:
-                    amazon_done = self._enrich_bargain_rows_with_amazon_progressive(initial_state_ready=True)
+                amazon_started = False
+                if self._enable_bargain_amazon_metrics and ok and (not self._stop_bargain_fetch):
+                    amazon_started = self._start_bargain_amazon_enrich_async()
                 if ok:
-                    if self._stop_bargain_fetch or (not amazon_done):
+                    if self._stop_bargain_fetch:
                         self.after(0, lambda: self._set_bargain_progress("已停止", state="fail"))
                         self.after(0, lambda: self.status_lbl.config(text="议价流程已停止"))
                     else:
                         keep_runtime_after_fetch = (temp_pub is not None)
                         self.after(0, lambda: self._set_bargain_progress("完毕", state="success", percent=100))
-                        self.after(0, lambda: self.status_lbl.config(text=msg))
-                        self.after(0, lambda: messagebox.showinfo('议价', msg))
+                        if amazon_started:
+                            done_msg = "{}（亚马逊价格正在后台补充，可同时执行操作）".format(msg)
+                        else:
+                            done_msg = msg
+                        self.after(0, lambda m=done_msg: self.status_lbl.config(text=m))
+                        self.after(0, lambda m=done_msg: messagebox.showinfo('议价', m))
                 else:
                     if "用户已停止议价抓取" in str(msg):
                         self.after(0, lambda: self._set_bargain_progress("已停止", state="fail"))
@@ -1062,7 +1068,8 @@ class SheinApp(tk.Tk):
                     self._bargain_runtime_publisher = None
                     self._bargain_runtime_is_temp = False
                 self._bargain_fetch_running = False
-                self._stop_bargain_fetch = False
+                if not getattr(self, "_bargain_amazon_running", False):
+                    self._stop_bargain_fetch = False
                 self._bargain_fetch_thread = None
 
         self._bargain_fetch_thread = threading.Thread(target=_run, daemon=True)
@@ -1868,6 +1875,41 @@ class SheinApp(tk.Tk):
             self._bargain_rows = data
             self.after(0, self._render_bargain_rows)
             return False
+        return True
+
+    def _start_bargain_amazon_enrich_async(self):
+        """后台补充亚马逊价格，不阻塞议价操作按钮。"""
+        if not self._enable_bargain_amazon_metrics:
+            return False
+        if getattr(self, "_bargain_amazon_running", False):
+            return False
+        self._bargain_amazon_running = True
+
+        def _worker():
+            ok = True
+            try:
+                ok = bool(self._enrich_bargain_rows_with_amazon_progressive(initial_state_ready=True))
+            except Exception as e:
+                ok = False
+                self._pub_log("议价流程：后台补充亚马逊价格异常 - {}".format(str(e)[:120]))
+            finally:
+                self._bargain_amazon_running = False
+                self._bargain_amazon_thread = None
+
+            def _finish_ui():
+                # 若正在批量执行操作，不抢占其状态文案
+                if getattr(self, "_bargain_batch_running", False):
+                    return
+                if self._stop_bargain_fetch or (not ok):
+                    self.status_lbl.config(text="议价功能：亚马逊价格补充已停止")
+                else:
+                    self.status_lbl.config(text="议价功能：亚马逊价格补充完成，可继续执行操作")
+
+            self.after(0, _finish_ui)
+
+        th = threading.Thread(target=_worker, daemon=True)
+        self._bargain_amazon_thread = th
+        th.start()
         return True
 
     def _draw_bargain_progress_bar(self, percent, color):
@@ -5989,7 +6031,7 @@ return false;
         """停止上品进程。"""
         dev_mode = bool(is_dev_mode())
         stop_bargain_first = bool(
-            getattr(self, "_bargain_fetch_running", False)
+            (getattr(self, "_bargain_fetch_running", False) or getattr(self, "_bargain_amazon_running", False))
             and (self.current_view_mode == "bargain" or not self._publish_running)
         )
         if stop_bargain_first:
