@@ -676,7 +676,7 @@ for (const d of drawers) {
   const t = clean(d.innerText || '');
   if (t.includes('待办任务')) { root = d; break; }
 }
-if (!root) return {page: 1, has_prev: false, has_next: false, total_pages: 1, total_items: 0};
+if (!root) return {page: 1, has_prev: false, has_next: false, total_pages: 1, total_items: 0, page_size: 10};
 
 let page = 1;
 const activeBtn = root.querySelector('.soui-pagination-buttons .soui-button-primary');
@@ -713,7 +713,7 @@ if (btns.length >= 2) {
 }
 if (!hasPrev && page > 1) hasPrev = true;
 if (!hasNext && page < totalPages) hasNext = true;
-return {page, has_prev: hasPrev, has_next: hasNext, total_pages: totalPages, total_items: totalItems};
+return {page, has_prev: hasPrev, has_next: hasNext, total_pages: totalPages, total_items: totalItems, page_size: pageSize};
 """
     try:
         data = driver.execute_script(script) or {}
@@ -723,9 +723,314 @@ return {page, has_prev: hasPrev, has_next: hasNext, total_pages: totalPages, tot
             "has_next": bool(data.get("has_next", False)),
             "total_pages": int(data.get("total_pages", 1) or 1),
             "total_items": int(data.get("total_items", 0) or 0),
+            "page_size": int(data.get("page_size", 10) or 10),
         }
     except Exception:
-        return {"page": 1, "has_prev": False, "has_next": False, "total_pages": 1, "total_items": 0}
+        return {"page": 1, "has_prev": False, "has_next": False, "total_pages": 1, "total_items": 0, "page_size": 10}
+
+
+def _ensure_todo_page_size(driver, log, target_size=50, timeout=8, should_stop=None, discover_timeout=10, probe_interval=1):
+    """将待办任务抽屉分页切换到目标每页条数（默认 50）。"""
+    target = int(target_size or 50)
+    if target <= 0:
+        return False
+
+    before = _get_todo_pagination_state(driver)
+    before_size = int(before.get("page_size", 10) or 10)
+    before_sig = _get_todo_table_signature(driver)
+    if before_size == target:
+        log("议价流程：分页已是 {} / 页".format(target))
+        return True
+
+    discover_script = r"""
+const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const visible = (el) => {
+  if (!el) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (!st) return !!el.offsetParent;
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+let root = null;
+const drawers = Array.from(document.querySelectorAll('.soui-modal-panel,.soui-modal-wrapper,.soui-modal,.merchant-ui-drawer,[class*="drawer"]')).filter(visible);
+for (const d of drawers) {
+  const t = clean(d.innerText || '');
+  if (t.includes('待办任务')) { root = d; break; }
+}
+if (!root) return {ok: false, reason: 'no_root', text: ''};
+const sizeWrap = root.querySelector('.soui-pagination-size-list');
+if (!sizeWrap || !visible(sizeWrap)) return {ok: false, reason: 'no_size_wrap', text: ''};
+const sizeEl = sizeWrap.querySelector('.soui-select-ellipsis');
+const txt = clean((sizeEl && sizeEl.innerText) || (sizeEl && sizeEl.getAttribute('title')) || '');
+return {ok: true, reason: 'ready', text: txt};
+"""
+
+    debug_snapshot_script = r"""
+const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const visible = (el) => {
+  if (!el) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (!st) return !!el.offsetParent;
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+let root = null;
+const drawers = Array.from(document.querySelectorAll('.soui-modal-panel,.soui-modal-wrapper,.soui-modal,.merchant-ui-drawer,[class*="drawer"]')).filter(visible);
+for (const d of drawers) {
+  const t = clean(d.innerText || '');
+  if (t.includes('待办任务')) { root = d; break; }
+}
+if (!root) return {ok:false, size_text:'', options:[], reason:'no_root'};
+const sizeWrap = root.querySelector('.soui-pagination-size-list');
+const sizeEl = sizeWrap ? sizeWrap.querySelector('.soui-select-ellipsis') : null;
+const sizeText = clean((sizeEl && sizeEl.innerText) || (sizeWrap && sizeWrap.innerText) || '');
+const opts = Array.from(document.querySelectorAll('.soui-select-option,[title]'))
+  .filter(visible)
+  .map(el => clean(el.innerText || el.getAttribute('title') || ''))
+  .filter(Boolean)
+  .slice(0, 12);
+return {ok:true, size_text:sizeText, options:opts, reason:'ok'};
+"""
+
+    open_select_script = r"""
+const target = parseInt(arguments[0], 10) || 50;
+const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const visible = (el) => {
+  if (!el) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (!st) return !!el.offsetParent;
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+const clickEl = (el) => {
+  if (!el) return false;
+  try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+  try { el.click(); return true; } catch (_) {}
+  try {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return true;
+  } catch (_) {}
+  try {
+    const r = el.getBoundingClientRect();
+    const x = Math.floor(r.left + r.width / 2);
+    const y = Math.floor(r.top + r.height / 2);
+    const topEl = document.elementFromPoint(x, y);
+    if (topEl) {
+      topEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
+      topEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
+      topEl.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: y }));
+      return true;
+    }
+  } catch (_) {}
+  return false;
+};
+let root = null;
+const drawers = Array.from(document.querySelectorAll('.soui-modal-panel,.soui-modal-wrapper,.soui-modal,.merchant-ui-drawer,[class*="drawer"]')).filter(visible);
+for (const d of drawers) {
+  const t = clean(d.innerText || '');
+  if (t.includes('待办任务')) { root = d; break; }
+}
+if (!root) return {ok: false, reason: 'no_root'};
+
+const sizeWrap = root.querySelector('.soui-pagination-size-list');
+if (!sizeWrap) return {ok: false, reason: 'no_size_wrap'};
+
+const triggers = [
+  sizeWrap.querySelector('.soui-select-result-wrapper'),
+  sizeWrap.querySelector('.soui-select-wrapper-padding-box'),
+  sizeWrap.querySelector('.soui-select-ellipsis'),
+  sizeWrap.querySelector('.soui-select-icon-wrapper'),
+  sizeWrap.querySelector('.soui-select-arrow-icon'),
+  sizeWrap.querySelector('.soui-select'),
+  sizeWrap
+].filter(Boolean);
+for (const t of triggers) {
+  if (clickEl(t)) return {ok: true, changed: true, reason: 'opened'};
+}
+return {ok: false, reason: 'open_failed'};
+"""
+
+    click_option_script = r"""
+const target = parseInt(arguments[0], 10) || 50;
+const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const visible = (el) => {
+  if (!el) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (!st) return !!el.offsetParent;
+  if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+const clickEl = (el) => {
+  if (!el) return false;
+  try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+  try { el.click(); return true; } catch (_) {}
+  try {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return true;
+  } catch (_) {}
+  try {
+    const r = el.getBoundingClientRect();
+    const x = Math.floor(r.left + r.width / 2);
+    const y = Math.floor(r.top + r.height / 2);
+    const topEl = document.elementFromPoint(x, y);
+    if (topEl) {
+      topEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
+      topEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
+      topEl.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: y }));
+      return true;
+    }
+  } catch (_) {}
+  return false;
+};
+const containers = Array.from(document.querySelectorAll('.soui-select-picker-wrapper,.soui-select-list,body'));
+let candidates = [];
+for (const c of containers) {
+  const part = Array.from(c.querySelectorAll('li.soui-select-option,.soui-select-option,[title]')).filter(visible);
+  candidates = candidates.concat(part);
+}
+// 去重
+candidates = Array.from(new Set(candidates));
+let targetOpt = null;
+for (const el of candidates) {
+  const txt = clean(el.innerText || el.getAttribute('title') || '');
+  if (txt.includes(String(target)) && (txt.includes('/ 页') || txt.includes('/页'))) {
+    targetOpt = el;
+    break;
+  }
+}
+if (!targetOpt) {
+  const sample = candidates.slice(0, 8).map(el => clean(el.innerText || el.getAttribute('title') || '')).filter(Boolean);
+  return {ok: false, reason: 'option_not_found', sample};
+}
+if (!clickEl(targetOpt)) return {ok: false, reason: 'option_click_failed'};
+return {ok: true, reason: 'option_clicked'};
+"""
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        if _should_stop(should_stop):
+            return False
+
+        # 先最多等待 10 秒，每 1 秒轮询一次，优先等到“10 / 页”再切
+        end_discover = time.time() + max(1.0, float(discover_timeout))
+        found_text = ""
+        saw_ten = False
+        while time.time() < end_discover:
+            if _should_stop(should_stop):
+                return False
+            try:
+                probe = driver.execute_script(discover_script) or {}
+            except Exception:
+                probe = {}
+            txt = _trim_text(probe.get("text", ""))
+            found_text = txt or found_text
+            if txt:
+                m = re.search(r"(\d+)\s*/\s*页", txt)
+                cur_txt_size = int(m.group(1)) if m else 0
+                if cur_txt_size == target:
+                    # 仅以前端文本不做最终判定，必须以分页状态读取到的 page_size 为准
+                    st_now = _get_todo_pagination_state(driver)
+                    if int(st_now.get("page_size", 10) or 10) == target:
+                        log("议价流程：分页已是 {} / 页".format(target))
+                        return True
+                if "10 / 页" in txt or "10/页" in txt:
+                    saw_ten = True
+                    log("议价流程：检测到分页按钮“{}”，开始切换 {} / 页（第{}次）".format(txt, target, attempt))
+                    break
+            time.sleep(max(0.2, float(probe_interval)))
+
+        if not saw_ten:
+            log("议价流程：第{}次未稳定检测到“10 / 页”，执行兜底切换 {} / 页".format(attempt, target))
+
+        try:
+            rs = driver.execute_script(open_select_script, target) or {}
+        except Exception:
+            rs = {}
+        if not rs or not bool(rs.get("ok")):
+            log("议价流程：第{}次打开分页下拉失败（{}）".format(attempt, rs.get("reason", "js_error")))
+            try:
+                snap = driver.execute_script(debug_snapshot_script) or {}
+            except Exception:
+                snap = {}
+            if snap:
+                log("议价流程：调试快照 size='{}' options={}".format(
+                    _trim_text(snap.get("size_text", "")),
+                    (snap.get("options", []) or []),
+                ))
+            time.sleep(1)
+            continue
+
+        changed = bool(rs.get("changed", False))
+        if changed:
+            log("议价流程：已打开分页下拉，尝试点击 {} / 页".format(target))
+
+        clicked_opt = False
+        opt_end = time.time() + 2.5
+        opt_reason = "option_not_found"
+        while time.time() < opt_end:
+            if _should_stop(should_stop):
+                return False
+            try:
+                rs_opt = driver.execute_script(click_option_script, target) or {}
+            except Exception:
+                rs_opt = {}
+            if rs_opt and bool(rs_opt.get("ok")):
+                clicked_opt = True
+                log("议价流程：已点击 {} / 页选项".format(target))
+                break
+            opt_reason = rs_opt.get("reason", "option_not_found")
+            if rs_opt.get("sample"):
+                opt_reason = "{} sample={}".format(opt_reason, rs_opt.get("sample"))
+            time.sleep(0.25)
+        if not clicked_opt:
+            log("议价流程：第{}次点击 {} / 页失败（{}）".format(attempt, target, opt_reason))
+            try:
+                snap = driver.execute_script(debug_snapshot_script) or {}
+            except Exception:
+                snap = {}
+            if snap:
+                log("议价流程：调试快照 size='{}' options={}".format(
+                    _trim_text(snap.get("size_text", "")),
+                    (snap.get("options", []) or []),
+                ))
+            time.sleep(1)
+            continue
+
+        end = time.time() + max(1.0, float(timeout))
+        while time.time() < end:
+            if _should_stop(should_stop):
+                return False
+            st = _get_todo_pagination_state(driver)
+            now_size = int(st.get("page_size", 10) or 10)
+            if now_size == target:
+                now_sig = _get_todo_table_signature(driver)
+                if changed and before_sig and now_sig == before_sig:
+                    time.sleep(0.3)
+                    continue
+                log("议价流程：分页已切换为 {} / 页".format(target))
+                return True
+            time.sleep(0.3)
+        log("议价流程：第{}次切换后等待超时，当前 {} / 页".format(attempt, _get_todo_pagination_state(driver).get("page_size", 10)))
+        try:
+            snap = driver.execute_script(debug_snapshot_script) or {}
+        except Exception:
+            snap = {}
+        if snap:
+            log("议价流程：调试快照 size='{}' options={}".format(
+                _trim_text(snap.get("size_text", "")),
+                (snap.get("options", []) or []),
+            ))
+        time.sleep(1)
+
+    log("议价流程：切换 {} / 页最终失败，进入降级抓取".format(target))
+    return False
 
 
 def _get_todo_table_signature(driver):
@@ -985,10 +1290,24 @@ def fetch_shein_pending_bargain_rows(
     _dismiss_user_guide_next_buttons(driver, log, timeout=4, interval=0.8)
 
     clicked_pending = _click_pending_filter_button(driver, log, timeout=8, should_stop=should_stop)
+    switched = _ensure_todo_page_size(driver, log, target_size=50, timeout=8, should_stop=should_stop)
+    if not switched:
+        log("议价流程：切换 50 / 页失败，按当前每页条数继续抓取（降级模式）")
+    st_50 = _get_todo_pagination_state(driver)
+    if int(st_50.get("page_size", 10) or 10) != 50:
+        log("议价流程：当前每页 {} 条（未到50），继续抓取".format(st_50.get("page_size", 10)))
+    if _should_stop(should_stop):
+        return False, "用户已停止议价抓取", pub, []
+    # 用户要求切换 50 / 页后额外等待 3 秒再抓取，确保数据稳定。
+    time.sleep(3)
     state = _get_todo_pagination_state(driver)
     total_pages_hint = state.get("total_pages", 1)
     total_items_hint = state.get("total_items", 0)
-    log("议价流程：分页信息 页码 {}/{}，总条数 {}".format(state.get("page", 1), total_pages_hint, total_items_hint))
+    log(
+        "议价流程：分页信息 页码 {}/{}，总条数 {}，每页 {} 条".format(
+            state.get("page", 1), total_pages_hint, total_items_hint, state.get("page_size", 10)
+        )
+    )
 
     all_rows = []
     seen = set()
