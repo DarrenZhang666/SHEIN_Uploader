@@ -1240,6 +1240,7 @@ class SheinApp(tk.Tk):
 
         base_cols = (
             "pick",
+            "seq",
             "supplier_no",
             "sku_info",
             "amazon_url",
@@ -1257,6 +1258,7 @@ class SheinApp(tk.Tk):
             style="Bargain.Treeview",
             selectmode="browse",
         )
+        self._bargain_table.heading("seq", text="序号", anchor="center")
         self._bargain_table.heading("pick", text="勾选", anchor="center")
         self._bargain_table.heading("supplier_no", text="供方货号", anchor="w")
         self._bargain_table.heading("sku_info", text="SKU信息", anchor="w")
@@ -1268,6 +1270,7 @@ class SheinApp(tk.Tk):
         if "profit_rate" in cols:
             self._bargain_table.heading("profit_rate", text="利润率", anchor="w", command=lambda: self._on_bargain_sort_click("profit_rate"))
 
+        self._bargain_table.column("seq", width=60, minwidth=52, anchor="center")
         self._bargain_table.column("pick", width=54, minwidth=50, anchor="center")
         self._bargain_table.column("supplier_no", width=140, minwidth=120, anchor="w")
         self._bargain_table.column("sku_info", width=150, minwidth=130, anchor="w")
@@ -1300,7 +1303,8 @@ class SheinApp(tk.Tk):
 
         empty_row = [""] * len(cols)
         if empty_row:
-            empty_row[0] = "暂无数据，请点击顶部【抓取SHEIN建议价格】"
+            msg_idx = cols.index("pick") if "pick" in cols else 0
+            empty_row[msg_idx] = "暂无数据，请点击顶部【抓取SHEIN建议价格】"
         self._bargain_table.insert("", "end", values=tuple(empty_row), tags=("odd",))
 
     def _render_bargain_rows(self):
@@ -1319,7 +1323,8 @@ class SheinApp(tk.Tk):
             cols = tuple(getattr(self, "_bargain_table_columns", ()) or ())
             empty_row = [""] * len(cols)
             if empty_row:
-                empty_row[0] = "暂无“待确认”数据"
+                msg_idx = cols.index("pick") if "pick" in cols else 0
+                empty_row[msg_idx] = "暂无“待确认”数据"
             table.insert("", "end", values=tuple(empty_row), tags=("odd",))
             if hasattr(self, "_bargain_count_lbl"):
                 if rows:
@@ -1331,6 +1336,7 @@ class SheinApp(tk.Tk):
         cols = tuple(getattr(self, "_bargain_table_columns", ()) or ())
 
         value_getter = {
+            "seq": lambda r: "",
             "pick": lambda r: "☑" if bool(r.get("_selected", False)) else "☐",
             "supplier_no": lambda r: r.get("supplier_no", ""),
             "reason": lambda r: r.get("reason", ""),
@@ -1343,7 +1349,13 @@ class SheinApp(tk.Tk):
         source_index_map = {int(r.get("_row_uid", -1)): idx for idx, r in enumerate(rows)}
         for i, r in enumerate(display_rows):
             tag = "odd" if (i % 2 == 0) else "even"
-            values = tuple(value_getter.get(c, lambda _x: "")(r) for c in cols)
+            values_buf = []
+            for c in cols:
+                if c == "seq":
+                    values_buf.append(str(i + 1))
+                else:
+                    values_buf.append(value_getter.get(c, lambda _x: "")(r))
+            values = tuple(values_buf)
             row_uid = int(r.get("_row_uid", -1))
             iid = "br_{}".format(row_uid if row_uid >= 0 else i)
             table.insert(
