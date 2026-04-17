@@ -113,7 +113,7 @@ def _click_todo_entrance(driver):
     return False
 
 
-def _click_pending_filter_button(driver, log, timeout=8, should_stop=None):
+def _click_pending_filter_button(driver, log, timeout=12, should_stop=None):
     """点击“待确认”筛选按钮（该按钮用于切换显示数据，不是表格列）。"""
     if By is None:
         return False
@@ -729,9 +729,9 @@ return {page, has_prev: hasPrev, has_next: hasNext, total_pages: totalPages, tot
         return {"page": 1, "has_prev": False, "has_next": False, "total_pages": 1, "total_items": 0, "page_size": 10}
 
 
-def _ensure_todo_page_size(driver, log, target_size=50, timeout=8, should_stop=None, discover_timeout=10, probe_interval=1):
-    """将待办任务抽屉分页切换到目标每页条数（默认 50）。"""
-    target = int(target_size or 50)
+def _ensure_todo_page_size(driver, log, target_size=100, timeout=15, should_stop=None, discover_timeout=15, probe_interval=1.2):
+    """将待办任务抽屉分页切换到目标每页条数（默认 100）。"""
+    target = int(target_size or 100)
     if target <= 0:
         return False
 
@@ -1062,7 +1062,7 @@ return texts.join('||');
         return ""
 
 
-def _click_next_todo_page(driver, log, timeout=8, should_stop=None):
+def _click_next_todo_page(driver, log, timeout=18, should_stop=None):
     """点击分页“>”按钮，返回是否成功翻页。"""
     before = _get_todo_pagination_state(driver)
     before_sig = _get_todo_table_signature(driver)
@@ -1117,16 +1117,16 @@ return true;
                 time.sleep(0.2)
                 return True
             # 允许继续轮询，等待数据刷新完成
-        time.sleep(0.3)
+        time.sleep(0.5)
     if page_changed:
         # 页码已变化但签名未及时更新：给一个兜底短等待，尽量避免读到旧数据
         log("议价流程：页码已变化，等待表格刷新超时，采用兜底继续")
-        time.sleep(0.8)
+        time.sleep(2.0)
         return True
     return False
 
 
-def _click_prev_todo_page(driver, log, timeout=8, should_stop=None):
+def _click_prev_todo_page(driver, log, timeout=18, should_stop=None):
     """点击分页“<”按钮，返回是否成功翻页。"""
     before = _get_todo_pagination_state(driver)
     before_sig = _get_todo_table_signature(driver)
@@ -1179,10 +1179,10 @@ return true;
                 log("议价流程：已翻到第 {} 页（数据已刷新）".format(now.get("page", 1)))
                 time.sleep(0.2)
                 return True
-        time.sleep(0.3)
+        time.sleep(0.5)
     if page_changed:
         log("议价流程：页码已变化，等待表格刷新超时，采用兜底继续")
-        time.sleep(0.8)
+        time.sleep(2.0)
         return True
     return False
 
@@ -1289,17 +1289,17 @@ def fetch_shein_pending_bargain_rows(
         return False, "用户已停止议价抓取", pub, []
     _dismiss_user_guide_next_buttons(driver, log, timeout=4, interval=0.8)
 
-    clicked_pending = _click_pending_filter_button(driver, log, timeout=8, should_stop=should_stop)
-    switched = _ensure_todo_page_size(driver, log, target_size=50, timeout=8, should_stop=should_stop)
+    clicked_pending = _click_pending_filter_button(driver, log, timeout=12, should_stop=should_stop)
+    switched = _ensure_todo_page_size(driver, log, target_size=100, timeout=15, should_stop=should_stop)
     if not switched:
-        log("议价流程：切换 50 / 页失败，按当前每页条数继续抓取（降级模式）")
-    st_50 = _get_todo_pagination_state(driver)
-    if int(st_50.get("page_size", 10) or 10) != 50:
-        log("议价流程：当前每页 {} 条（未到50），继续抓取".format(st_50.get("page_size", 10)))
+        log("议价流程：切换 100 / 页失败，按当前每页条数继续抓取（降级模式）")
+    st_page = _get_todo_pagination_state(driver)
+    if int(st_page.get("page_size", 10) or 10) != 100:
+        log("议价流程：当前每页 {} 条（未到100），继续抓取".format(st_page.get("page_size", 10)))
     if _should_stop(should_stop):
         return False, "用户已停止议价抓取", pub, []
-    # 用户要求切换 50 / 页后额外等待 3 秒再抓取，确保数据稳定。
-    time.sleep(3)
+    # 用户要求切换 100 / 页后额外等待 6 秒再抓取，确保数据稳定。
+    time.sleep(6)
     state = _get_todo_pagination_state(driver)
     total_pages_hint = state.get("total_pages", 1)
     total_items_hint = state.get("total_items", 0)
@@ -1327,7 +1327,7 @@ def fetch_shein_pending_bargain_rows(
         page_rows = _wait_fetch_pending_bargain_rows(
             driver,
             log,
-            timeout=12,
+            timeout=18,
             interval=0.7,
             assume_pending=clicked_pending,
             xyz_only=True,
@@ -1377,7 +1377,7 @@ def fetch_shein_pending_bargain_rows(
         if (not st_after.get("has_next")) or (st_after.get("page", 1) >= st_after.get("total_pages", 1)):
             break
 
-        if not _click_next_todo_page(driver, log, timeout=8, should_stop=should_stop):
+        if not _click_next_todo_page(driver, log, timeout=18, should_stop=should_stop):
             break
 
     if not all_rows:
