@@ -14,6 +14,11 @@ import difflib
 from urllib.parse import urlparse
 import requests
 try:
+    from requests.adapters import HTTPAdapter
+    _HTTP_ADAPTER_OK = True
+except Exception:
+    _HTTP_ADAPTER_OK = False
+try:
     import cloudscraper
     _CLOUDSCRAPER_OK = True
 except ImportError:
@@ -23,15 +28,50 @@ from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from shein_sensitive_clean import SENSITIVE_WORDS, _filter_title
 
+# 优先使用 lxml 解析器（速度比 html.parser 快 3-5 倍），失败时回退默认。
+try:
+    BeautifulSoup("<a></a>", "lxml")  # 探测可用性
+    _BS_PARSER = "lxml"
+except Exception:
+    _BS_PARSER = "html.parser"
+
+
+def _bs(html):
+    """统一构建 BeautifulSoup 对象（自动选择最快可用的解析器）。"""
+    try:
+        return BeautifulSoup(html, _BS_PARSER)
+    except Exception:
+        return BeautifulSoup(html, "html.parser")
+
+
 AMAZON_PRODUCT_URL = "https://www.amazon.com/dp/{asin}"
 
+# 最新主流浏览器指纹（Chrome/Edge 138-139、Firefox 132、Safari 17.4）
+# - 仅保留 Chromium 系常见的 sec-ch-ua-* 头部，避免与其它字段冲突被反爬识别
 HEADERS_POOL = [
     {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "sec-ch-ua": '"Not.A/Brand";v="99", "Chromium";v="138", "Google Chrome";v="138"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
+        "Connection": "keep-alive",
+        "Cache-Control": "max-age=0",
+        "DNT": "1",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="138", "Microsoft Edge";v="138"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "sec-fetch-dest": "document",
@@ -43,27 +83,11 @@ HEADERS_POOL = [
         "Cache-Control": "max-age=0",
     },
     {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "sec-ch-ua": '"Microsoft Edge";v="130", "Chromium";v="130", "Not_A Brand";v="99"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "sec-fetch-dest": "document",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-site": "none",
-        "sec-fetch-user": "?1",
-        "upgrade-insecure-requests": "1",
-        "Connection": "keep-alive",
-        "Cache-Control": "max-age=0",
-    },
-    {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "sec-ch-ua": '"Not.A/Brand";v="99", "Chromium";v="138", "Google Chrome";v="138"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"macOS"',
         "sec-fetch-dest": "document",
@@ -78,17 +102,18 @@ HEADERS_POOL = [
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
         "sec-fetch-dest": "document",
         "sec-fetch-mode": "navigate",
         "sec-fetch-site": "none",
         "sec-fetch-user": "?1",
         "upgrade-insecure-requests": "1",
         "Connection": "keep-alive",
+        "DNT": "1",
         "TE": "trailers",
     },
     {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
@@ -99,11 +124,11 @@ HEADERS_POOL = [
         "upgrade-insecure-requests": "1",
     },
     {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "sec-ch-ua": '"Not.A/Brand";v="99", "Chromium";v="138", "Google Chrome";v="138"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Linux"',
         "sec-fetch-dest": "document",
@@ -114,11 +139,11 @@ HEADERS_POOL = [
         "Connection": "keep-alive",
     },
     {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-GB,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "sec-ch-ua": '"Google Chrome";v="129", "Chromium";v="129", "Not_A Brand";v="24"',
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "sec-ch-ua": '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "sec-fetch-dest": "document",
@@ -129,11 +154,11 @@ HEADERS_POOL = [
         "Connection": "keep-alive",
     },
     {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 OPR/116.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 OPR/124.0.0.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24", "Opera";v="116"',
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "sec-ch-ua": '"Chromium";v="138", "Not/A)Brand";v="24", "Opera";v="124"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "sec-fetch-dest": "document",
@@ -148,8 +173,16 @@ HEADERS_POOL = [
 # 可选代理池（留空则不使用，格式: ["http://user:pass@host:port"]）
 PROXY_POOL = []
 
+# 单线程内最多缓存的会话副本数；命中反爬时轮换使用，避免反复污染同一 cookie 集
+_MAX_SESSIONS_PER_THREAD = 3
+
 _SESSION_LOCK = threading.Lock()
-_SESSION_CACHE = {}
+_SESSION_CACHE = {}                 # {(domain, tid): [session, ...]}
+_SESSION_USAGE = {}                 # {id(session): {"requests": int, "blocked": int}}
+_DIRTY_SESSIONS = set()             # id(session) 集合，命中反爬后标记
+_DOMAIN_COOLDOWN = {}               # {domain: ts}：达到时间前所有线程暂缓请求该域
+_DOMAIN_COOLDOWN_LOCK = threading.Lock()
+
 _REQUEST_PACE_LOCK = threading.Lock()
 _REQUEST_PACE_STATE = {
     "next_ts": 0.0,          # 下一次允许发起请求的时间点
@@ -159,7 +192,7 @@ _REQUEST_PACE_STATE = {
 }
 
 
-def _wait_request_slot(base_gap=0.22, jitter=(0.08, 0.35), extra_delay=0.0):
+def _wait_request_slot(base_gap=0.10, jitter=(0.04, 0.18), extra_delay=0.0):
     """
     全局请求节流：跨线程串行化请求起点，避免突发流量。
     base_gap 为基础间隔，jitter 为随机抖动，extra_delay 用于临时降速。
@@ -169,7 +202,7 @@ def _wait_request_slot(base_gap=0.22, jitter=(0.08, 0.35), extra_delay=0.0):
         now = time.time()
         gap = float(base_gap) + random.uniform(float(jitter[0]), float(jitter[1])) + float(extra_delay or 0.0)
         # 命中反爬后，提高请求间隔（上限约 2.8s，避免完全停滞）
-        penalty = min(2.0, _REQUEST_PACE_STATE["penalty_level"] * 0.25)
+        penalty = min(2.0, _REQUEST_PACE_STATE["penalty_level"] * 0.22)
         target_gap = min(2.8, gap + penalty)
         available_at = max(now, _REQUEST_PACE_STATE["next_ts"])
         wait_s = max(0.0, available_at - now)
@@ -194,6 +227,27 @@ def _record_request_feedback(blocked=False):
             # 成功请求逐步退火，避免长时间保持高惩罚
             if _REQUEST_PACE_STATE["penalty_level"] > 0:
                 _REQUEST_PACE_STATE["penalty_level"] -= 1
+
+
+def _set_domain_cooldown(domain, seconds):
+    """命中反爬后短暂冷却该域，避免线程间互相拖累。"""
+    if not domain or float(seconds or 0) <= 0:
+        return
+    with _DOMAIN_COOLDOWN_LOCK:
+        old = float(_DOMAIN_COOLDOWN.get(domain, 0.0))
+        new_ts = max(old, time.time() + float(seconds))
+        _DOMAIN_COOLDOWN[domain] = new_ts
+
+
+def _wait_domain_cooldown(domain, max_wait=4.0):
+    """若该域处于冷却期则短暂等待（不会阻塞过久）。"""
+    if not domain:
+        return
+    with _DOMAIN_COOLDOWN_LOCK:
+        ready_at = float(_DOMAIN_COOLDOWN.get(domain, 0.0))
+    wait_s = ready_at - time.time()
+    if wait_s > 0:
+        time.sleep(min(wait_s, float(max_wait or 0)))
 
 
 def _recommend_worker_count(max_workers, task_count):
@@ -233,20 +287,105 @@ def _get_proxy():
     return {"http": proxy, "https": proxy}
 
 
+def _rand_hex(n):
+    return "".join(random.choices("0123456789abcdef", k=n))
+
+
 def _make_browser_cookies(domain):
-    """生成模拟浏览器的基础 Cookie。"""
-    session_id = "".join(random.choices("0123456789abcdefghijklmnopqrstuvwxyz", k=15))
+    """生成模拟浏览器的基础 Cookie，覆盖亚马逊常见跟踪 cookie。"""
+    sid_letters = "".join(random.choices("0123456789abcdefghijklmnopqrstuvwxyz", k=15))
+    session_id_num = "{}-{}-{}".format(
+        random.randint(100, 999),
+        random.randint(1000000, 9999999),
+        random.randint(1000000, 9999999),
+    )
     ubid = "{}-{}-{}".format(
         random.randint(100, 999),
         random.randint(1000000, 9999999),
         random.randint(1000000, 9999999),
     )
+    now_ts = int(time.time())
+    csm_hit = "tb:s-{}|{}|adb:adblk_no".format(_rand_hex(16).upper(), now_ts * 1000)
     return {
         "i18n-prefs": "USD",
         "lc-main": "en_US",
-        "session-id": session_id,
+        "session-id": session_id_num,
+        "session-id-time": "{}l".format(now_ts + 60 * 60 * 24 * 14),
         "ubid-main": ubid,
+        "csm-hit": csm_hit,
+        "skin": "noskin",
+        "_amz_session_aux": sid_letters,
     }
+
+
+def _build_session():
+    """创建带连接池/重试的 requests.Session（cloudscraper 可用时优先使用）。"""
+    sess = None
+    if _CLOUDSCRAPER_OK:
+        try:
+            sess = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "windows", "mobile": False},
+                delay=0,
+            )
+        except Exception:
+            sess = None
+    if sess is None:
+        sess = requests.Session()
+    if _HTTP_ADAPTER_OK:
+        try:
+            adapter = HTTPAdapter(pool_connections=24, pool_maxsize=24, max_retries=0)
+            sess.mount("https://", adapter)
+            sess.mount("http://", adapter)
+        except Exception:
+            pass
+    return sess
+
+
+def _get_session(domain, prefer_index=0):
+    """
+    取出当前线程的会话副本：
+    - 每个线程最多保留 _MAX_SESSIONS_PER_THREAD 个会话；
+    - 优先返回未被标记 dirty 的会话；
+    - 全部 dirty 时丢弃最旧并新建。
+    """
+    tid = threading.get_ident()
+    key = (domain, tid)
+    with _SESSION_LOCK:
+        pool = _SESSION_CACHE.get(key)
+        if not pool:
+            sess = _build_session()
+            pool = [sess]
+            _SESSION_CACHE[key] = pool
+            return sess
+
+        clean = [s for s in pool if id(s) not in _DIRTY_SESSIONS]
+        if clean:
+            idx = max(0, min(int(prefer_index or 0), len(clean) - 1))
+            return clean[idx]
+
+        if len(pool) < _MAX_SESSIONS_PER_THREAD:
+            sess = _build_session()
+            pool.append(sess)
+            return sess
+
+        # 全部脏：丢弃最旧的，新建并替换
+        dropped = pool.pop(0)
+        _DIRTY_SESSIONS.discard(id(dropped))
+        try:
+            dropped.close()
+        except Exception:
+            pass
+        sess = _build_session()
+        pool.append(sess)
+        return sess
+
+
+def _mark_session_dirty(session):
+    """标记会话被反爬污染，下次请求会切换到新会话。"""
+    if session is None:
+        return
+    with _SESSION_LOCK:
+        _DIRTY_SESSIONS.add(id(session))
 
 
 def _region_context(region):
@@ -381,8 +520,11 @@ def _extract_domain_from_url(url):
 
 
 def _is_blocked(status_code, text):
-    """判断响应是否被反爬拦截。"""
-    tl = text.lower()
+    """判断响应是否被反爬拦截（对 None / 非字符串安全）。"""
+    try:
+        tl = (text or "").lower()
+    except Exception:
+        tl = ""
     return (
         status_code == 429
         or status_code == 503
@@ -400,35 +542,70 @@ def _is_blocked(status_code, text):
     )
 
 
-def _get_with_retry(session, url, max_attempts=3, base_timeout=12):
+def _get_with_retry(session, url, max_attempts=3, base_timeout=12,
+                    domain=None, allow_session_switch=True, ctx=None):
     """
-    带指数退避 + 抖动的请求重试，每次随机换 UA 和代理。
-    返回 (response, headers_used) 或 (None, None)。
+    带退避 + 抖动的请求重试。
+    - 反爬命中时：标记当前 session 为 dirty，并自动切换到下一个 session 重试；
+    - 网络错误：按指数退避后再试；
+    - 每次随机换 UA / 代理，附加合理的 Referer 头；
+    返回 (response, headers_used, used_session) 或 (None, None, last_session)。
     """
     shuffled = random.sample(HEADERS_POOL, len(HEADERS_POOL))
-    attempts = min(max_attempts, len(shuffled))
+    attempts = max(1, min(max_attempts, len(shuffled)))
+    cur_session = session
+    target_domain = domain
+    if not target_domain:
+        try:
+            target_domain = url.split("/")[2]
+        except Exception:
+            target_domain = ""
+    last_blocked = False
     for attempt in range(attempts):
-        _wait_request_slot(base_gap=0.24, jitter=(0.10, 0.32))
+        # 域级冷却（命中反爬后短暂等待）
+        _wait_domain_cooldown(target_domain, max_wait=3.5)
+        _wait_request_slot(base_gap=0.10, jitter=(0.04, 0.18))
         hdrs = shuffled[attempt].copy()
-        hdrs["Referer"] = "https://{}/".format(url.split("/")[2])
+        try:
+            hdrs["Referer"] = "https://{}/".format(url.split("/")[2])
+        except Exception:
+            pass
         proxies = _get_proxy()
         if attempt > 0:
-            # 失败退避：按尝试次数指数增长，命中反爬后可自动进一步放大
-            wait = min(0.7 * (2 ** (attempt - 1)) + random.uniform(0.2, 0.8), 4.8)
+            # 失败退避：被反爬时退避更长，普通错误较短
+            base = 1.1 if last_blocked else 0.5
+            wait = min(base * (1.7 ** (attempt - 1)) + random.uniform(0.15, 0.6), 3.6)
             time.sleep(wait)
         try:
-            r = session.get(url, headers=hdrs, proxies=proxies, timeout=(5, base_timeout))
+            r = cur_session.get(
+                url, headers=hdrs, proxies=proxies, timeout=(5, base_timeout)
+            )
             blocked = _is_blocked(r.status_code, r.text)
             _record_request_feedback(blocked=blocked)
             if not blocked:
-                return r, hdrs
+                return r, hdrs, cur_session
+            # 命中反爬：标记并切换 session，下次重试用全新 cookie
+            last_blocked = True
+            _mark_session_dirty(cur_session)
+            _set_domain_cooldown(target_domain, seconds=random.uniform(0.8, 1.8))
+            if allow_session_switch and target_domain:
+                new_sess = _get_session(target_domain, prefer_index=attempt + 1)
+                if new_sess is not cur_session:
+                    cur_session = new_sess
+                    if isinstance(ctx, dict):
+                        try:
+                            _prepare_amazon_session(cur_session, target_domain, ctx, warmup=False)
+                        except Exception:
+                            pass
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
-            _record_request_feedback(blocked=True)
+            last_blocked = False
+            _record_request_feedback(blocked=False)
             continue
         except Exception:
-            _record_request_feedback(blocked=True)
+            last_blocked = False
+            _record_request_feedback(blocked=False)
             continue
-    return None, None
+    return None, None, cur_session
 
 
 def _to_sx1500(img_src):
@@ -1227,10 +1404,44 @@ def _pick_images_from_color_map(color_image_map, *candidate_texts, max_count=5):
     return []
 
 
+def _prefill_sku_images_from_color_map(color_image_map, sku_keys, fallback_images, max_count=5, min_required=2):
+    """
+    在发起任何额外请求之前，先尝试从 colorImages 直接给每个 SKU 配图。
+    sku_keys: [(sku_asin, color_or_text), ...]
+    返回 {sku_asin: [imgs...]}，仅包含取到 >= min_required 张图的 SKU。
+    若全部 SKU 都能命中 colorImages，则上层可彻底跳过 SKU 单独 GET 请求。
+    """
+    cache = {}
+    if not color_image_map and not fallback_images:
+        return cache
+    for sku_asin, color_text in sku_keys:
+        if not sku_asin:
+            continue
+        imgs = _pick_images_from_color_map(
+            color_image_map, color_text, sku_asin, max_count=max_count
+        )
+        # 若仅返回 1 张图，且 fallback 主图较多，可叠加补足（保证最少 2 张）
+        if imgs and len(imgs) < int(min_required or 0) and fallback_images:
+            for u in fallback_images:
+                if u and u not in imgs:
+                    imgs.append(u)
+                if len(imgs) >= int(min_required or 0):
+                    break
+        if imgs and len(imgs) >= int(min_required or 0):
+            cache[sku_asin] = imgs[:max_count]
+    return cache
+
+
 def _fetch_page_with_selenium(url, timeout=20, region="美国", ship_zip="30005"):
     """
     使用 Selenium 无头 Chrome 抓取页面 HTML，绕过亚马逊反爬。
     返回页面 HTML 字符串，失败返回 None。
+
+    优化：
+    - page_load_strategy='eager'：DOM 就绪即返回，不等所有图片/JS 加载
+    - 关闭图片/字体/插件等非必要资源，减少加载时间
+    - 美国站预热配送地的等待时间从 ~6.6s 缩短到 ~2s
+    - 通过 readyState 主动等待，而非固定 sleep
     """
     try:
         from selenium import webdriver
@@ -1241,8 +1452,30 @@ def _fetch_page_with_selenium(url, timeout=20, region="美国", ship_zip="30005"
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--disable-notifications")
+        opts.add_argument("--disable-popup-blocking")
+        opts.add_argument("--blink-settings=imagesEnabled=false")
+        opts.add_argument("--disable-images")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         opts.add_experimental_option("useAutomationExtension", False)
+        # eager 模式：domcontentloaded 即返回，省去等待所有资源
+        try:
+            opts.page_load_strategy = "eager"
+        except Exception:
+            pass
+        # 通过 prefs 关闭图片/字体加载，减少 ~50% 页面加载时间
+        try:
+            opts.add_experimental_option("prefs", {
+                "profile.managed_default_content_settings.images": 2,
+                "profile.managed_default_content_settings.stylesheets": 1,
+                "profile.managed_default_content_settings.fonts": 2,
+                "profile.managed_default_content_settings.notifications": 2,
+                "profile.managed_default_content_settings.media_stream": 2,
+            })
+        except Exception:
+            pass
         ua = random.choice(HEADERS_POOL)["User-Agent"]
         opts.add_argument("--user-agent={}".format(ua))
         opts.add_argument("--lang=en-US")
@@ -1265,73 +1498,52 @@ def _fetch_page_with_selenium(url, timeout=20, region="美国", ship_zip="30005"
         else:
             driver = webdriver.Chrome(options=opts)
 
+        def _wait_dom_ready(_drv, max_wait=4.0):
+            deadline = time.time() + float(max_wait)
+            while time.time() < deadline:
+                try:
+                    state = _drv.execute_script("return document.readyState")
+                    if state in ("interactive", "complete"):
+                        return True
+                except Exception:
+                    pass
+                time.sleep(0.15)
+            return False
+
         try:
             driver.set_page_load_timeout(timeout)
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
                 {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"})
-            # 美国地区：先打开美国站并尝试设置配送地为美国，再抓取详情页
+            # 美国地区：通过 cookie 直接注入配送地，避免 UI 点击的固定 sleep
             if str(region or "").strip() == "美国":
                 try:
-                    driver.get("https://www.amazon.com/?language=en_US")
-                    time.sleep(1.5)
+                    zip_str = str(ship_zip or "30005")
+                    # 先打开主页建立 cookie 域，再注入 sp-cdn / 偏好 cookie
                     try:
-                        trigger = driver.find_element(
-                            "css selector", "#nav-global-location-popover-link"
-                        )
-                        trigger.click()
-                        # 等待邮编输入框出现
-                        zip_input = None
-                        for _wi in range(12):
-                            try:
-                                zip_input = driver.find_element(
-                                    "css selector", "#GLUXZipUpdateInput"
-                                )
-                                if zip_input.is_displayed():
-                                    break
-                            except Exception:
-                                pass
-                            time.sleep(0.3)
-                        if zip_input:
-                            zip_input.clear()
-                            zip_input.send_keys(str(ship_zip or "30005"))
-                            time.sleep(0.3)
-                            # 点击 Apply 按钮
-                            try:
-                                _apply = driver.find_element(
-                                    "css selector",
-                                    "#GLUXZipUpdate input[type='submit']",
-                                )
-                                _apply.click()
-                            except Exception:
-                                try:
-                                    driver.find_element(
-                                        "css selector", "#GLUXZipUpdate"
-                                    ).click()
-                                except Exception:
-                                    pass
-                            time.sleep(1.5)
-                            # 点击 Done/Continue/Close 确认按钮
-                            for _dsel in [
-                                "#GLUXConfirmClose",
-                                ".a-popover-footer .a-button-primary",
-                                "[name='glowDoneButton']",
-                                ".a-popover-close",
-                            ]:
-                                try:
-                                    _done = driver.find_element("css selector", _dsel)
-                                    if _done.is_displayed():
-                                        _done.click()
-                                        time.sleep(0.5)
-                                        break
-                                except Exception:
-                                    continue
-                            time.sleep(1.0)
+                        driver.get("https://www.amazon.com/")
+                        _wait_dom_ready(driver, max_wait=2.5)
                     except Exception:
                         pass
+                    for _ck in [
+                        ("i18n-prefs", "USD"),
+                        ("lc-main", "en_US"),
+                        ("sp-cdn", "L5Z:{}".format(zip_str)),
+                    ]:
+                        try:
+                            driver.add_cookie({
+                                "name": _ck[0],
+                                "value": _ck[1],
+                                "domain": ".amazon.com",
+                                "path": "/",
+                            })
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             driver.get(url)
-            time.sleep(3)
+            _wait_dom_ready(driver, max_wait=3.0)
+            # 给 SSR 注水留极短时间，但不再固定 3s
+            time.sleep(0.6)
             html = driver.page_source
             return html
         finally:
@@ -1343,21 +1555,24 @@ def _fetch_page_with_selenium(url, timeout=20, region="美国", ship_zip="30005"
         return None
 
 
-def _fetch_sku_images(session, domain, sku_asin, headers, max_count=5):
+def _fetch_sku_images(session, domain, sku_asin, headers, max_count=5, ctx=None):
     """拉取单个 SKU 页面的主图，失败时返回空列表。"""
     try:
         sku_url = _build_amazon_dp_url(domain, sku_asin, is_us=("amazon.com" in str(domain).lower()))
         # 只发起一次请求，避免 SKU 链路请求量过大触发风控
-        r, _ = _get_with_retry(session, sku_url, max_attempts=1, base_timeout=8)
+        r, _, _ = _get_with_retry(
+            session, sku_url, max_attempts=1, base_timeout=8,
+            domain=domain, ctx=ctx, allow_session_switch=False,
+        )
         if r is None:
             return []
-        sku_soup = BeautifulSoup(r.text, "html.parser")
+        sku_soup = _bs(r.text)
         return _collect_main_images_from_soup(sku_soup, max_count=max_count)
     except Exception:
         return []
 
 
-def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_workers=6, max_count=5):
+def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_workers=6, max_count=5, ctx=None):
     """并发拉取多个 SKU 的图片，返回 {sku_asin: [img_url, ...]} 字典。"""
     results = {}
     if not sku_asins:
@@ -1365,7 +1580,7 @@ def _fetch_all_sku_images_concurrently(session, domain, sku_asins, hdrs, max_wor
     worker_count = _recommend_worker_count(max_workers, len(sku_asins))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_to_asin = {
-            executor.submit(_fetch_sku_images, session, domain, asin, hdrs, max_count): asin
+            executor.submit(_fetch_sku_images, session, domain, asin, hdrs, max_count, ctx): asin
             for asin in sku_asins
         }
         for future in as_completed(future_to_asin):
@@ -1576,30 +1791,21 @@ def fetch_amazon_product(asin, region="美国"):
             return "in stock" in t
 
         # 抓取策略（提速版）：
-        # - 先走 requests/cloudscraper（连接复用 + 低开销）
-        # - 美国地区仅在必要时做一次轻量预热，再请求
-        # - 最后再走 Selenium 保底
+        # - 取 session 池中的"干净"会话作为主请求
+        # - 内置重试中已自动切换 session（命中反爬时换 cookie 集而非反复污染同一会话）
+        # - 仍失败时走第二条新建会话路径（cloudscraper 优先）
+        # - 最后才走 Selenium 保底（开销最高）
         page_html = None
         hdrs = None
-        # 第1层：cloudscraper（内置 JS 挑战绕过）；不可用则退回 requests.Session
-        with _SESSION_LOCK:
-            session_key = (domain, threading.get_ident())
-            sess = _SESSION_CACHE.get(session_key)
-            if sess is None:
-                if _CLOUDSCRAPER_OK:
-                    sess = cloudscraper.create_scraper(
-                        browser={"browser": "chrome", "platform": "windows", "mobile": False},
-                        delay=0,
-                    )
-                else:
-                    sess = requests.Session()
-                _SESSION_CACHE[session_key] = sess
+        sess = _get_session(domain, prefer_index=0)
         # 美国区首次请求即做地址预热（POST 设邮编），确保价格按 US 区域返回
         _prepare_amazon_session(sess, domain, ctx, warmup=ctx["is_us"])
 
         if not page_html:
-            # 主页面请求：cloudscraper/requests 带重试
-            r, hdrs_req = _get_with_retry(sess, url, max_attempts=4, base_timeout=12)
+            r, hdrs_req, sess = _get_with_retry(
+                sess, url, max_attempts=4, base_timeout=12,
+                domain=domain, ctx=ctx,
+            )
             if r is not None and r.status_code in (200, 301, 302) and not _is_blocked(r.status_code, r.text):
                 final_url = str(getattr(r, "url", "") or url)
                 final_domain = _extract_domain_from_url(final_url)
@@ -1610,16 +1816,19 @@ def fetch_amazon_product(asin, region="美国"):
                     res["final_url"] = final_url
                     res["final_domain"] = final_domain
                     res["fetch_channel"] = "requests_retry"
-            # 第2层：cloudscraper 直接单次请求（不经过重试，换新 scraper 实例）
-            if (not page_html) and _CLOUDSCRAPER_OK:
+
+            # 第2层：直接新建一条全新会话再试一次（覆盖 cloudscraper 与纯 requests 两种情况）
+            if not page_html:
                 try:
-                    _scraper2 = cloudscraper.create_scraper(
-                        browser={"browser": "firefox", "platform": "windows", "mobile": False},
-                    )
-                    _prepare_amazon_session(_scraper2, domain, ctx, warmup=False)
+                    _alt = _build_session()
+                    _prepare_amazon_session(_alt, domain, ctx, warmup=ctx["is_us"])
                     _hdrs2 = random.choice(HEADERS_POOL).copy()
-                    _r2 = _scraper2.get(url, headers=_hdrs2, timeout=10)
-                    if not _is_blocked(_r2.status_code, _r2.text):
+                    _hdrs2["Referer"] = "https://{}/".format(domain)
+                    _wait_request_slot()
+                    _r2 = _alt.get(url, headers=_hdrs2, timeout=(5, 12), proxies=_get_proxy())
+                    blocked2 = _is_blocked(_r2.status_code, _r2.text)
+                    _record_request_feedback(blocked=blocked2)
+                    if not blocked2 and _r2.status_code in (200, 301, 302):
                         final_url2 = str(getattr(_r2, "url", "") or url)
                         final_domain2 = _extract_domain_from_url(final_url2)
                         if (not ctx["is_us"]) or final_domain2.endswith("amazon.com"):
@@ -1627,24 +1836,15 @@ def fetch_amazon_product(asin, region="美国"):
                             hdrs = _hdrs2
                             res["final_url"] = final_url2
                             res["final_domain"] = final_domain2
-                            res["fetch_channel"] = "cloudscraper_single"
-                except Exception:
-                    pass
-
-            # 第3层（仅美国）：做一次轻量预热后再请求，避免无条件 Selenium
-            if (not page_html) and ctx["is_us"]:
-                try:
-                    _prepare_amazon_session(sess, domain, ctx, warmup=True)
-                    r3, hdrs3 = _get_with_retry(sess, url, max_attempts=2, base_timeout=12)
-                    if r3 is not None and r3.status_code in (200, 301, 302) and not _is_blocked(r3.status_code, r3.text):
-                        final_url3 = str(getattr(r3, "url", "") or url)
-                        final_domain3 = _extract_domain_from_url(final_url3)
-                        if final_domain3.endswith("amazon.com"):
-                            page_html = r3.text
-                            hdrs = hdrs3
-                            res["final_url"] = final_url3
-                            res["final_domain"] = final_domain3
-                            res["fetch_channel"] = "requests_us_warmup"
+                            res["fetch_channel"] = "fresh_session"
+                            # 把这个新会话推到池中复用
+                            with _SESSION_LOCK:
+                                pool = _SESSION_CACHE.setdefault(
+                                    (domain, threading.get_ident()), []
+                                )
+                                if _alt not in pool and len(pool) < _MAX_SESSIONS_PER_THREAD:
+                                    pool.append(_alt)
+                            sess = _alt
                 except Exception:
                     pass
 
@@ -1676,7 +1876,7 @@ def fetch_amazon_product(asin, region="美国"):
         zip_code_txt = str(ctx.get("ship_zip", "") or "").strip()
         if (not res.get("zip_applied_hint")) and zip_code_txt and (zip_code_txt in page_html):
             res["zip_applied_hint"] = True
-        s = BeautifulSoup(page_html, "html.parser")
+        s = _bs(page_html)
 
         t = s.select_one("#productTitle")
         if t:
@@ -1782,7 +1982,10 @@ def fetch_amazon_product(asin, region="美国"):
                     )
                     setattr(sess, _ck, False)
                     _prepare_amazon_session(sess, domain, ctx, warmup=True)
-                _rr, _ = _get_with_retry(sess, url, max_attempts=2, base_timeout=12)
+                _rr, _, sess = _get_with_retry(
+                    sess, url, max_attempts=2, base_timeout=12,
+                    domain=domain, ctx=ctx,
+                )
                 if _rr and not _is_blocked(_rr.status_code, _rr.text):
                     _retry_html = _rr.text
             except Exception:
@@ -1796,7 +1999,7 @@ def fetch_amazon_product(asin, region="美国"):
                 except Exception:
                     pass
             if _retry_html:
-                _rs = BeautifulSoup(_retry_html, "html.parser")
+                _rs = _bs(_retry_html)
                 _rp = _extract_price_usd(_rs, _retry_html)
                 if _rp is not None:
                     price_value = _rp
@@ -1996,9 +2199,22 @@ def fetch_amazon_product(asin, region="美国"):
             image_limit = _get_sku_image_limit(len(unique_color_asins))
             # 路径 A：HTML 解析到 color ASIN 列表，直接使用
             sku_asin_list = [a for a, _ in _color_asins_from_html if a and a != asin]
-            sku_image_cache = _fetch_all_sku_images_concurrently(
-                sess, domain, sku_asin_list, hdrs, max_workers=2, max_count=image_limit
+            # 优先从 colorImages 命中：完全命中可彻底跳过额外 HTTP 请求
+            prefilled = _prefill_sku_images_from_color_map(
+                color_image_map,
+                [(a, c) for a, c in _color_asins_from_html if a and a != asin],
+                fallback_images, max_count=image_limit, min_required=2,
             )
+            need_fetch = [a for a in sku_asin_list if a not in prefilled]
+            sku_image_cache = dict(prefilled)
+            if need_fetch:
+                fetched = _fetch_all_sku_images_concurrently(
+                    sess, domain, need_fetch, hdrs,
+                    max_workers=3, max_count=image_limit, ctx=ctx,
+                )
+                for k, v in fetched.items():
+                    if v:
+                        sku_image_cache[k] = v
             sku_image_cache[asin] = fallback_images[:image_limit]
 
             used_colors = set()
@@ -2084,9 +2300,22 @@ def fetch_amazon_product(asin, region="美国"):
             image_limit = _get_sku_image_limit(len(candidate_entries))
             sku_asin_list = [sku_asin for _, sku_asin, _ in candidate_entries if sku_asin != asin]
 
-            sku_image_cache = _fetch_all_sku_images_concurrently(
-                sess, domain, sku_asin_list, hdrs, max_workers=2, max_count=image_limit
+            # 优先从 colorImages 命中：完全命中则跳过额外 HTTP 请求
+            prefilled = _prefill_sku_images_from_color_map(
+                color_image_map,
+                [(s_a, dim_key) for dim_key, s_a, _ in candidate_entries if s_a and s_a != asin],
+                fallback_images, max_count=image_limit, min_required=2,
             )
+            need_fetch = [a for a in sku_asin_list if a not in prefilled]
+            sku_image_cache = dict(prefilled)
+            if need_fetch:
+                fetched = _fetch_all_sku_images_concurrently(
+                    sess, domain, need_fetch, hdrs,
+                    max_workers=3, max_count=image_limit, ctx=ctx,
+                )
+                for k, v in fetched.items():
+                    if v:
+                        sku_image_cache[k] = v
             sku_image_cache[asin] = fallback_images[:image_limit]
 
             for idx, (dim_key, sku_asin, basis) in enumerate(candidate_entries):
@@ -2123,9 +2352,24 @@ def fetch_amazon_product(asin, region="美国"):
                         return res
                     image_limit = _get_sku_image_limit(len(tw_asins))
                     sku_asin_list = [a for a in tw_asins if a != asin]
-                    sku_image_cache = _fetch_all_sku_images_concurrently(
-                        sess, domain, sku_asin_list, hdrs, max_workers=2, max_count=image_limit
+
+                    prefilled = _prefill_sku_images_from_color_map(
+                        color_image_map,
+                        [(a, (tw_map.get(a) or {}).get("color", "")
+                          or (tw_map.get(a) or {}).get("colour", ""))
+                         for a in sku_asin_list],
+                        fallback_images, max_count=image_limit, min_required=2,
                     )
+                    need_fetch = [a for a in sku_asin_list if a not in prefilled]
+                    sku_image_cache = dict(prefilled)
+                    if need_fetch:
+                        fetched = _fetch_all_sku_images_concurrently(
+                            sess, domain, need_fetch, hdrs,
+                            max_workers=3, max_count=image_limit, ctx=ctx,
+                        )
+                        for k, v in fetched.items():
+                            if v:
+                                sku_image_cache[k] = v
                     sku_image_cache[asin] = fallback_images[:image_limit]
 
                     for sku_asin in tw_asins:
