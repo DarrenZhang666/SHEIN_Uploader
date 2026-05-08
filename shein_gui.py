@@ -761,6 +761,8 @@ class SheinApp(tk.Tk):
             font=("Segoe UI", 10),
             cursor="hand2",
         ).pack(side="left")
+        self._stop_btn = self._btn(bf,"停止","#dc2626",self._stop_publish_action)
+        self._stop_btn.pack(side="left",padx=5)
         self._import_btn = self._btn(bf,"导入 ASIN 文本",ACCENT,self._import_txt)
         self._import_btn.pack(side="left",padx=5)
         self._fetch_btn = self._btn(bf,"抓取选中商品","#2563eb",self._fetch_sel)
@@ -768,9 +770,7 @@ class SheinApp(tk.Tk):
         self._publish_btn = self._btn(bf,"开始上品","#7c3aed",self._open_publish_page)
         self._publish_btn.pack(side="left",padx=5)
         self._suggest_price_btn = self._btn(bf,"抓取SHEIN建议价格","#0ea5a4",self._fetch_shein_suggest_price)
-        
-        self._stop_btn = self._btn(bf,"停止","#dc2626",self._stop_publish_action)
-        self._stop_btn.pack(side="left",padx=5)
+
         self._shein_login_btn = self._btn(bf,"登录 SHEIN","#059669",self._open_shein)
         self._shein_login_btn.pack(side="left",padx=5)
         acct_frame=tk.Frame(bf,bg=BG_PANEL)
@@ -821,10 +821,11 @@ class SheinApp(tk.Tk):
             self._mode_collect_btn.config(bg=ACCENT, fg="white")
             self._mode_bargain_btn.config(bg=BG_CARD, fg=TEXT_MAIN)
 
-            if hasattr(self, "_fw_frame") and hasattr(self, "_import_btn"):
-                self._fw_frame.pack(side="left", padx=(0,10), pady=(0,2), anchor="n", before=self._import_btn)
-            elif hasattr(self, "_fw_frame"):
-                self._fw_frame.pack(side="left", padx=(0,10), pady=(0,2), anchor="n")
+            if hasattr(self, "_fw_frame"):
+                if hasattr(self, "_shein_login_btn"):
+                    self._fw_frame.pack(side="left", padx=(0,10), pady=(0,2), anchor="n", before=self._shein_login_btn)
+                else:
+                    self._fw_frame.pack(side="left", padx=(0,10), pady=(0,2), anchor="n")
 
             if hasattr(self, "_pm_group"):
                 if hasattr(self, "_fw_frame"):
@@ -835,6 +836,8 @@ class SheinApp(tk.Tk):
             if hasattr(self, "_suggest_price_btn"):
                 self._suggest_price_btn.pack_forget()
 
+            if hasattr(self, "_stop_btn"):
+                self._stop_btn.pack(side="left", padx=5, before=self._shein_login_btn)
             if hasattr(self, "_import_btn"):
                 self._import_btn.pack(side="left", padx=5, before=self._shein_login_btn)
             if hasattr(self, "_fetch_btn"):
