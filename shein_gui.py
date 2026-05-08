@@ -733,17 +733,19 @@ class SheinApp(tk.Tk):
         )
         self._mode_bargain_btn.pack(side="left")
         bf=tk.Frame(bar,bg=BG_PANEL); bf.pack(side="right",padx=20,pady=10)
-        # 售价倍数输入框（在最后添加，寄弹出效果为最左侧）
-        pm_frame=tk.Frame(bf,bg=BG_PANEL)
-        pm_frame.pack(side="left",padx=(0,10))
+        # 售价倍数 + 单一SKU 组合栏（单一SKU位于售价倍数下方）
+        pm_group = tk.Frame(bf, bg=BG_PANEL)
+        pm_group.pack(side="left", padx=(0,10), pady=(0,2), anchor="n")
+        pm_frame=tk.Frame(pm_group,bg=BG_PANEL)
+        pm_frame.pack(anchor="w")
         tk.Label(pm_frame,text="售价倍数:",font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         tk.Entry(pm_frame,textvariable=self.price_multiplier,width=4,font=("Segoe UI",10),bg=BG_CARD,fg=TEXT_MAIN,insertbackground=TEXT_MAIN,relief="flat",bd=2).pack(side="left",padx=(4,0))
         fw_frame=tk.Frame(bf,bg=BG_PANEL)
-        fw_frame.pack(side="left",padx=(0,10))
+        fw_frame.pack(side="left", padx=(0,10), pady=(0,2), anchor="n")
         tk.Label(fw_frame,text="运行线程:",font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         tk.Entry(fw_frame,textvariable=self.fetch_workers,width=4,font=("Segoe UI",10),bg=BG_CARD,fg=TEXT_MAIN,insertbackground=TEXT_MAIN,relief="flat",bd=2).pack(side="left",padx=(4,0))
-        single_sku_frame = tk.Frame(bf, bg=BG_PANEL)
-        single_sku_frame.pack(side="left", padx=(0, 10))
+        single_sku_frame = tk.Frame(pm_group, bg=BG_PANEL)
+        single_sku_frame.pack(anchor="w", pady=(2, 0))
         tk.Checkbutton(
             single_sku_frame,
             text="单一SKU",
