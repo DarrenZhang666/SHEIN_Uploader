@@ -1763,7 +1763,7 @@ def _build_intro_from_title(title):
     return "{} with practical details for everyday comfort and easy styling.".format(short_title)
 
 
-def fetch_amazon_product(asin, region="美国"):
+def fetch_amazon_product(asin, region="美国", single_sku_only=False):
     ctx = _region_context(region)
     domain = ctx["domain"]
     url = _build_amazon_dp_url(domain, asin, is_us=ctx["is_us"])
@@ -1778,6 +1778,7 @@ def fetch_amazon_product(asin, region="美国"):
     res["final_domain"] = _extract_domain_from_url(url)
     res["fetch_channel"] = ""
     res["zip_applied_hint"] = False
+    res["_single_sku_only"] = bool(single_sku_only)
     try:
         def _is_low_stock_message(_text):
             t = str(_text or "").strip().lower()
@@ -2182,7 +2183,9 @@ def fetch_amazon_product(asin, region="美国"):
             return res
 
         # SKU 过多时跳过 SKU 明细抓取，仅保留主信息
-        max_sku_fetch = 10
+        # 单一SKU模式下：仅抓取并保留 1 个 SKU。
+        single_sku_mode = bool(single_sku_only)
+        max_sku_fetch = 1 if single_sku_mode else 10
         def _mark_sku_too_many(count):
             res["sku_too_many"] = True
             res["sku_count"] = int(count or 0)
@@ -2194,8 +2197,11 @@ def fetch_amazon_product(asin, region="美国"):
         if _color_only_mode and _color_asins_from_html:
             unique_color_asins = {str(a).strip() for a, _ in _color_asins_from_html if str(a or "").strip()}
             if len(unique_color_asins) > max_sku_fetch:
-                _mark_sku_too_many(len(unique_color_asins))
-                return res
+                if single_sku_mode:
+                    _color_asins_from_html = _color_asins_from_html[:max_sku_fetch]
+                else:
+                    _mark_sku_too_many(len(unique_color_asins))
+                    return res
             image_limit = _get_sku_image_limit(len(unique_color_asins))
             # 路径 A：HTML 解析到 color ASIN 列表，直接使用
             sku_asin_list = [a for a, _ in _color_asins_from_html if a and a != asin]
@@ -2285,8 +2291,11 @@ def fetch_amazon_product(asin, region="美国"):
                     sku_seen.add(sku_asin)
                     candidate_entries.append((dim_key, sku_asin, basis))
             if len(candidate_entries) > max_sku_fetch:
-                _mark_sku_too_many(len(candidate_entries))
-                return res
+                if single_sku_mode:
+                    candidate_entries = candidate_entries[:max_sku_fetch]
+                else:
+                    _mark_sku_too_many(len(candidate_entries))
+                    return res
 
             # style 依据时，仅保留前 3 个 SKU 并在后续将规格重写为 A/B/C
             style_mode = any(_basis_has_style(_basis) for _, _, _basis in candidate_entries)
@@ -2348,8 +2357,11 @@ def fetch_amazon_product(asin, region="美国"):
                 if isinstance(tw_map, dict) and tw_map:
                     tw_asins = [a for a in tw_map.keys() if str(a).strip()]
                     if len(tw_asins) > max_sku_fetch:
-                        _mark_sku_too_many(len(tw_asins))
-                        return res
+                        if single_sku_mode:
+                            tw_asins = tw_asins[:max_sku_fetch]
+                        else:
+                            _mark_sku_too_many(len(tw_asins))
+                            return res
                     image_limit = _get_sku_image_limit(len(tw_asins))
                     sku_asin_list = [a for a in tw_asins if a != asin]
 
@@ -2438,6 +2450,9 @@ def fetch_amazon_product(asin, region="美国"):
                 })
             else:
                 res["no_suitable_sku"] = True
+
+        if single_sku_mode and len(sku_list) > 1:
+            sku_list = sku_list[:1]
 
         res["sku_list"] = sku_list
     except Exception as e:

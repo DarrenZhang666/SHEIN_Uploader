@@ -11,6 +11,7 @@ import requests
 from shein_login import SheinLoginManager
 from shein_asin import HEADERS_POOL
 from shein_developer_mode import is_dev_mode
+from shein_supplier_codec import build_supplier_no_from_asin
 try:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
@@ -985,7 +986,7 @@ class SheinPublisher:
                             continue
                 except Exception as e:
                     self.log("[DEBUG] 填写品牌失败: {}".format(str(e)[:40]))
-            # 5. 填写货号（XYZ-{ASIN}）
+            # 5. 填写货号（XYZ-16位字母数字码）
             self.log("[DEBUG] 填写货号...")
             self._wait_until(
                 lambda: bool(self.driver.find_elements(By.XPATH, "//span[normalize-space(text())='货号']"))
@@ -996,7 +997,7 @@ class SheinPublisher:
             )
             asin = product_info.get("asin", "")
             if asin:
-                model_number = "XYZ-{}".format(asin)
+                model_number = build_supplier_no_from_asin(asin) or "XYZ-{}".format(str(asin).strip().upper())
                 filled = False
                 try:
                     # 方法1：查找"货号" span 的同级或相邻 input

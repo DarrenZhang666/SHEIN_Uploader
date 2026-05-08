@@ -177,6 +177,7 @@ class SheinApp(tk.Tk):
         self.price_multiplier=tk.StringVar(value="5")
         self.fetch_workers=tk.StringVar(value="3")
         self.amazon_region=tk.StringVar(value="美国")
+        self.single_sku_mode=tk.BooleanVar(value=False)
         self.shein_account=tk.StringVar(value="")
         self.current_view_mode = "collect_publis1h"  # collect_publish / bargain
         self._fetch_thread=None; self._photo_ref=None
@@ -741,6 +742,22 @@ class SheinApp(tk.Tk):
         fw_frame.pack(side="left",padx=(0,10))
         tk.Label(fw_frame,text="运行线程:",font=("Segoe UI",10),fg=TEXT_MAIN,bg=BG_PANEL).pack(side="left")
         tk.Entry(fw_frame,textvariable=self.fetch_workers,width=4,font=("Segoe UI",10),bg=BG_CARD,fg=TEXT_MAIN,insertbackground=TEXT_MAIN,relief="flat",bd=2).pack(side="left",padx=(4,0))
+        single_sku_frame = tk.Frame(bf, bg=BG_PANEL)
+        single_sku_frame.pack(side="left", padx=(0, 10))
+        tk.Checkbutton(
+            single_sku_frame,
+            text="单一SKU",
+            variable=self.single_sku_mode,
+            onvalue=True,
+            offvalue=False,
+            bg=BG_PANEL,
+            fg=TEXT_MAIN,
+            selectcolor=BG_CARD,
+            activebackground=BG_PANEL,
+            activeforeground=ACCENT2,
+            font=("Segoe UI", 10),
+            cursor="hand2",
+        ).pack(side="left")
         self._import_btn = self._btn(bf,"导入 ASIN 文本",ACCENT,self._import_txt)
         self._import_btn.pack(side="left",padx=5)
         self._fetch_btn = self._btn(bf,"抓取选中商品","#2563eb",self._fetch_sel)
@@ -4447,6 +4464,9 @@ return false;
                     mult = 3.0
                 import copy as _copy
                 product_info_pub = _copy.copy(product_info)
+                if bool(self.single_sku_mode.get()):
+                    sku_list_raw = list(product_info_pub.get("sku_list", []) or [])
+                    product_info_pub["sku_list"] = sku_list_raw[:1] if sku_list_raw else []
                 price_raw = product_info_pub.get("price", "N/A")
                 import re as _re
                 if price_raw and price_raw != "N/A":
@@ -4789,7 +4809,11 @@ return false;
             try:
                 last_info = None
                 for _try in range(3):
-                    info = fetch_amazon_product(asin, region=region)
+                    info = fetch_amazon_product(
+                        asin,
+                        region=region,
+                        single_sku_only=bool(self.single_sku_mode.get()),
+                    )
                     if isinstance(info, dict):
                         info["_fetch_region"] = region
                     title = str((info or {}).get("title", "") or "")
