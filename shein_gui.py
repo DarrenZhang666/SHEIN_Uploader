@@ -1007,7 +1007,7 @@ class SheinApp(tk.Tk):
                     self._pub_log("[BARGAIN][恢复-2] 议价专用profile仍异常，切换主账号profile重试")
                     try:
                         if pub is not None and getattr(pub, "driver", None) is not None:
-                            pub.driver.quit()
+                            pub.quit()
                     except Exception:
                         pass
                     run_pub = SheinPublisher(log_cb=_progress_log)
@@ -3859,7 +3859,7 @@ return false;
             self._pub_log("[DEV] 开发者模式：保留登录窗口")
         else:
             try:
-                pub.driver.quit()
+                pub.quit()
                 if self._shein_publisher is pub:
                     self._shein_publisher = None
                 self._pub_log("[OK] 登录窗口已关闭（会话已保留）")
@@ -4009,7 +4009,7 @@ return false;
                             old_headless, run_headless))
                         try:
                             if getattr(self._shein_publisher, "driver", None):
-                                self._shein_publisher.driver.quit()
+                                self._shein_publisher.quit()
                         except Exception:
                             pass
                         self._shein_publisher = None
@@ -4020,7 +4020,7 @@ return false;
                 if dev_mode and self._is_publisher_reusable(self._shein_publisher):
                     self._pub_log("[DEV] 开始上品：重建可视浏览器以便观察全过程")
                     try:
-                        self._shein_publisher.driver.quit()
+                        self._shein_publisher.quit()
                     except Exception:
                         pass
                     self._shein_publisher = None
@@ -4096,7 +4096,7 @@ return false;
                         break
                     try:
                         if getattr(pub, "driver", None):
-                            pub.driver.quit()
+                            pub.quit()
                     except Exception:
                         pass
                     self._shein_publisher = None
@@ -4214,7 +4214,7 @@ return false;
                     )
                     try:
                         if old_pub and getattr(old_pub, "driver", None):
-                            old_pub.driver.quit()
+                            old_pub.quit()
                     except Exception:
                         pass
                     self._shein_publisher = None
@@ -4258,7 +4258,7 @@ return false;
                         self._pub_log("[WARN] 重开后未进入商品发布页（第{}/3次），继续重开".format(reopen_try))
                         try:
                             if getattr(pub, "driver", None):
-                                pub.driver.quit()
+                                pub.quit()
                         except Exception:
                             pass
                         self._shein_publisher = None
@@ -5568,7 +5568,7 @@ return false;
                 self._pub_log("[DEV] 检测到主实例为无界面模式，重建可视浏览器")
                 try:
                     if getattr(reusable_main_pub, "driver", None):
-                        reusable_main_pub.driver.quit()
+                        reusable_main_pub.quit()
                 except Exception:
                     pass
                 if self._shein_publisher is reusable_main_pub:
@@ -5798,7 +5798,7 @@ return false;
                     old_pub = pub
                     try:
                         if old_pub and getattr(old_pub, "driver", None):
-                            old_pub.driver.quit()
+                            old_pub.quit()
                     except Exception:
                         pass
                     if use_main_pub:
@@ -6043,7 +6043,7 @@ return false;
                                     if hasattr(pub, "request_stop"):
                                         pub.request_stop(force_quit=True)
                                     else:
-                                        pub.driver.quit()
+                                        pub.quit()
                                 except Exception:
                                     pass
                                 self._pub_log('[W{}] [STOP] 已关闭浏览器与driver'.format(worker_idx))
@@ -6053,7 +6053,7 @@ return false;
                             if use_main_pub:
                                 self._pub_log('[W{}] [POOL] 主浏览器线程完成，保留主实例供后续复用'.format(worker_idx))
                             else:
-                                pub.driver.quit()
+                                pub.quit()
                 except Exception:
                     pass
                 finally:

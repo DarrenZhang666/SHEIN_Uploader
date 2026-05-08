@@ -387,7 +387,9 @@ class SheinPublisher:
         try:
             try:
                 if self.driver:
-                    self.driver.quit()
+                    self.login_manager.driver = self.driver
+                    self.login_manager.wait = self.wait
+                    self.login_manager.quit()
             except Exception:
                 pass
             self.driver = None
@@ -7108,8 +7110,9 @@ class SheinPublisher:
 
     def quit(self):
         try:
-            if self.driver:
-                self.driver.quit()
+            self.login_manager.driver = self.driver
+            self.login_manager.wait = self.wait
+            self.login_manager.quit()
         except Exception:
             pass
         finally:
@@ -7127,8 +7130,9 @@ class SheinPublisher:
         if not force_quit:
             return
         try:
-            if self.driver:
-                self.driver.quit()
+            self.login_manager.driver = self.driver
+            self.login_manager.wait = self.wait
+            self.login_manager.quit()
         except Exception:
             pass
         finally:
@@ -7800,7 +7804,9 @@ class SheinPublisher:
                 self.log("[Step2] 触发容错重开: {}".format(reason_text or "unknown"))
                 try:
                     if self.driver:
-                        self.driver.quit()
+                        self.login_manager.driver = self.driver
+                        self.login_manager.wait = self.wait
+                        self.login_manager.quit()
                 except Exception:
                     pass
                 self.driver = None

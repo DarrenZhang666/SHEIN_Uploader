@@ -7,6 +7,8 @@ import os
 import time
 import threading
 import shutil
+import tempfile
+import re
 try:
     import winreg
 except Exception:
@@ -43,6 +45,9 @@ class SheinLoginManager:
         self.driver = None
         self.wait   = None
         self.log    = log_cb or print
+        self._current_profile_dir = ""
+        self._current_profile_ephemeral = False
+        self._profile_cleanup_started = False
 
     def _disable_ie_esc_notice(self):
         """禁用 IE 增强安全提示，避免登录后弹窗阻塞。"""
@@ -199,8 +204,81 @@ class SheinLoginManager:
         return 9300 + (h % 200)
 
     def _safe_profile_name(self, account=""):
-        import re as _re
-        return _re.sub(r'[^\w\-.]', '_', account) if account else "default"
+        return re.sub(r'[^\w\-.]', '_', account) if account else "default"
+
+    def _profile_root_dir(self):
+        return os.path.join(os.path.expanduser("~"), ".shein_profiles")
+
+    def _runtime_profile_root_dir(self):
+        # worker/议价实例使用临时目录，避免长期堆积到用户目录。
+        return os.path.join(tempfile.gettempdir(), "shein_profiles_runtime")
+
+    def _is_ephemeral_account(self, account=""):
+        name = self._safe_profile_name(account or "").lower()
+        return ("__w" in name) or ("__bargain" in name)
+
+    def _iter_subdirs(self, root_dir):
+        if not os.path.isdir(root_dir):
+            return
+        try:
+            for entry in os.scandir(root_dir):
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        yield entry.path, entry.name
+                except Exception:
+                    continue
+        except Exception:
+            return
+
+    def _cleanup_runtime_profiles(self, root_dir, keep_hours=8):
+        now = time.time()
+        keep_seconds = max(1, int(keep_hours * 3600))
+        for p, _name in self._iter_subdirs(root_dir):
+            try:
+                st = os.stat(p)
+                mtime = float(getattr(st, "st_mtime", 0.0) or 0.0)
+                if now - mtime < keep_seconds:
+                    continue
+                shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                continue
+
+    def _cleanup_legacy_worker_profiles(self, root_dir, keep_hours=24):
+        now = time.time()
+        keep_seconds = max(1, int(keep_hours * 3600))
+        for p, name in self._iter_subdirs(root_dir):
+            low = str(name or "").lower()
+            if ("__w" not in low) and ("__bargain" not in low):
+                continue
+            try:
+                st = os.stat(p)
+                mtime = float(getattr(st, "st_mtime", 0.0) or 0.0)
+                if now - mtime < keep_seconds:
+                    continue
+                shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                continue
+
+    def _start_profile_cleanup_async_once(self):
+        if self._profile_cleanup_started:
+            return
+        self._profile_cleanup_started = True
+
+        def _run_cleanup():
+            try:
+                os.makedirs(self._profile_root_dir(), exist_ok=True)
+            except Exception:
+                pass
+            try:
+                os.makedirs(self._runtime_profile_root_dir(), exist_ok=True)
+            except Exception:
+                pass
+            # 清理历史遗留大目录（旧版本 worker/议价 profile）
+            self._cleanup_legacy_worker_profiles(self._profile_root_dir(), keep_hours=24)
+            # 清理临时运行目录中过期 profile
+            self._cleanup_runtime_profiles(self._runtime_profile_root_dir(), keep_hours=8)
+
+        threading.Thread(target=_run_cleanup, daemon=True).start()
 
     def _clone_profile_best_effort(self, src_profile, dst_profile):
         """
@@ -256,7 +334,7 @@ class SheinLoginManager:
         except Exception:
             try:
                 if self.driver:
-                    self.driver.quit()
+                    self.quit()
             except Exception:
                 pass
             self.driver = None
@@ -264,6 +342,7 @@ class SheinLoginManager:
 
         _port = self._get_debug_port(account)
         self.log("[DEBUG] 账号='{}' 调试端口={}".format(account or "(默认)", _port))
+        self._start_profile_cleanup_async_once()
 
         # 先快速检测端口是否有浏览器在监听（<0.3s）
         _port_open = False
@@ -300,16 +379,26 @@ class SheinLoginManager:
                 pass
             self.log("[DEBUG] 端口{}有响应但连接失败，启动新浏览器".format(_port))
 
-        # 启动新浏览器 — 每个账号独立的 profile 目录
+        # 启动新浏览器 — 主账号使用持久 profile；worker/议价账号使用临时 profile
         _safe_name = self._safe_profile_name(account)
-        _profile = os.path.join(
-            os.path.expanduser("~"), ".shein_profiles", _safe_name)
+        _profile_root = self._profile_root_dir()
+        _ephemeral_profile = self._is_ephemeral_account(account)
+        try:
+            os.makedirs(_profile_root, exist_ok=True)
+        except Exception:
+            pass
+        if _ephemeral_profile:
+            _runtime_root = self._runtime_profile_root_dir()
+            os.makedirs(_runtime_root, exist_ok=True)
+            _profile = tempfile.mkdtemp(prefix="{}__".format(_safe_name), dir=_runtime_root)
+        else:
+            _profile = os.path.join(_profile_root, _safe_name)
         _profile_exists = os.path.isdir(_profile)
         _profile_empty = (not _profile_exists) or (len(os.listdir(_profile)) == 0 if _profile_exists else True)
 
         if clone_from_account and clone_from_account != account and _profile_empty:
             _clone_name = self._safe_profile_name(clone_from_account)
-            _src_profile = os.path.join(os.path.expanduser("~"), ".shein_profiles", _clone_name)
+            _src_profile = os.path.join(_profile_root, _clone_name)
             if os.path.isdir(_src_profile):
                 try:
                     os.makedirs(_profile, exist_ok=True)
@@ -322,6 +411,8 @@ class SheinLoginManager:
                 os.makedirs(_profile, exist_ok=True)
         else:
             os.makedirs(_profile, exist_ok=True)
+        self._current_profile_dir = _profile
+        self._current_profile_ephemeral = bool(_ephemeral_profile)
         self.log("[DEBUG] 启动新浏览器, profile={}".format(_profile))
 
         def _make_opts(opt_class):
@@ -452,3 +543,12 @@ class SheinLoginManager:
         finally:
             self.driver = None
             self.wait = None
+            # 临时 profile 目录在实例结束后立即清理，避免磁盘持续膨胀
+            try:
+                if self._current_profile_ephemeral and self._current_profile_dir:
+                    shutil.rmtree(self._current_profile_dir, ignore_errors=True)
+            except Exception:
+                pass
+            finally:
+                self._current_profile_dir = ""
+                self._current_profile_ephemeral = False
