@@ -38,6 +38,7 @@ def _assert_obfuscated_artifacts_ready():
         "shein_sensitive_clean.py",
         "shein_developer_mode.py",
         "shein_updater.py",
+        "shein_supplier_codec.py",
     ]
     missing = []
     if not OBF_DIR.exists():
@@ -203,6 +204,7 @@ EXTRA_HIDDENIMPORTS = sorted(set(
         'shein_sensitive_clean',
         'shein_developer_mode',
         'shein_mysql',
+        'shein_supplier_codec',
         'webdriver_manager',
         'webdriver_manager.chrome',
         'webdriver_manager.microsoft',
