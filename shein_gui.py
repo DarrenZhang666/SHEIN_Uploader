@@ -696,7 +696,8 @@ class SheinApp(tk.Tk):
         self._license_lbl.place(relx=1.0, rely=1.0, anchor="se", x=-16, y=-6)
 
     def _build_topbar(self):
-        bar=tk.Frame(self,bg=BG_PANEL,height=60)
+        # 顶栏包含两行控件（售价倍数 + 单一SKU），适当加高避免文字被裁切
+        bar=tk.Frame(self,bg=BG_PANEL,height=72)
         bar.pack(fill="x"); bar.pack_propagate(False)
         lg=tk.Frame(bar,bg=BG_PANEL); lg.pack(side="left",padx=20)
         tk.Label(lg,text="SHEIN",font=("Segoe UI",18,"bold"),fg=ACCENT,bg=BG_PANEL).pack(side="left")
@@ -732,7 +733,7 @@ class SheinApp(tk.Tk):
             command=lambda: self._switch_view_mode("bargain")
         )
         self._mode_bargain_btn.pack(side="left")
-        bf=tk.Frame(bar,bg=BG_PANEL); bf.pack(side="right",padx=20,pady=10)
+        bf=tk.Frame(bar,bg=BG_PANEL); bf.pack(side="right",padx=20,pady=8)
         # 售价倍数 + 单一SKU 组合栏（单一SKU位于售价倍数下方）
         pm_group = tk.Frame(bf, bg=BG_PANEL)
         pm_group.pack(side="left", padx=(0,10), pady=(0,2), anchor="n")
