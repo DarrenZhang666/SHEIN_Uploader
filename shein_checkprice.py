@@ -5,6 +5,7 @@ import re
 import time
 
 from shein_uploader import SheinPublisher
+from shein_supplier_codec import resolve_asin_from_supplier_no
 
 try:
     from selenium.webdriver.common.by import By
@@ -504,14 +505,10 @@ def _normalize_bargain_row(row_obj):
         if m:
             supplier_no_raw = _trim_text(m.group(1))
     supplier_no_raw = re.sub(r"^(供方货号|货号)\s*[:：]\s*", "", supplier_no_raw)
-    supplier_no = ""
-    m_asin = re.search(r"\b(B[A-Z0-9]{9})\b", str(supplier_no_raw or "").upper())
-    if m_asin:
-        supplier_no = _trim_text(m_asin.group(1))
+    supplier_no = resolve_asin_from_supplier_no(supplier_no_raw)
     if not supplier_no:
-        supplier_no = supplier_no_raw
-        supplier_no = re.sub(r"^XYZ-", "", supplier_no, flags=re.I)
-        supplier_no = _trim_text(supplier_no)
+        # 反解析失败时保留原值，供界面展示与人工排查。
+        supplier_no = _trim_text(re.sub(r"^XYZ-", "", supplier_no_raw, flags=re.I))
 
     reason = _pick_value(row_obj, ["建议改价原因", "改价原因", "建议原因"])
     raw_sku_info = _pick_value(row_obj, ["SKU信息", "SKU", "规格", "颜色/尺码", "颜色尺码"])
@@ -1348,6 +1345,7 @@ def fetch_shein_pending_bargain_rows(
                 continue
             seen.add(k)
             all_rows.append({
+                "supplier_no_raw": r.get("supplier_no_raw", ""),
                 "supplier_no": r.get("supplier_no", ""),
                 "reason": r.get("reason", ""),
                 "sku_info": r.get("sku_info", ""),

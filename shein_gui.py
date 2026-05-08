@@ -34,6 +34,7 @@ except Exception:
     _canonicalize_shein_color = None
     _split_color_candidates = None
     _normalize_color_token = None
+from shein_supplier_codec import build_supplier_no_from_asin, resolve_asin_from_supplier_no
 
 class SheinApp(tk.Tk):
     _FALLBACK_REMOTE_VERSION_URL = "https://sheintool.oss-cn-beijing.aliyuncs.com/.version.json"
@@ -1770,6 +1771,8 @@ class SheinApp(tk.Tk):
         data = list(rows or [])
         for r in data:
             asin = str(r.get("supplier_no", "") or "").strip().upper()
+            if not re.match(r"^B[A-Z0-9]{9}$", asin):
+                asin = resolve_asin_from_supplier_no(r.get("supplier_no_raw", ""))
             if re.match(r"^B[A-Z0-9]{9}$", asin):
                 r["amazon_url"] = "获取中"
                 r["amazon_price"] = "获取中"
@@ -1788,6 +1791,8 @@ class SheinApp(tk.Tk):
         asin_to_row_indices = {}
         for idx, r in enumerate(data):
             asin = str(r.get("supplier_no", "") or "").strip().upper()
+            if not re.match(r"^B[A-Z0-9]{9}$", asin):
+                asin = resolve_asin_from_supplier_no(r.get("supplier_no_raw", ""))
             if re.match(r"^B[A-Z0-9]{9}$", asin):
                 asin_to_row_indices.setdefault(asin, []).append(idx)
             else:
@@ -4981,7 +4986,9 @@ return false;
                 justify="left",
                 wraplength=320
             ).grid(row=0, column=1, sticky="w", padx=(8, 0))
-        row("ASIN: {}  货号: XYZ-{}".format(info.get("asin",""), info.get("asin","")),10,TEXT_SUB)
+        view_asin = str(info.get("asin", "") or "").strip().upper()
+        view_supplier_no = build_supplier_no_from_asin(view_asin) or "XYZ-{}".format(view_asin)
+        row("ASIN: {}  货号: {}".format(info.get("asin", ""), view_supplier_no),10,TEXT_SUB)
         row("品牌: {}".format(info.get("brand","N/A")),10,YELLOW)
         asin = str(info.get("asin", "") or "").strip()
         price_frame = tk.Frame(inf, bg=BG_PANEL)
