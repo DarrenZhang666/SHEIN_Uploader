@@ -14,6 +14,7 @@ import threading
 import argparse
 import os
 import json
+from typing import Optional
 from datetime import datetime
 from contextlib import contextmanager
 
@@ -27,9 +28,9 @@ from pydantic import BaseModel, field_validator
 SECURE_KEY = "ShEiN_2025!@xKz9#Qm7$wPv"  # 客户端与服务端共享密钥，部署时务必修改
 ADMIN_KEY = "ChangeThis_AdminKey_2026"  # 管理端密钥，manager.py 需保持一致
 DELETE_PASSWORD = "qwertyuiop[]"       # 删除记录二次确认密码
-AUDIT_LOG_FILE = os.path.join(os.path.dirname(__file__), "admin_audit.log")
-CHECK_LOG_DIR = os.path.join(os.path.expanduser("~"), "Desktop", "Sever")
-CHECK_LOG_FILE = os.path.join(CHECK_LOG_DIR, "Sever_log.txt")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AUDIT_LOG_FILE = os.path.join(BASE_DIR, "admin_audit.log")
+CHECK_LOG_FILE = os.path.join(BASE_DIR, "sever_log.txt")
 
 DB_CONFIG = {
     "host": "127.0.0.1",
@@ -105,6 +106,7 @@ pool = SimplePool(DB_CONFIG, POOL_SIZE)
 _rate_store: dict[str, list[float]] = {}
 _rate_lock = threading.Lock()
 _check_log_lock = threading.Lock()
+_audit_log_lock = threading.Lock()
 
 def _check_rate(ip: str) -> bool:
     now = time.time()
@@ -115,6 +117,20 @@ def _check_rate(ip: str) -> bool:
             return False
         stamps.append(now)
         return True
+
+
+def _append_text_line(file_path: str, line: str, lock: Optional[threading.Lock] = None) -> None:
+    """线程安全追加一行文本，目录不存在时自动创建。"""
+    target_dir = os.path.dirname(file_path)
+    if target_dir:
+        os.makedirs(target_dir, exist_ok=True)
+    if lock is None:
+        with open(file_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        return
+    with lock:
+        with open(file_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 # ======================== FastAPI ========================
 
@@ -204,8 +220,11 @@ def _write_audit_log(
         "detail": detail[:200],
     }
     try:
-        with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_item, ensure_ascii=False) + "\n")
+        _append_text_line(
+            AUDIT_LOG_FILE,
+            json.dumps(log_item, ensure_ascii=False),
+            _audit_log_lock,
+        )
     except Exception:
         # 审计日志失败不影响主流程
         pass
@@ -231,10 +250,7 @@ def _write_check_request_log(
         result_text,
     )
     try:
-        with _check_log_lock:
-            os.makedirs(CHECK_LOG_DIR, exist_ok=True)
-            with open(CHECK_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+        _append_text_line(CHECK_LOG_FILE, line, _check_log_lock)
     except Exception:
         # 日志写入失败不影响主流程
         pass
