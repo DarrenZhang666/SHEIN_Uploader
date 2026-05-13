@@ -181,7 +181,7 @@ class SheinApp(tk.Tk):
         self.shein_account=tk.StringVar(value="")
         self._minimal_mode_enabled = True
         self._auto_publish_after_fetch = False
-        self.current_view_mode = "collect_publis1h"  # collect_publish / bargain
+        self.current_view_mode = "collect_publish"  # collect_publish / bargain
         self._fetch_thread=None; self._photo_ref=None
         self._launching_browser = False  # 防止重复点击登录按钮
         self._shein_publisher=None   # 持久化浏览器实例
@@ -840,6 +840,31 @@ class SheinApp(tk.Tk):
         self._draw_simplified_toggle()
         self._apply_view_mode()
         self._toggle_main_panels_for_mode()
+        self._apply_minimal_left_controls()
+
+    def _apply_minimal_left_controls(self):
+        """
+        极简模式下隐藏左侧“定位/抓取+输入框”。
+        抓取地区行保持显示并可用（仅在议价模式隐藏）。
+        """
+        in_collect_mode = (self.current_view_mode != "bargain")
+        minimal_on = bool(getattr(self, "_minimal_mode_enabled", True))
+        locate_wrap = getattr(self, "_asin_locate_wrap", None)
+        region_row = getattr(self, "_asin_region_row", None)
+
+        if locate_wrap is not None:
+            if in_collect_mode and (not minimal_on):
+                if not locate_wrap.winfo_manager():
+                    locate_wrap.pack(side="right", padx=(6, 0))
+            else:
+                locate_wrap.pack_forget()
+
+        if region_row is not None:
+            if in_collect_mode:
+                if not region_row.winfo_manager():
+                    region_row.pack(fill="x", padx=12, pady=(2, 4))
+            else:
+                region_row.pack_forget()
 
     def _on_shein_logo_click(self, _event=None):
         ok, enabled, msg = toggle_dev_mode_with_password(self)
@@ -892,6 +917,7 @@ class SheinApp(tk.Tk):
 
             if hasattr(self, "status_lbl"):
                 self.status_lbl.config(text="当前为【议价】界面")
+            self._apply_minimal_left_controls()
         else:
             self._mode_collect_btn.config(bg=ACCENT, fg="white")
             self._mode_bargain_btn.config(bg=BG_CARD, fg=TEXT_MAIN)
@@ -932,6 +958,7 @@ class SheinApp(tk.Tk):
 
             if hasattr(self, "status_lbl"):
                 self.status_lbl.config(text="请先导入 ASIN 文件")
+            self._apply_minimal_left_controls()
 
     def _fetch_shein_suggest_price(self):
         if self._license_locked:
@@ -2240,6 +2267,7 @@ class SheinApp(tk.Tk):
         self.asin_search_var = tk.StringVar(value="")
         locate_wrap = tk.Frame(sr, bg=BG_PANEL)
         locate_wrap.pack(side="right", padx=(6,0))
+        self._asin_locate_wrap = locate_wrap
         asin_search_entry = tk.Entry(
             locate_wrap,
             textvariable=self.asin_search_var,
@@ -2281,6 +2309,7 @@ class SheinApp(tk.Tk):
         asin_search_entry.bind("<Return>", lambda _e: self._locate_asin_from_query())
         # 亚马逊地区选择（仅支持美国）
         rg=tk.Frame(f,bg=BG_PANEL); rg.pack(fill="x",padx=12,pady=(2,4))
+        self._asin_region_row = rg
         tk.Label(rg,text="抓取地区:",font=("Segoe UI",9),fg=TEXT_SUB,bg=BG_PANEL).pack(side="left")
         region_cb=ttk.Combobox(rg,textvariable=self.amazon_region,
             values=["美国","其他国家暂不支持"],
@@ -2301,6 +2330,7 @@ class SheinApp(tk.Tk):
         cv.bind_all("<MouseWheel>", self._on_global_mousewheel, add="+")
         self.acv=cv
         self.after(0, self._sync_left_resize_handle_height)
+        self.after(0, self._apply_minimal_left_controls)
 
     def _start_left_panel_resize(self, event):
         self._left_resize_active = True
