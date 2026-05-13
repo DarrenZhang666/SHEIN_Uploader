@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""供方货号编码/反解析工具：ASIN <-> XYZ-16位字母数字码。"""
+"""供方货号工具：当前上品使用 XYZ-ASIN，兼容历史编码反解析。"""
 
 import hashlib
 import json
@@ -155,14 +155,11 @@ def decode_10digit_to_asin(code):
 
 
 def build_supplier_no_from_asin(asin, prefix=_SUPPLIER_PREFIX):
-    """构建上传到 SHEIN 的供方货号，格式：XYZ-16位字母数字码。"""
+    """构建上传到 SHEIN 的供方货号，格式：XYZ-ASIN。"""
     asin_txt = _normalize_asin(asin)
     if not asin_txt:
         return ""
-    code = encode_asin_to_16code(asin_txt)
-    if code:
-        return "{}-{}".format(prefix, code)
-    # 映射写入失败时兜底，保持可用性
+    # 业务改动：上品阶段不再使用加密码，直接使用 ASIN。
     return "{}-{}".format(prefix, asin_txt)
 
 
