@@ -2155,15 +2155,40 @@ class SheinApp(tk.Tk):
         else:
             if hasattr(self, "bargain_panel"):
                 self.bargain_panel.grid_remove()
-            if hasattr(self, "left_panel"):
-                self.left_panel.grid()
-            # 极简模式默认隐藏商品详情区域，仅保留左侧列表与顶部操作按钮。
-            if bool(getattr(self, "_minimal_mode_enabled", True)):
+            minimal_on = bool(getattr(self, "_minimal_mode_enabled", True))
+            if minimal_on:
+                # 极简模式：主区改单栏，ASIN 列表占满可用宽度，避免右侧留白。
+                if hasattr(self, "_main_body"):
+                    self._main_body.columnconfigure(0, weight=1, minsize=0)
+                    self._main_body.columnconfigure(1, weight=0, minsize=0)
                 if hasattr(self, "right_panel"):
                     self.right_panel.grid_remove()
+                if hasattr(self, "left_panel"):
+                    self.left_panel.grid(
+                        row=0,
+                        column=0,
+                        columnspan=2,
+                        sticky="nsew",
+                        padx=(0,0),
+                        pady=4,
+                    )
             else:
+                # 常规模式：恢复左右双栏布局。
+                if hasattr(self, "_main_body"):
+                    left_w = int(getattr(self, "_left_panel_default_width", 320))
+                    self._main_body.columnconfigure(0, weight=0, minsize=left_w)
+                    self._main_body.columnconfigure(1, weight=1, minsize=0)
+                if hasattr(self, "left_panel"):
+                    self.left_panel.grid(
+                        row=0,
+                        column=0,
+                        columnspan=1,
+                        sticky="nsew",
+                        padx=(0,8),
+                        pady=4,
+                    )
                 if hasattr(self, "right_panel"):
-                    self.right_panel.grid()
+                    self.right_panel.grid(row=0, column=1, sticky="nsew", pady=4)
 
     def _build_left(self,parent):
         left_w = int(getattr(self, "_left_panel_default_width", 320))
