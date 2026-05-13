@@ -180,6 +180,26 @@ def _collect_runtime_binaries():
     return binaries
 
 
+def _collect_folder_datas(folder_name):
+    """
+    递归收集项目内指定目录的全部文件，按相对目录打包到 _internal。
+    例如 dust-off/a.txt -> _internal/dust-off/a.txt
+    """
+    datas = []
+    base = PROJECT_DIR / str(folder_name)
+    if not base.exists() or (not base.is_dir()):
+        print("[SPEC] folder not found, skip: {}".format(base))
+        return datas
+    for f in base.rglob("*"):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(PROJECT_DIR)
+        dst = str(rel.parent).replace("\\", "/")
+        datas.append((str(f), dst if dst != "." else "."))
+    print("[SPEC] bundled folder datas: {} ({} files)".format(base, len(datas)))
+    return datas
+
+
 RUNTIME_BINARIES = _collect_runtime_binaries()
 if RUNTIME_BINARIES:
     print("[SPEC] bundled runtime dlls:")
@@ -224,6 +244,10 @@ EXTRA_HIDDENIMPORTS = sorted(set(
 EXTRA_DATAS = collect_data_files("webdriver_manager", include_py_files=False)
 _assert_obfuscated_artifacts_ready()
 PYARMOR_RUNTIME_DATAS = _collect_pyarmor_runtime_datas()
+EXTRA_FOLDER_DATAS = (
+    _collect_folder_datas("dust-off")
+    + _collect_folder_datas("reverse_check_out")
+)
 VERSION_FILE = PROJECT_DIR / ".version.json"
 if VERSION_FILE.is_file():
     EXTRA_DATAS.append((str(VERSION_FILE), "."))
@@ -236,7 +260,7 @@ a = Analysis(
     [str(_resolve_entry_script())],
     pathex=[str(OBF_DIR), str(PROJECT_DIR)],
     binaries=RUNTIME_BINARIES,
-    datas=DRIVER_DATAS + EXTRA_DATAS + PYARMOR_RUNTIME_DATAS,
+    datas=DRIVER_DATAS + EXTRA_DATAS + PYARMOR_RUNTIME_DATAS + EXTRA_FOLDER_DATAS,
     hiddenimports=EXTRA_HIDDENIMPORTS,
     hookspath=[],
     hooksconfig={},

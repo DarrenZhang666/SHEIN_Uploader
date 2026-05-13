@@ -45,9 +45,7 @@ cd C:\Users\Administrator\Desktop\Shein_Tool\SHEIN_Uploader
 python User_manager/manager.py
 
 打包
-pyarmor gen -O "d:\Work\Project\Python\Shein上品软件\dist_obf" "d:\Work\Project\Python\Shein上品软件\shein_main.py" "d:\Work\Project\Python\Shein上品软件\shein_gui.py" "d:\Work\Project\Python\Shein上品软件\shein_uploader.py" "d:\Work\Project\Python\Shein上品软件\shein_asin.py" "d:\Work\Project\Python\Shein上品软件\shein_checkprice.py" "d:\Work\Project\Python\Shein上品软件\shein_login.py" "d:\Work\Project\Python\Shein上品软件\shein_updater.py" "d:\Work\Project\Python\Shein上品软件\shein_mysql.py" "d:\Work\Project\Python\Shein上品软件\shein_sensitive_clean.py" "d:\Work\Project\Python\Shein上品软件\shein_developer_mode.py"
-或者
-pyarmor gen --obf-code 2 --obf-mod 1 -O "d:\Work\Project\Python\Shein上品软件\dist_obf" "d:\Work\Project\Python\Shein上品软件\shein_main.py" "d:\Work\Project\Python\Shein上品软件\shein_gui.py" "d:\Work\Project\Python\Shein上品软件\shein_uploader.py" "d:\Work\Project\Python\Shein上品软件\shein_asin.py" "d:\Work\Project\Python\Shein上品软件\shein_checkprice.py" "d:\Work\Project\Python\Shein上品软件\shein_login.py" "d:\Work\Project\Python\Shein上品软件\shein_updater.py" "d:\Work\Project\Python\Shein上品软件\shein_mysql.py" "d:\Work\Project\Python\Shein上品软件\shein_sensitive_clean.py" "d:\Work\Project\Python\Shein上品软件\shein_developer_mode.py"
+pyarmor gen --obf-code 2 --obf-mod 1 -O "d:\Work\Project\Python\Shein上品软件\dust-off" "d:\Work\Project\Python\Shein上品软件\shein_main.py" "d:\Work\Project\Python\Shein上品软件\shein_gui.py" "d:\Work\Project\Python\Shein上品软件\shein_uploader.py" "d:\Work\Project\Python\Shein上品软件\shein_asin.py" "d:\Work\Project\Python\Shein上品软件\shein_checkprice.py" "d:\Work\Project\Python\Shein上品软件\shein_login.py" "d:\Work\Project\Python\Shein上品软件\shein_updater.py" "d:\Work\Project\Python\Shein上品软件\shein_mysql.py" "d:\Work\Project\Python\Shein上品软件\shein_sensitive_clean.py" "d:\Work\Project\Python\Shein上品软件\shein_developer_mode.py" "d:\Work\Project\Python\Shein上品软件\shein_supplier_codec.py"
 
 
 pyinstaller --clean SHEIN_Uploader.spec
