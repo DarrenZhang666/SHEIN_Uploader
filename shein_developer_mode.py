@@ -25,6 +25,28 @@ def set_dev_mode(enabled):
     global _developer_mode
     _developer_mode = enabled
 
+def toggle_dev_mode_with_password(parent):
+    """
+    通过密码弹窗切换开发者模式：
+    - 当前关闭：输入正确密码后开启
+    - 当前开启：点击即关闭（无需密码）
+    返回 (ok, enabled, message)
+    """
+    current = bool(is_dev_mode())
+    if current:
+        set_dev_mode(False)
+        return True, False, "开发者模式已关闭"
+    pwd = simpledialog.askstring(
+        "开发者模式",
+        "请输入开发者密码：",
+        show="*",
+        parent=parent
+    )
+    if pwd != _DEV_PASSWORD:
+        return False, False, "密码错误，未开启开发者模式"
+    set_dev_mode(True)
+    return True, True, "开发者模式已开启"
+
 
 # ── GUI 组件 ─────────────────────────────────────────
 class DevModeToggle(tk.Frame):

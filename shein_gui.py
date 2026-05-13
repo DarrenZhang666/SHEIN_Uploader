@@ -8,7 +8,7 @@ import json
 import os
 import sys
 import threading
-from shein_developer_mode import DevModeToggle, is_dev_mode
+from shein_developer_mode import is_dev_mode, toggle_dev_mode_with_password
 from shein_mysql import verify_shein_account_detail
 from shein_checkprice import (
     fetch_shein_pending_bargain_rows,
@@ -179,6 +179,8 @@ class SheinApp(tk.Tk):
         self.amazon_region=tk.StringVar(value="美国")
         self.single_sku_mode=tk.BooleanVar(value=False)
         self.shein_account=tk.StringVar(value="")
+        self._minimal_mode_enabled = True
+        self._auto_publish_after_fetch = False
         self.current_view_mode = "collect_publis1h"  # collect_publish / bargain
         self._fetch_thread=None; self._photo_ref=None
         self._launching_browser = False  # 防止重复点击登录按钮
@@ -684,8 +686,7 @@ class SheinApp(tk.Tk):
 
         self._build_bargain_panel(body)
         self._toggle_main_panels_for_mode()
-        self._dev_toggle = DevModeToggle(self, bg=BG_DARK)
-        self._dev_toggle.place(relx=0.0, rely=1.0, anchor="sw", x=16, y=-6)
+        self._build_simplified_toggle()
         self._license_lbl = tk.Label(
             self,
             text="软件有效期：未验证",
@@ -700,7 +701,9 @@ class SheinApp(tk.Tk):
         bar=tk.Frame(self,bg=BG_PANEL,height=72)
         bar.pack(fill="x"); bar.pack_propagate(False)
         lg=tk.Frame(bar,bg=BG_PANEL); lg.pack(side="left",padx=20)
-        tk.Label(lg,text="SHEIN",font=("Segoe UI",18,"bold"),fg=ACCENT,bg=BG_PANEL).pack(side="left")
+        self._shein_logo_lbl = tk.Label(lg,text="SHEIN",font=("Segoe UI",18,"bold"),fg=ACCENT,bg=BG_PANEL)
+        self._shein_logo_lbl.pack(side="left")
+        self._shein_logo_lbl.bind("<Button-1>", self._on_shein_logo_click)
         mode_wrap = tk.Frame(lg, bg=BG_PANEL)
         mode_wrap.pack(side="left", padx=(12,0))
         self._mode_collect_btn = tk.Button(
@@ -769,6 +772,7 @@ class SheinApp(tk.Tk):
         self._fetch_btn.pack(side="left",padx=5)
         self._publish_btn = self._btn(bf,"开始上品","#7c3aed",self._open_publish_page)
         self._publish_btn.pack(side="left",padx=5)
+        self._fetch_publish_btn = self._btn(bf,"抓取并上品","#7c3aed",self._fetch_and_publish_sel)
         self._suggest_price_btn = self._btn(bf,"抓取SHEIN建议价格","#0ea5a4",self._fetch_shein_suggest_price)
 
         self._shein_login_btn = self._btn(bf,"登录 SHEIN","#059669",self._open_shein)
@@ -791,6 +795,75 @@ class SheinApp(tk.Tk):
         self._apply_view_mode()
         self._toggle_main_panels_for_mode()
 
+    def _build_simplified_toggle(self):
+        self._simplified_toggle_wrap = tk.Frame(self, bg=BG_DARK)
+        self._simplified_toggle_wrap.place(relx=0.0, rely=1.0, anchor="sw", x=16, y=-6)
+        self._simplified_toggle_label = tk.Label(
+            self._simplified_toggle_wrap,
+            text="Simplified: ",
+            font=("Segoe UI", 10),
+            fg="#a0a3b1",
+            bg=BG_DARK,
+            cursor="hand2",
+        )
+        self._simplified_toggle_label.pack(side="left", padx=(0, 4))
+        self._simplified_toggle_canvas = tk.Canvas(
+            self._simplified_toggle_wrap,
+            width=40,
+            height=20,
+            bg=BG_DARK,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self._simplified_toggle_canvas.pack(side="left")
+        self._simplified_toggle_label.bind("<Button-1>", self._toggle_minimal_mode)
+        self._simplified_toggle_canvas.bind("<Button-1>", self._toggle_minimal_mode)
+        self._draw_simplified_toggle()
+
+    def _draw_simplified_toggle(self):
+        cv = getattr(self, "_simplified_toggle_canvas", None)
+        if cv is None:
+            return
+        cv.delete("all")
+        on = bool(getattr(self, "_minimal_mode_enabled", True))
+        track_w, track_h, knob_r, pad = 40, 20, 8, 2
+        track_color = "#4cde96" if on else "#3a3d55"
+        cv.create_oval(0, 0, track_h, track_h, fill=track_color, outline=track_color)
+        cv.create_oval(track_w - track_h, 0, track_w, track_h, fill=track_color, outline=track_color)
+        cv.create_rectangle(track_h // 2, 0, track_w - track_h // 2, track_h, fill=track_color, outline=track_color)
+        knob_x = (track_w - knob_r - pad) if on else (knob_r + pad)
+        knob_y = track_h // 2
+        cv.create_oval(knob_x - knob_r, knob_y - knob_r, knob_x + knob_r, knob_y + knob_r, fill="#ffffff", outline="#ffffff")
+
+    def _toggle_minimal_mode(self, _event=None):
+        self._minimal_mode_enabled = (not bool(getattr(self, "_minimal_mode_enabled", True)))
+        self._draw_simplified_toggle()
+        self._apply_view_mode()
+        self._toggle_main_panels_for_mode()
+
+    def _on_shein_logo_click(self, _event=None):
+        ok, enabled, msg = toggle_dev_mode_with_password(self)
+        if hasattr(self, "status_lbl"):
+            self.status_lbl.config(text=msg)
+        if ok and enabled:
+            self._pub_log("[DEV] 通过 SHEIN 标题点击开启开发者模式")
+        elif ok and (not enabled):
+            self._pub_log("[DEV] 通过 SHEIN 标题点击关闭开发者模式")
+
+    def _fetch_and_publish_sel(self):
+        if self._license_locked:
+            self._show_auth_lock_popup()
+            return
+        if self._publish_running:
+            messagebox.showinfo("提示", "正在上品中，请先等待当前任务完成或点击“停止”")
+            return
+        self._auto_publish_after_fetch = True
+        self._fetch_sel()
+        # 如果本次未触发抓取线程（例如全是已缓存数据），直接进入上品流程
+        if (not self._fetch_thread) and self._auto_publish_after_fetch:
+            self._auto_publish_after_fetch = False
+            self.after(80, self._open_publish_page)
+
     def _apply_view_mode(self):
         if not hasattr(self, "_mode_collect_btn"):
             return
@@ -811,6 +884,8 @@ class SheinApp(tk.Tk):
                 self._fetch_btn.pack_forget()
             if hasattr(self, "_publish_btn"):
                 self._publish_btn.pack_forget()
+            if hasattr(self, "_fetch_publish_btn"):
+                self._fetch_publish_btn.pack_forget()
 
             if hasattr(self, "_suggest_price_btn"):
                 self._suggest_price_btn.pack(side="left", padx=5, before=self._shein_login_btn)
@@ -840,10 +915,20 @@ class SheinApp(tk.Tk):
                 self._stop_btn.pack(side="left", padx=5, before=self._shein_login_btn)
             if hasattr(self, "_import_btn"):
                 self._import_btn.pack(side="left", padx=5, before=self._shein_login_btn)
-            if hasattr(self, "_fetch_btn"):
-                self._fetch_btn.pack(side="left", padx=5, before=self._shein_login_btn)
-            if hasattr(self, "_publish_btn"):
-                self._publish_btn.pack(side="left", padx=5, before=self._shein_login_btn)
+            if bool(getattr(self, "_minimal_mode_enabled", True)):
+                if hasattr(self, "_fetch_btn"):
+                    self._fetch_btn.pack_forget()
+                if hasattr(self, "_publish_btn"):
+                    self._publish_btn.pack_forget()
+                if hasattr(self, "_fetch_publish_btn"):
+                    self._fetch_publish_btn.pack(side="left", padx=5, before=self._shein_login_btn)
+            else:
+                if hasattr(self, "_fetch_publish_btn"):
+                    self._fetch_publish_btn.pack_forget()
+                if hasattr(self, "_fetch_btn"):
+                    self._fetch_btn.pack(side="left", padx=5, before=self._shein_login_btn)
+                if hasattr(self, "_publish_btn"):
+                    self._publish_btn.pack(side="left", padx=5, before=self._shein_login_btn)
 
             if hasattr(self, "status_lbl"):
                 self.status_lbl.config(text="请先导入 ASIN 文件")
@@ -2072,8 +2157,13 @@ class SheinApp(tk.Tk):
                 self.bargain_panel.grid_remove()
             if hasattr(self, "left_panel"):
                 self.left_panel.grid()
-            if hasattr(self, "right_panel"):
-                self.right_panel.grid()
+            # 极简模式默认隐藏商品详情区域，仅保留左侧列表与顶部操作按钮。
+            if bool(getattr(self, "_minimal_mode_enabled", True)):
+                if hasattr(self, "right_panel"):
+                    self.right_panel.grid_remove()
+            else:
+                if hasattr(self, "right_panel"):
+                    self.right_panel.grid()
 
     def _build_left(self,parent):
         left_w = int(getattr(self, "_left_panel_default_width", 320))
@@ -4983,6 +5073,11 @@ return false;
         self.status_lbl.config(text=msg)
         if self.current_asin and self.current_asin in self.product_cache:
             self._show_current_asin_now()
+        if self._auto_publish_after_fetch:
+            self._auto_publish_after_fetch = False
+            if no_price_asins:
+                return
+            self.after(120, self._open_publish_page)
 
     def _show(self,info):
         self._cancel_pending_sku_render()
