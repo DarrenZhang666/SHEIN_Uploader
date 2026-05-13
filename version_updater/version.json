@@ -1,10 +1,10 @@
 {
-  "version": "1.32",
+  "version": "1.33",
   "channel": "stable",
-  "release_date": "2026-05-08",
-  "download_url": "https://sheintool.oss-cn-beijing.aliyuncs.com/SHEIN_Uploader_1.32.zip",
+  "release_date": "2026-05-13",
+  "download_url": "https://sheintool.oss-cn-beijing.aliyuncs.com/SHEIN_Uploader_1.33.zip",
   "sha256": "",
   "force": false,
-  "release_notes": " 1. 增加单一SKU功能 2.优化缓存",
+  "release_notes": " 1. 简化界面",
   "file_size": 12582912
 }
